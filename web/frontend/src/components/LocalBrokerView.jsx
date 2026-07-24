@@ -141,17 +141,21 @@ export default function LocalBrokerView({
   setMetricsWindow,
   onSpillChange,
   onClose,
+  children, // extra provider panels (picker / models / traces) from App
 }) {
   const compatible = localStatus?.compatible === true;
 
   return (
     <div
-      role="dialog"
+      role="region"
       aria-label="Local Broker"
-      className="fixed inset-0 z-50"
+      className="flex-1 min-w-0"
       style={{
+        // In-area view: fills the terminal region only — rail/sidebar/top bar
+        // stay visible, so the rail Cpu icon is the natural way in and out.
         display: "flex",
         flexDirection: "column",
+        minHeight: 0,
         backgroundColor: "var(--cc-bg, var(--bg-primary))",
         color: "var(--cc-fg, var(--text-primary))",
       }}
@@ -204,6 +208,11 @@ export default function LocalBrokerView({
             {localEnabled && compatible && (
               <Card title="Queue & Spill">
                 <LaneQueuePanel queue={localQueue} spillConfig={localSpill} onSpillChange={onSpillChange} />
+              </Card>
+            )}
+            {localEnabled && children && (
+              <Card title="Provider">
+                {children}
               </Card>
             )}
           </div>

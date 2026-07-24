@@ -1568,65 +1568,8 @@ export default function App() {
             localQueue={localQueue}
             localMetrics={localMetrics}
             localStatus={localStatus}
-            onOpenLocalBroker={() => setShowLocalBroker(true)}
+            onOpenLocalBroker={() => { setShowLocalBroker(true); setShowFleetView(false); }}
           />
-
-          {showFleetView && (
-            <FleetView
-              sessions={sessions}
-              usageByTerminal={usageByTerminal}
-              dailyUsage={dailyUsage}
-              workflowsByTerminal={workflowsByTerminal}
-              onClose={() => setShowFleetView(false)}
-            />
-          )}
-
-          {showLocalBroker && (
-            <LocalBrokerView
-              localEnabled={localEnabled}
-              setLocalEnabled={setLocalEnabled}
-              localStatus={localStatus}
-              localQueue={localQueue}
-              localSpill={localSpill}
-              localMetrics={localMetrics}
-              metricsWindow={metricsWindow}
-              setMetricsWindow={setMetricsWindow}
-              onSpillChange={commitSpill}
-              onClose={() => setShowLocalBroker(false)}
-            />
-          )}
-
-          {/* Provider picker + capability-gated models/traces panels — kept
-              as a standalone overlay (rather than inside LocalBrokerView,
-              which is outside this worker's ownership) so provider switching
-              and the new panels are available whenever the Local Broker
-              section is open. Each panel renders nothing when its capability
-              is absent from the selected provider. */}
-          {showLocalBroker && localEnabled && (
-            <div
-              style={{
-                position: "fixed",
-                top: 60,
-                right: 20,
-                zIndex: 60,
-                width: 300,
-                maxHeight: "80vh",
-                overflowY: "auto",
-                background: "var(--cc-surface, var(--bg-elevated))",
-                border: "1px solid var(--cc-border, var(--border-color))",
-                borderRadius: 12,
-                boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
-              }}
-            >
-              <ProviderPicker enabled={localEnabled} onSelect={setSelectedProvider} />
-              {selectedProvider?.capabilities?.includes("models") && (
-                <LocalModelsPanel models={localModels} />
-              )}
-              {selectedProvider?.capabilities?.includes("traces") && (
-                <TracesPanel traces={localTraces} providerId={selectedProvider.id} />
-              )}
-            </div>
-          )}
 
           <div className="flex flex-1 min-h-0">
             <ActivityRail
@@ -1634,7 +1577,7 @@ export default function App() {
               sidebarOpen={sidebarOpen}
               onToggleSidebar={() => setSidebarOpen((p) => !p)}
               showFleetView={showFleetView}
-              onToggleFleet={() => setShowFleetView((v) => !v)}
+              onToggleFleet={() => { setShowFleetView((v) => !v); setShowLocalBroker(false); }}
               onSearch={() => {
                 setSidebarOpen(true);
                 // Focus the sidebar filter input if the Sidebar exposes one.
@@ -1646,7 +1589,7 @@ export default function App() {
               broadcastMode={broadcastMode}
               onToggleBroadcast={() => setBroadcastMode((p) => !p)}
               showLocalBroker={showLocalBroker}
-              onToggleLocalBroker={() => setShowLocalBroker((v) => !v)}
+              onToggleLocalBroker={() => { setShowLocalBroker((v) => !v); setShowFleetView(false); }}
             />
             {sidebarOpen && (
               <div
@@ -1734,11 +1677,49 @@ export default function App() {
               </div>
             )}
 
-            {/* Pane grid — always mounted, terminals never unmount */}
+            {/* Full-area views render IN the content area — the rail, sidebar,
+                and top bar stay visible so navigation never disappears. The
+                rail icons are the way in AND out (toggles, mutually exclusive). */}
+            {showFleetView && (
+              <FleetView
+                sessions={sessions}
+                usageByTerminal={usageByTerminal}
+                dailyUsage={dailyUsage}
+                workflowsByTerminal={workflowsByTerminal}
+                onClose={() => setShowFleetView(false)}
+              />
+            )}
+            {showLocalBroker && (
+              <LocalBrokerView
+                localEnabled={localEnabled}
+                setLocalEnabled={setLocalEnabled}
+                localStatus={localStatus}
+                localQueue={localQueue}
+                localSpill={localSpill}
+                localMetrics={localMetrics}
+                metricsWindow={metricsWindow}
+                setMetricsWindow={setMetricsWindow}
+                onSpillChange={commitSpill}
+                onClose={() => setShowLocalBroker(false)}
+              >
+                {/* Provider panels render inside the view's Provider card —
+                    each renders nothing when its capability is absent. */}
+                <ProviderPicker enabled={localEnabled} onSelect={setSelectedProvider} />
+                {selectedProvider?.capabilities?.includes("models") && (
+                  <LocalModelsPanel models={localModels} />
+                )}
+                {selectedProvider?.capabilities?.includes("traces") && (
+                  <TracesPanel traces={localTraces} providerId={selectedProvider.id} />
+                )}
+              </LocalBrokerView>
+            )}
+
+            {/* Pane grid — always mounted, terminals never unmount. Hidden
+                (NOT unmounted — xterm/WS must survive) while a view is open. */}
             <main
               className="flex-1 min-w-0"
               style={{
-                display: "grid",
+                display: showFleetView || showLocalBroker ? "none" : "grid",
                 gridTemplateColumns: gridLayout.cols,
                 gridTemplateRows: gridLayout.rows,
                 gap: 14,

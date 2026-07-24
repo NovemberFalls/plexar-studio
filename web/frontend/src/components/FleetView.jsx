@@ -426,12 +426,15 @@ export default function FleetView({
 
   return (
     <div
-      role="dialog"
+      role="region"
       aria-label="Fleet view"
-      className="fixed inset-0 z-50"
+      className="flex-1 min-w-0"
       style={{
+        // In-area view: fills the terminal region only — rail/sidebar/top bar
+        // stay visible, so the rail icon is the natural way in and out.
         display: "flex",
         flexDirection: "column",
+        minHeight: 0,
         backgroundColor: "var(--cc-bg, var(--bg-primary))",
         color: "var(--cc-fg, var(--text-primary))",
       }}
