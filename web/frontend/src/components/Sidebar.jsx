@@ -459,6 +459,7 @@ export default function Sidebar({
             >
               <Search size={12} style={{ color: "var(--cc-muted)", flexShrink: 0 }} />
               <input
+                data-sidebar-filter
                 className="w-full text-xs bg-transparent min-w-0"
                 style={{ color: "var(--cc-fg)", outline: "none", border: "none" }}
                 placeholder="Filter sessions…"

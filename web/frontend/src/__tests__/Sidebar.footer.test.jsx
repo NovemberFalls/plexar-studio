@@ -66,3 +66,27 @@ describe("Sidebar — resources footer external links", () => {
     });
   });
 });
+
+describe("Sidebar — session filter focus target", () => {
+  it("filter input carries data-sidebar-filter (the rail Search button focuses it)", () => {
+    // The filter box only renders when at least one session exists.
+    render(
+      <Sidebar
+        sessions={[{ id: "s1", name: "Session 1", terminalId: "t1", model: "opus", status: "running", workdir: "C:/proj" }]}
+        activeIds={["s1"]}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+        onNewAt={vi.fn()}
+        onDelete={vi.fn()}
+        open={true}
+        savedLocations={[]}
+        onAddLocations={vi.fn()}
+        onRemoveLocation={vi.fn()}
+        onToggleLocationBypass={vi.fn()}
+      />
+    );
+    // Regression: the rail's magnifying-glass button focuses this selector;
+    // without the attribute the button silently does nothing.
+    expect(document.querySelector("[data-sidebar-filter]")).not.toBeNull();
+  });
+});
