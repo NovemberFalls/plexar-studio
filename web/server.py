@@ -2066,8 +2066,10 @@ def _mgmt_get(provider: dict, path: str) -> dict:
 # actually listening at the configured URL so the UI can say "that's LM Studio,
 # not the lane broker" instead of rendering dashes.
 
-_QUEUE_SHAPE_KEYS = ("in_flight", "inflight", "current", "queued", "queue",
-                     "estimated_clear_seconds", "spill", "spill_count")
+# Pinned from broker source (broker.py::_queue_state, confirmed 2026-07-24):
+# top level = shadow · in_flight (object|null) · queued (array) ·
+# estimated_clear_seconds. Spill counters live on /config/spill, NOT here.
+_QUEUE_SHAPE_KEYS = ("shadow", "in_flight", "queued", "estimated_clear_seconds")
 _METRICS_SHAPE_KEYS = ("runs_total", "prompts_total", "tokens_total", "tokens_per_sec")
 _SPILL_SHAPE_KEYS = ("spill_thresholds_s", "spilled_total", "spilled_by_class")
 

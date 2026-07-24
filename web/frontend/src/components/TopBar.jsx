@@ -6,12 +6,11 @@ import { PanelLeft, ChevronDown, KeyRound, Cpu } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 
-/** Queue depth = in-flight (0/1) + queued length, defensive over broker field names. */
+/** Queue depth = in-flight (0/1) + queued length. Field names pinned from
+ * broker source (broker.py::_queue_state): in_flight (object|null), queued []. */
 function queueDepth(q) {
   if (!q || q.reachable === false) return null;
-  const inFlight = q.in_flight ?? q.inflight ?? q.current ?? null;
-  const queued = q.queued ?? q.queue ?? [];
-  return (inFlight ? 1 : 0) + (Array.isArray(queued) ? queued.length : 0);
+  return (q.in_flight ? 1 : 0) + (Array.isArray(q.queued) ? q.queued.length : 0);
 }
 
 export const MODEL_GROUPS = [

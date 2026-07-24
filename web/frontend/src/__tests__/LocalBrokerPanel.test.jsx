@@ -19,14 +19,15 @@ import LaneQueuePanel from "../components/LaneQueuePanel.jsx";
 import LocalMetricsPanel from "../components/LocalMetricsPanel.jsx";
 import LocalBrokerView from "../components/LocalBrokerView.jsx";
 
+// Pinned /queue shape (broker.py::_queue_state, confirmed 2026-07-24).
 const QUEUE = {
-  in_flight: { id: "abc1234567890", class: "workhorse" },
+  shadow: true,
+  in_flight: { class: "workhorse", elapsed_s: 12.5, predicted_remaining_s: 30.2, model: "qwen/qwen3.6-27b", client_id: "bench-1" },
   queued: [
-    { id: "q1", class: "mundane" },
-    { id: "q2", class: "workhorse" },
+    { class: "mundane", position: 0, predicted_wall_s: 45.0, waiting_s: 5.1, model: "qwen/qwen3.6-27b", client_id: "bench-2" },
+    { class: "workhorse", position: 1, predicted_wall_s: 90.0, waiting_s: 2.0, model: "qwen/qwen3.6-27b", client_id: "bench-3" },
   ],
-  estimated_clear_seconds: 42,
-  spill: 3,
+  estimated_clear_seconds: 42.0,
 };
 
 const SPILL = {
@@ -51,12 +52,15 @@ const METRICS = {
 };
 
 describe("LaneQueuePanel", () => {
-  it("renders in-flight + queued jobs and spill count", () => {
-    render(<LaneQueuePanel queue={QUEUE} />);
+  it("renders in-flight + queued jobs with pinned field names", () => {
+    render(<LaneQueuePanel queue={QUEUE} spillConfig={SPILL} onSpillChange={() => {}} />);
     expect(screen.getAllByText(/workhorse/).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText(/spill: 3/)).toBeInTheDocument();
-    expect(screen.getByText(/queued: 2/)).toBeInTheDocument();
+    // spilled counter comes from /config/spill (spilled_total), not /queue
+    expect(screen.getByText(/spilled: 5/)).toBeInTheDocument();
+    expect(screen.getByText(/queued: 2 · shadow mode/)).toBeInTheDocument();
     expect(screen.getByText(/clears ~42s/)).toBeInTheDocument();
+    // in-flight row shows elapsed + predicted remaining from pinned fields
+    expect(screen.getByText(/13s in · ~30s left/)).toBeInTheDocument();
   });
 
   it("shows offline message when queue is null", () => {

@@ -37,11 +37,14 @@ def client():
 
 @pytest.mark.asyncio
 async def test_queue_proxies_broker_json(client, monkeypatch):
+    # Pinned /queue shape (broker.py::_queue_state).
     payload = {
-        "in_flight": {"id": "abc123", "class": "workhorse"},
-        "queued": [{"id": "def456", "class": "mundane"}],
-        "estimated_clear_seconds": 42,
-        "spill": 0,
+        "shadow": True,
+        "in_flight": {"class": "workhorse", "elapsed_s": 1.0, "predicted_remaining_s": 9.0,
+                      "model": "qwen/qwen3.6-27b", "client_id": "c1"},
+        "queued": [{"class": "mundane", "position": 0, "predicted_wall_s": 12.0,
+                    "waiting_s": 0.5, "model": "qwen/qwen3.6-27b", "client_id": "c2"}],
+        "estimated_clear_seconds": 42.0,
     }
 
     def fake_get(path, query="", base_url=None):

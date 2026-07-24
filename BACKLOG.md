@@ -9,15 +9,17 @@ metrics panels and per-class spill control, all against the confirmed broker
 contract. Everything below is *not yet done*.
 
 ### Ship / release
-- [ ] **Verify against a LIVE broker at `127.0.0.1:1235`.** First live test
-  (2026-07-24) hit **LM Studio directly, not the broker** — its dev server
-  answered `/metrics` + `/config/spill` with "200 anyway" garbage. That led to
-  the identity middleware (`/api/local/status`, shape validation → 502). Still
-  outstanding: a real end-to-end run against the actual lane-broker process.
-- [ ] **Confirm the `/queue` field shape.** The panel reads defensively across
-  `in_flight|inflight|current`, `queued|queue`, `spill|spill_count` because the
-  broker's exact `/queue` JSON keys were never pinned. Once live, lock to the real
-  names and drop the guesses.
+- [x] **Verify against a LIVE broker** — done 2026-07-24: identity green
+  (`lane-broker` via /queue shape), queue/spill/metrics all answering through
+  the cockpit proxy. (First attempt hit LM Studio directly → spawned the
+  identity middleware. Broker now runs detached + Startup-folder supervised,
+  broker-team side.)
+- [x] **`/queue` field shape pinned** (broker.py::_queue_state, 2026-07-24):
+  `{shadow, in_flight: {class, elapsed_s, predicted_remaining_s, model,
+  client_id} | null, queued: [{class, position, predicted_wall_s, waiting_s,
+  model, client_id}], estimated_clear_seconds}`. Defensive alias-guessing
+  removed; spill counters read from `/config/spill` (`spilled_total`), not
+  `/queue`.
 - [ ] **Vitest cache corruption after Tauri/PyInstaller builds** (seen twice):
   full suite dies with bogus `expect is not defined` / only ~73 tests collected.
   Fix is `rm -rf node_modules/.vite` — consider automating in the build skill.

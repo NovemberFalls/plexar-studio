@@ -83,28 +83,14 @@ function SpillRow({ cls, valueS, spilled, onCommit }) {
   );
 }
 
-/** Read the in-flight job from any of the broker's plausible field names. */
-function readInFlight(q) {
-  return q?.in_flight ?? q?.inflight ?? q?.current ?? null;
-}
+// /queue field names are PINNED from broker source (broker.py::_queue_state):
+// {shadow, in_flight: {class, elapsed_s, predicted_remaining_s, model,
+// client_id} | null, queued: [{class, position, predicted_wall_s, waiting_s,
+// model, client_id}], estimated_clear_seconds}. No guessing, no aliases.
+// Spill counters are NOT here — they live on /config/spill.
 
-/** Read the queued list (in order) from any of the broker's plausible field names. */
-function readQueued(q) {
-  const v = q?.queued ?? q?.queue ?? [];
-  return Array.isArray(v) ? v : [];
-}
-
-/** Read the spill count from any of the broker's plausible field names. */
-function readSpill(q) {
-  return q?.spill ?? q?.spill_count ?? 0;
-}
-
-function jobLabel(job) {
-  if (!job) return null;
-  const cls = job.class ?? job.lane_class ?? job.lane ?? "";
-  const id = job.id ?? job.trace_id ?? job.job_id ?? "";
-  const shortId = typeof id === "string" && id.length > 10 ? id.slice(0, 10) + "…" : id;
-  return { cls: String(cls || "—"), id: String(shortId || "") };
+function fmtS(v) {
+  return typeof v === "number" ? `${Math.round(v)}s` : "";
 }
 
 function Row({ dotColor, primary, secondary }) {
@@ -148,9 +134,9 @@ export default function LaneQueuePanel({ queue, spillConfig, onSpillChange }) {
     );
   }
 
-  const inFlight = jobLabel(readInFlight(queue));
-  const queued = readQueued(queue);
-  const spill = readSpill(queue);
+  const inFlight = queue.in_flight || null;
+  const queued = Array.isArray(queue.queued) ? queue.queued : [];
+  const spilledTotal = spillConfig && spillConfig.reachable !== false ? spillConfig.spilled_total ?? 0 : null;
   const clearSec = queue.estimated_clear_seconds;
 
   return (
@@ -166,7 +152,15 @@ export default function LaneQueuePanel({ queue, spillConfig, onSpillChange }) {
       </div>
 
       {inFlight ? (
-        <Row dotColor="var(--accent)" primary={`▶ ${inFlight.cls}`} secondary={inFlight.id || "in flight"} />
+        <Row
+          dotColor="var(--accent)"
+          primary={`▶ ${inFlight.class || "—"}${inFlight.model ? ` · ${inFlight.model}` : ""}`}
+          secondary={
+            typeof inFlight.predicted_remaining_s === "number"
+              ? `${fmtS(inFlight.elapsed_s)} in · ~${fmtS(inFlight.predicted_remaining_s)} left`
+              : fmtS(inFlight.elapsed_s)
+          }
+        />
       ) : (
         <Row dotColor="var(--text-muted)" primary="idle — no job in flight" />
       )}
@@ -176,17 +170,18 @@ export default function LaneQueuePanel({ queue, spillConfig, onSpillChange }) {
           nothing queued
         </div>
       ) : (
-        queued.map((job, i) => {
-          const j = jobLabel(job);
-          return (
-            <Row
-              key={j.id || i}
-              dotColor="var(--text-secondary)"
-              primary={`${i + 1}. ${j.cls}`}
-              secondary={j.id}
-            />
-          );
-        })
+        queued.map((job) => (
+          <Row
+            key={`${job.position}-${job.client_id || ""}`}
+            dotColor="var(--text-secondary)"
+            primary={`${(job.position ?? 0) + 1}. ${job.class || "—"}${job.model ? ` · ${job.model}` : ""}`}
+            secondary={
+              typeof job.predicted_wall_s === "number"
+                ? `waiting ${fmtS(job.waiting_s)} · ~${fmtS(job.predicted_wall_s)} wall`
+                : fmtS(job.waiting_s)
+            }
+          />
+        ))
       )}
 
       <div
@@ -200,8 +195,8 @@ export default function LaneQueuePanel({ queue, spillConfig, onSpillChange }) {
           color: "var(--text-secondary)",
         }}
       >
-        <span>queued: {queued.length}</span>
-        <span>spill: {spill}</span>
+        <span>queued: {queued.length}{queue.shadow ? " · shadow mode" : ""}</span>
+        {spilledTotal != null && <span>spilled: {spilledTotal}</span>}
       </div>
 
       {/* Spill thresholds — per lane class, in SECONDS of predicted wait.
