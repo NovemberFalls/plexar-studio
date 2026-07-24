@@ -155,6 +155,10 @@ Cockpit surfaces a **machine-global** (not per-session) view of one or more loca
 
 **Spill = seconds of predicted wait per lane class** (`interactive` / `worker` / `batch`), NOT queue depth. Body is a partial `{class: seconds|null}` map (`null` disables spill); validated all-or-nothing (unknown class or value outside `0..86400` → 400, nothing forwarded). Changes are **session-only on the broker** (`persisted: false`) — resets to CLI defaults on broker restart, fully reversible. This is the *only* write on local services.
 
+### Managed lane broker (Cockpit owns the broker)
+
+The broker is **vendored** at `web/lane_broker/` (pure stdlib, from the broker-team repo — keep byte-close to upstream; sync via the broker team). At startup, `start_managed_broker()` runs it **in-process as an asyncio task** on Cockpit's own loop (no subprocess → works inside the PyInstaller sidecar; pinned in `cockpit-server.spec` `hiddenimports` because the import is lazy). **Double-bind guard:** if anything already answers at the broker URL, external wins and Cockpit only proxies. Env knobs: `COCKPIT_MANAGED_BROKER` (default `1`), `COCKPIT_BROKER_SHADOW` (default `1` = observe+log only), `COCKPIT_LMSTUDIO_URL` (upstream, default `:1234`). State lives at `~/.claude-cockpit/lane-broker/jobs.jsonl` (survives reinstall). `GET /api/local/status` carries `managed: bool`; the Connection card shows "managed by Cockpit" vs "external process". Broker failure never blocks Cockpit startup; shutdown cancels the task.
+
 ### Service identity middleware
 
 LM Studio's dev server answers unknown paths with **"200 anyway" + an error body**, so shape validation is required. Every proxy response is validated against the broker contract (`_looks_like` + shape keys); a wrong-shaped 200 returns `502 {reachable: true, compatible: false}`. A spill PUT echo that isn't spill-shaped means **the write did not take**. `GET /api/local/status` fingerprints what is actually listening and caches 30s; the drawer shows the identity line and hides panels when incompatible.

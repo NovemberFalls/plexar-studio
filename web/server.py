@@ -121,6 +121,14 @@ async def lifespan(app: FastAPI):
     # frontend polling.  The bridge idle gate depends on this for correctness.
     pty_manager.start_state_ticker()
 
+    # 5. Managed lane broker: Cockpit owns the broker unless an external one
+    # already answers (or COCKPIT_MANAGED_BROKER=0). Best-effort — a broker
+    # failure must never block Cockpit startup.
+    try:
+        await start_managed_broker()
+    except Exception:
+        logger.error("Managed broker startup failed", exc_info=True)
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
     yield
@@ -147,6 +155,9 @@ async def lifespan(app: FastAPI):
 
     # Stop the background state ticker
     await pty_manager.stop_state_ticker()
+
+    # Stop the managed lane broker (no-op when external/disabled)
+    await stop_managed_broker()
 
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
@@ -2127,11 +2138,89 @@ def _cached_detect() -> dict:
     return _detect_cache["result"]
 
 
+# ── Managed lane broker (vendored: web/lane_broker/) ─────
+#
+# Cockpit OWNS the broker: at startup, if nothing is already answering at the
+# broker URL, the vendored broker runs in-process as an asyncio task (pure
+# stdlib — no subprocess, so it works inside the PyInstaller sidecar). If an
+# external broker is already listening (e.g. a dev instance), external wins
+# and Cockpit only proxies — never a double-bind.
+_MANAGED_BROKER = {"task": None}
+
+
+def _broker_port() -> int:
+    try:
+        return int(_LOCAL_BROKER_URL.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return 1235
+
+
+async def start_managed_broker() -> bool:
+    """Start the in-process broker unless disabled or an external one answers.
+
+    Returns True when Cockpit's own broker task is running.
+    """
+    if os.getenv("COCKPIT_MANAGED_BROKER", "1") != "1":
+        return False
+    if _MANAGED_BROKER["task"] is not None and not _MANAGED_BROKER["task"].done():
+        return True
+    try:
+        await asyncio.to_thread(_broker_get, "/queue")
+        logger.info("External lane broker already at %s — not spawning managed one", _LOCAL_BROKER_URL)
+        return False
+    except Exception:
+        pass  # nothing listening — ours to run
+
+    from types import SimpleNamespace
+    from lane_broker.broker import amain as broker_amain
+
+    state_dir = os.path.join(os.path.expanduser("~"), ".claude-cockpit", "lane-broker")
+    os.makedirs(state_dir, exist_ok=True)
+    args = SimpleNamespace(
+        port=_broker_port(),
+        upstream=os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234"),
+        # Shadow (observe+log, no queueing) is the safe default — same posture
+        # the broker team runs; flip with COCKPIT_BROKER_SHADOW=0.
+        shadow=os.getenv("COCKPIT_BROKER_SHADOW", "1") == "1",
+        log_file=os.path.join(state_dir, "jobs.jsonl"),
+        spill_interactive=30.0,
+        spill_worker=300.0,
+    )
+
+    async def _run():
+        try:
+            await broker_amain(args)
+        except asyncio.CancelledError:
+            raise
+        except OSError:
+            # Port grabbed between probe and bind — external broker wins.
+            logger.info("Managed broker could not bind %s (external instance?)", _LOCAL_BROKER_URL)
+        except Exception:
+            logger.error("Managed lane broker crashed", exc_info=True)
+
+    _MANAGED_BROKER["task"] = asyncio.create_task(_run())
+    logger.info("Managed lane broker starting on %s (shadow=%s, log=%s)",
+                _LOCAL_BROKER_URL, args.shadow, args.log_file)
+    return True
+
+
+async def stop_managed_broker() -> None:
+    task = _MANAGED_BROKER["task"]
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    _MANAGED_BROKER["task"] = None
+
+
 @app.get("/api/local/status")
 async def get_local_status():
     """Report what is actually connected at the configured broker URL."""
     result = await asyncio.to_thread(_cached_detect)
-    return JSONResponse({**result, "url": _LOCAL_BROKER_URL})
+    managed = _MANAGED_BROKER["task"] is not None and not _MANAGED_BROKER["task"].done()
+    return JSONResponse({**result, "url": _LOCAL_BROKER_URL, "managed": managed})
 
 
 # ── Provider-keyed local routes ───────────────────────────

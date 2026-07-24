@@ -19,6 +19,10 @@ a = Analysis(
         (frontend_dist, 'frontend_dist'),
     ],
     hiddenimports=[
+        # Vendored lane broker — imported lazily inside start_managed_broker,
+        # so it must be pinned here or the sidecar ships without it.
+        'lane_broker',
+        'lane_broker.broker',
         'uvicorn',
         'uvicorn.logging',
         'uvicorn.loops',

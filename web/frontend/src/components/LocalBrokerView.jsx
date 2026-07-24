@@ -93,6 +93,7 @@ function ConnectionCard({ localEnabled, setLocalEnabled, status }) {
               {status?.url && (
                 <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
                   {status.url}
+                  {status.managed ? " · managed by Cockpit" : status.compatible ? " · external process" : ""}
                   {status.detail ? ` · ${status.detail}` : ""}
                 </div>
               )}

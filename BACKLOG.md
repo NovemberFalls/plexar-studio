@@ -23,8 +23,14 @@ contract. Everything below is *not yet done*.
 - [ ] **Vitest cache corruption after Tauri/PyInstaller builds** (seen twice):
   full suite dies with bogus `expect is not defined` / only ~73 tests collected.
   Fix is `rm -rf node_modules/.vite` — consider automating in the build skill.
-- [ ] **Rebuild the desktop installer** — the last build predates both branch
-  commits, so the installed app can't exercise the spill sliders.
+- [x] **Port the broker INTO Cockpit** (owner decision 2026-07-24): vendored at
+  `web/lane_broker/`, runs in-process at startup unless an external broker
+  answers (double-bind guard) or `COCKPIT_MANAGED_BROKER=0`. Shadow mode
+  default; state at `~/.claude-cockpit/lane-broker/`. Spec hiddenimports
+  pinned. Once installed, the team-repo Startup-folder launcher becomes
+  redundant on this machine (remove it or keep it — external wins either way).
+- [ ] **Rebuild the desktop installer as v1.4.1** — deliberately deferred until
+  the managed-broker port (above) landed; now unblocked. Bump version first.
 - [ ] **Open PR** for `feat/local-broker-panel` → `master`.
 - [ ] **Version bump** to 1.4.1+ before shipping. Same-version respins never
   trigger the auto-updater (see the v1.3.9 lesson).
