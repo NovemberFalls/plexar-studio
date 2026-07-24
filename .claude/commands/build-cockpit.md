@@ -35,7 +35,13 @@ Build the full Claude Cockpit desktop app (Tauri + PyInstaller sidecar) locally.
    ```
    Note: Tauri does NOT generate `latest.json`. That's handled by `/push-cockpit` when uploading to GitHub Releases.
 
-6. **Notify user** — "Build complete. Artifacts ready at `C:\Code\Personal\claude-cockpit\releases\`."
+6. **Clear the vite cache** (heavy Tauri/PyInstaller builds corrupt it — the next
+   vitest run then dies with a bogus `expect is not defined` cascade at ~73 tests):
+   ```
+   rm -rf /c/Code/Personal/claude-cockpit/web/frontend/node_modules/.vite
+   ```
+
+7. **Notify user** — "Build complete. Artifacts ready at `C:\Code\Personal\claude-cockpit\releases\`."
 
 ## Important
 

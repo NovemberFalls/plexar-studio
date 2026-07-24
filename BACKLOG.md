@@ -20,22 +20,24 @@ contract. Everything below is *not yet done*.
   model, client_id}], estimated_clear_seconds}`. Defensive alias-guessing
   removed; spill counters read from `/config/spill` (`spilled_total`), not
   `/queue`.
-- [ ] **Vitest cache corruption after Tauri/PyInstaller builds** (seen twice):
-  full suite dies with bogus `expect is not defined` / only ~73 tests collected.
-  Fix is `rm -rf node_modules/.vite` — consider automating in the build skill.
+- [x] **Vitest cache corruption after Tauri/PyInstaller builds** — automated:
+  `/build-cockpit` (step 6) now clears `node_modules/.vite` after every build.
 - [x] **Port the broker INTO Cockpit** (owner decision 2026-07-24): vendored at
   `web/lane_broker/`, runs in-process at startup unless an external broker
   answers (double-bind guard) or `COCKPIT_MANAGED_BROKER=0`. Shadow mode
   default; state at `~/.claude-cockpit/lane-broker/`. Spec hiddenimports
   pinned. Once installed, the team-repo Startup-folder launcher becomes
   redundant on this machine (remove it or keep it — external wins either way).
-- [ ] **Rebuild the desktop installer as v1.4.1** — deliberately deferred until
-  the managed-broker port (above) landed; now unblocked. Bump version first.
-- [ ] **Open PR** for `feat/local-broker-panel` → `master`.
-- [ ] **Version bump** to 1.4.1+ before shipping. Same-version respins never
-  trigger the auto-updater (see the v1.3.9 lesson).
+- [x] **v1.4.1 built** (2026-07-24, commit `c27f850`): version bumped
+  (package.json is the single source; tauri.conf.json inherits), signed
+  installer + updater zip in `releases/` and Downloads. Self-contained —
+  managed broker verified present in the sidecar bundle. NOT yet published
+  to GitHub Releases (no latest.json) — that's `/push-cockpit`.
+- [ ] **Publish**: merge/PR `feat/local-broker-panel` → `master`, then
+  `/push-cockpit` (builds latest.json, uploads to GitHub Releases so the
+  auto-updater sees 1.4.1).
 - [ ] **Update the top-level `README.md`** — this feature is documented in
-  `CLAUDE.md` but has no user-facing README section yet.
+  `CLAUDE.md` but has no user-facing README section yet. Do before/with publish.
 
 ### Foundation / follow-ups
 - [x] **Provider registry.** Module-level `_PROVIDERS` + optional
@@ -58,7 +60,11 @@ contract. Everything below is *not yet done*.
 - [ ] (Optional) **FleetView integration** — surface local queue depth / tps
   alongside the per-session usage tiles.
 
-### Broker-side (owned by broker team, tracked here for the handoff)
+### Team-side (no Cockpit work — panels populate automatically when these land)
 - [x] Spill-control endpoint (`PUT /config/spill`) — shipped; Cockpit wired.
-- [ ] Nothing outstanding on Cockpit's behalf. `/queue` key names (above) are the
-  only open contract question.
+- [x] `/queue` contract pinned; broker supervised; lane-broker branch merged to
+  team master (upstream source of truth for the vendored copy).
+- [ ] Client tagging: `X-Client-Id`/`X-Agent-Id`/`X-Trace-Id` +
+  `stream_options.include_usage` on bench/swarm clients, and the
+  `local-lanes.json` endpoint flip to `:1235`. Until then: traces empty,
+  tokens "not reported" — data absence, not a bug.
