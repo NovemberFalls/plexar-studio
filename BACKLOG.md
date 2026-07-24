@@ -44,10 +44,10 @@ contract. Everything below is *not yet done*.
   rail/sidebar/top bar stay visible, rail icons toggle in/out (commit 8a7cf34).
 - [x] Rail Search (magnifying glass) was dead — missing `data-sidebar-filter`
   attr; fixed + regression test (commit b783018).
-- [ ] **Broadcast button — owner decision pending:** capability = type once,
-  send to all visible running sessions. Options: (1) label it clearly,
-  (2) move into FleetView as "message all sessions", (3) remove. Owner has
-  asked "what is this" twice — status quo is not an option.
+- [x] **Broadcast removed** (owner decision 2026-07-24: "I don't think we will
+  ever do that"). Rail button, StatusBar toggle, input bar, Ctrl+Shift+Enter
+  binding, and sendBroadcast all deleted. The Bridge/Channel features remain
+  the multi-session coordination tools.
 - [ ] **Fresh installer after QA sweep concludes** — commits 8a7cf34/b783018
   and whatever the Broadcast decision produces are newer than the last build
   in Downloads (`_in-area-nav` has 8a7cf34 but not b783018).

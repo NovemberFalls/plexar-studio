@@ -190,8 +190,6 @@ export default function App() {
   const [recentLocations, setRecentLocations] = useState(() => lsLoad(RECENTS_KEY));
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [gitStatuses, setGitStatuses] = useState({});
-  const [broadcastMode, setBroadcastMode] = useState(false);
-  const [broadcastText, setBroadcastText] = useState("");
   const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
   const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
   const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
@@ -1354,28 +1352,6 @@ export default function App() {
     });
   }, []);
 
-  // Sessions currently occupying visible slots (used for broadcast, etc.)
-  const visibleSessions = useMemo(() => {
-    return activeIds
-      .slice(0, layout)
-      .filter((id) => id != null)
-      .map((id) => sessions.find((s) => s.id === id))
-      .filter(Boolean);
-  }, [activeIds, layout, sessions]);
-
-  const sendBroadcast = useCallback(async (text) => {
-    const targets = visibleSessions.filter((s) => s.status === "running" && s.terminalId);
-    await Promise.all(
-      targets.map((s) =>
-        fetch(`/api/terminals/${s.terminalId}/input`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: text + "\n" }),
-        }).catch(() => {})
-      )
-    );
-  }, [visibleSessions]);
-
   /** Apply a zoom level: persist, show toast, update state */
   const applyZoom = useCallback((value) => {
     setTerminalZoom(value);
@@ -1443,10 +1419,6 @@ export default function App() {
           e.preventDefault();
           paneRefs.current[i]?.focus();
         }
-      }
-      if (e.ctrlKey && e.shiftKey && e.key === "Enter") {
-        e.preventDefault();
-        setBroadcastMode((p) => !p);
       }
       // Zoom: Ctrl+= / Ctrl+- / Ctrl+0
       if (e.ctrlKey && !e.shiftKey && (e.key === "=" || e.key === "+")) {
@@ -1586,8 +1558,6 @@ export default function App() {
                   if (el) el.focus();
                 });
               }}
-              broadcastMode={broadcastMode}
-              onToggleBroadcast={() => setBroadcastMode((p) => !p)}
               showLocalBroker={showLocalBroker}
               onToggleLocalBroker={() => { setShowLocalBroker((v) => !v); setShowFleetView(false); }}
             />
@@ -1629,51 +1599,6 @@ export default function App() {
                   }}
                   className="hover-bg-surface"
                 />
-              </div>
-            )}
-
-            {/* Broadcast input bar (local mode only) */}
-            {broadcastMode && (
-              <div
-                className="flex items-center gap-2 px-4 h-10 flex-shrink-0"
-                style={{
-                  borderBottom: "1px solid var(--border-color)",
-                  backgroundColor: "rgba(234, 179, 8, 0.05)",
-                }}
-              >
-                <span className="text-xs font-medium" style={{ color: "var(--yellow)" }}>
-                  BROADCAST
-                </span>
-                <input
-                  autoFocus
-                  className="flex-1 text-sm px-2 py-1 rounded"
-                  style={{
-                    backgroundColor: "var(--bg-surface)",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border-color)",
-                    outline: "none",
-                  }}
-                  placeholder="Type command and press Enter to send to all visible sessions..."
-                  value={broadcastText}
-                  onChange={(e) => setBroadcastText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && broadcastText.trim()) {
-                      sendBroadcast(broadcastText.trim());
-                      setBroadcastText("");
-                    }
-                    if (e.key === "Escape") {
-                      setBroadcastMode(false);
-                      setBroadcastText("");
-                    }
-                  }}
-                />
-                <button
-                  onClick={() => { setBroadcastMode(false); setBroadcastText(""); }}
-                  className="text-xs px-2 py-1 rounded"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  Esc
-                </button>
               </div>
             )}
 
@@ -1980,8 +1905,6 @@ export default function App() {
             setFlipLayout={setFlipLayout}
             sessions={sessions}
             connected={sessions.some((s) => s.status === "running")}
-            broadcastMode={broadcastMode}
-            setBroadcastMode={setBroadcastMode}
             terminalZoom={terminalZoom}
             onZoomIn={zoomIn}
             onZoomOut={zoomOut}

@@ -1,4 +1,4 @@
-import { Info, Radio, Minus, Plus, FlipHorizontal2 } from "lucide-react";
+import { Info, Minus, Plus, FlipHorizontal2 } from "lucide-react";
 import { version } from "../../package.json";
 
 const GLOW_LEGEND = [
@@ -17,8 +17,6 @@ export default function StatusBar({
   setFlipLayout,
   sessions,
   connected,
-  broadcastMode,
-  setBroadcastMode,
   terminalZoom = 13,
   onZoomIn,
   onZoomOut,
@@ -91,17 +89,6 @@ export default function StatusBar({
           style={{ color: "var(--cc-muted, var(--text-muted))" }}
         >
           <Info size={14} />
-        </button>
-
-        {/* Broadcast toggle */}
-        <button
-          data-tour="broadcast-btn"
-          onClick={() => setBroadcastMode?.(!broadcastMode)}
-          title="Broadcast mode (Ctrl+Shift+Enter)"
-          className="flex p-1 rounded transition-colors"
-          style={{ color: broadcastMode ? "var(--cc-waiting, var(--yellow))" : "var(--cc-muted, var(--text-muted))" }}
-        >
-          <Radio size={14} />
         </button>
 
         {/* Zoom stepper */}

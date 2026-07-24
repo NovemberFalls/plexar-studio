@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, List, LayoutGrid, Search, Radio, Settings, Cpu } from "lucide-react";
+import { Plus, List, LayoutGrid, Search, Settings, Cpu } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
 const ACCENT_PRESETS = ["#4ea1e8", "#5bbf9f", "#e0b060", "#c497d6"];
@@ -176,7 +176,7 @@ function RailButton({ icon: Icon, label, active, accentFill, onClick }) {
 /**
  * 48px vertical activity rail. Buttons reuse existing App handlers:
  * new session, toggle sidebar, fleet, search (focus sidebar filter),
- * broadcast mode, and a bottom settings/theme popover.
+ * and a bottom settings/theme popover.
  */
 export default function ActivityRail({
   onNew,
@@ -185,8 +185,6 @@ export default function ActivityRail({
   showFleetView,
   onToggleFleet,
   onSearch,
-  broadcastMode,
-  onToggleBroadcast,
   showLocalBroker,
   onToggleLocalBroker,
 }) {
@@ -210,7 +208,6 @@ export default function ActivityRail({
       <RailButton icon={List} label="Toggle sidebar (Ctrl+Shift+B)" active={sidebarOpen} onClick={onToggleSidebar} />
       <RailButton icon={LayoutGrid} label="Fleet view" active={showFleetView} onClick={onToggleFleet} />
       <RailButton icon={Search} label="Search sessions" onClick={onSearch} />
-      <RailButton icon={Radio} label="Broadcast (Ctrl+Shift+Enter)" active={broadcastMode} onClick={onToggleBroadcast} />
       {onToggleLocalBroker && (
         <RailButton icon={Cpu} label="Local Broker — config & reporting" active={showLocalBroker} onClick={onToggleLocalBroker} />
       )}
