@@ -39,6 +39,19 @@ contract. Everything below is *not yet done*.
 - [ ] **Update the top-level `README.md`** — this feature is documented in
   `CLAUDE.md` but has no user-facing README section yet. Do before/with publish.
 
+### UX QA sweep (2026-07-24, owner-driven)
+- [x] In-area views: FleetView + LocalBrokerView no longer full-screen overlays;
+  rail/sidebar/top bar stay visible, rail icons toggle in/out (commit 8a7cf34).
+- [x] Rail Search (magnifying glass) was dead — missing `data-sidebar-filter`
+  attr; fixed + regression test (commit b783018).
+- [ ] **Broadcast button — owner decision pending:** capability = type once,
+  send to all visible running sessions. Options: (1) label it clearly,
+  (2) move into FleetView as "message all sessions", (3) remove. Owner has
+  asked "what is this" twice — status quo is not an option.
+- [ ] **Fresh installer after QA sweep concludes** — commits 8a7cf34/b783018
+  and whatever the Broadcast decision produces are newer than the last build
+  in Downloads (`_in-area-nav` has 8a7cf34 but not b783018).
+
 ### Foundation / follow-ups
 - [x] **Provider registry.** Module-level `_PROVIDERS` + optional
   `COCKPIT_PROVIDERS_FILE` override. `GET /api/local/providers` surfaces metadata
@@ -64,7 +77,10 @@ contract. Everything below is *not yet done*.
 - [x] Spill-control endpoint (`PUT /config/spill`) — shipped; Cockpit wired.
 - [x] `/queue` contract pinned; broker supervised; lane-broker branch merged to
   team master (upstream source of truth for the vendored copy).
+- [x] `local-lanes.json` endpoint flip to `:1235` — done 2026-07-24 (both lanes
+  now route through the broker; forward path verified via /v1/models). Note:
+  the profile lives in a bench WORKTREE — should graduate to team master like
+  the broker did.
 - [ ] Client tagging: `X-Client-Id`/`X-Agent-Id`/`X-Trace-Id` +
-  `stream_options.include_usage` on bench/swarm clients, and the
-  `local-lanes.json` endpoint flip to `:1235`. Until then: traces empty,
-  tokens "not reported" — data absence, not a bug.
+  `stream_options.include_usage` on bench/swarm clients. Until then: traces
+  empty, by-agent "(untagged)", tokens "not reported" — data absence, not a bug.
