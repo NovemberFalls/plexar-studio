@@ -27,6 +27,7 @@ function backendRow(id, label, m) {
     errors_total: m.errors_total,
     attempts_total: m.attempts_total,
     spilled_out: m.spilled_out,
+    engine: m.engine ?? null,
   };
 }
 

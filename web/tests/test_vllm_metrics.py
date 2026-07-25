@@ -59,6 +59,11 @@ vllm:e2e_request_latency_seconds_count{model_name="m"} 10.0
 # TYPE vllm:time_per_output_token_seconds histogram
 vllm:time_per_output_token_seconds_sum{model_name="m"} 20.0
 vllm:time_per_output_token_seconds_count{model_name="m"} 4000.0
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="m"} 1.0
+vllm:num_requests_waiting{model_name="m"} 9.0
+vllm:kv_cache_usage_perc{model_name="m"} 0.82
+vllm:cache_config_info{kv_cache_size_tokens="63664",kv_cache_max_concurrency="1.3",model_name="m"} 1.0
 this_is_malformed
 """
 
@@ -109,6 +114,12 @@ def test_vllm_metrics_reshape(monkeypatch):
     assert m["window_exact"] is True
     assert m["source"] == "vllm-prometheus"
     assert m["served_model"] == "qwen3-coder-30b-awq"  # from counter labels
+    # live in-engine depth + KV headroom
+    assert m["engine"]["running"] == 1
+    assert m["engine"]["waiting"] == 9
+    assert m["engine"]["kv_cache_pct"] == 82.0
+    assert m["engine"]["kv_cache_tokens"] == 63664
+    assert m["engine"]["max_concurrency"] == 1.3
     assert m["by_session"] == [] and m["by_agent"] == [] and m["by_lane_class"] == []
     # satisfies the shape-validation contract keys
     assert server_module._looks_like(m, server_module._METRICS_SHAPE_KEYS)

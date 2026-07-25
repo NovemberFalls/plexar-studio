@@ -2550,8 +2550,35 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
         v = _hist_quantile(s, name, q)
         return round(v * 1000, 1) if v is not None else None
 
+    # Live in-engine queue depth + KV headroom (vLLM's own continuous-batching
+    # state -- NOT the broker's lane queue). running = decoding now; waiting =
+    # admitted-but-parked (no free KV slot). kv_cache_max_concurrency is how many
+    # FULL max_model_len contexts the KV can hold at once -- the real swarm limit.
+    kv_pct_samples = s.get("vllm:kv_cache_usage_perc", [])
+    kv_pct = round(kv_pct_samples[0][1] * 100, 1) if kv_pct_samples else None
+    kv_tokens = None
+    max_conc = None
+    cfg = s.get("vllm:cache_config_info", [])
+    if cfg:
+        cfg_labels = cfg[0][0]
+        _tok = cfg_labels.get("kv_cache_size_tokens", "")
+        if _tok.isdigit():
+            kv_tokens = int(_tok)
+        try:
+            max_conc = round(float(cfg_labels.get("kv_cache_max_concurrency")), 2)
+        except (TypeError, ValueError):
+            max_conc = None
+    engine = {
+        "running": int(_sum("vllm:num_requests_running")),
+        "waiting": int(_sum("vllm:num_requests_waiting")),
+        "kv_cache_pct": kv_pct,
+        "kv_cache_tokens": kv_tokens,
+        "max_concurrency": max_conc,
+    }
+
     return {
         "window": window,
+        "engine": engine,
         "window_exact": window == "lifetime",
         "source": "vllm-prometheus",
         "served_model": served_model,

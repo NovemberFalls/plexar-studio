@@ -44,7 +44,14 @@ function buildProviders(data, hidden) {
       label: p.label ?? p.id ?? p.key ?? `Backend ${i + 1}`,
       kind: "local",
       color: seriesColor(p.id ?? p.key, i),
-      sub: [p.lane_class, p.model, p.context_length ? `${p.context_length} ctx` : null]
+      sub: [
+        p.lane_class,
+        p.model,
+        p.context_length ? `${p.context_length} ctx` : null,
+        // vLLM live in-engine depth (continuous batching), when present.
+        p.engine ? `${p.engine.running || 0} running · ${p.engine.waiting || 0} queued` : null,
+        p.engine && typeof p.engine.kv_cache_pct === "number" ? `KV ${p.engine.kv_cache_pct}%` : null,
+      ]
         .filter(Boolean)
         .join(" · "),
       requests: p.runs_total,
