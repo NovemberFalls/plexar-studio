@@ -11,51 +11,59 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
-/**
- * mergeDirectBackends(base, directs) — fold direct-served providers (e.g. vLLM,
- * which bypasses the broker) into a broker-shaped metrics object so they appear
- * as backend columns AND count toward the local totals.
- *
- * `base` is the primary provider's /metrics (broker-shaped, may be
- * {reachable:false}/null). `directs` is [{id, label, metrics}] where metrics is
- * a per-provider /metrics response (top-level runs_total/tokens_total/etc.).
- * Returns a new metrics object; pure, no side effects. Exported for testing.
- */
-export function mergeDirectBackends(base, directs) {
-  const rows = (Array.isArray(directs) ? directs : [])
-    .filter((d) => d && d.metrics && d.metrics.reachable !== false && typeof d.metrics.runs_total === "number")
-    .map((d) => ({
-      id: d.id,
-      label: d.label ?? d.id,
-      model: d.metrics.served_model ?? null,
-      context_length: d.metrics.context_length ?? null,
-      runs_total: d.metrics.runs_total,
-      tokens_total: d.metrics.tokens_total,
-      ttft_ms: d.metrics.ttft_ms,
-      decode_tokens_per_sec: d.metrics.decode_tokens_per_sec,
-      queue_wait_ms: d.metrics.queue_wait_ms,
-      run_time_ms: d.metrics.run_time_ms,
-      errors_total: d.metrics.errors_total,
-    }));
-  if (!rows.length) return base;
-
-  const baseOk = base && base.reachable !== false;
-  const start = baseOk
-    ? base
-    : { reachable: true, runs_total: 0, tokens_total: { prompt: 0, completion: 0 }, by_provider: [] };
-  const existing = Array.isArray(start.by_provider) ? start.by_provider : [];
-  const addRuns = rows.reduce((s, r) => s + (r.runs_total || 0), 0);
-  const addPrompt = rows.reduce((s, r) => s + (r.tokens_total?.prompt || 0), 0);
-  const addCompletion = rows.reduce((s, r) => s + (r.tokens_total?.completion || 0), 0);
-
+/** Build a backend-comparison row from one provider's /metrics response. */
+function backendRow(id, label, m) {
   return {
-    ...start,
+    id,
+    label: label ?? id,
+    model: m.served_model ?? null,
+    context_length: m.context_length ?? null,
+    runs_total: m.runs_total,
+    tokens_total: m.tokens_total,
+    ttft_ms: m.ttft_ms,
+    decode_tokens_per_sec: m.decode_tokens_per_sec,
+    queue_wait_ms: m.queue_wait_ms,
+    run_time_ms: m.run_time_ms,
+    errors_total: m.errors_total,
+    attempts_total: m.attempts_total,
+    spilled_out: m.spilled_out,
+  };
+}
+
+/**
+ * assembleReportingMetrics(primary, providers) — assemble ALL used local
+ * providers into a broker-shaped metrics object so every one shows as its own
+ * backend column and counts toward the local totals. This is a reporting tool:
+ * it must surface every backend that served traffic, not just one.
+ *
+ * `primary` is the selected provider's /metrics (kept at top level so the hero
+ * strip / queue / spill sections still read the selected backend's broker-side
+ * fields). `providers` is [{id, label, metrics}] for EVERY metrics-capable
+ * provider, primary included. A provider earns a row when its /metrics is
+ * reachable AND it actually ran something (runs_total > 0) — idle/unreachable
+ * backends are omitted, matching "show all USED providers". Pure; exported for
+ * testing.
+ */
+export function assembleReportingMetrics(primary, providers) {
+  const rows = (Array.isArray(providers) ? providers : [])
+    .filter(
+      (p) =>
+        p && p.metrics && p.metrics.reachable !== false &&
+        typeof p.metrics.runs_total === "number" && p.metrics.runs_total > 0,
+    )
+    .map((p) => backendRow(p.id, p.label, p.metrics));
+  if (!rows.length) return primary;
+
+  const primaryOk = primary && primary.reachable !== false;
+  const base = primaryOk ? primary : {};
+  return {
+    ...base,
     reachable: true,
-    by_provider: [...existing, ...rows],
-    runs_total: (typeof start.runs_total === "number" ? start.runs_total : 0) + addRuns,
+    by_provider: rows,
+    runs_total: rows.reduce((s, r) => s + (r.runs_total || 0), 0),
     tokens_total: {
-      prompt: (start.tokens_total?.prompt || 0) + addPrompt,
-      completion: (start.tokens_total?.completion || 0) + addCompletion,
+      prompt: rows.reduce((s, r) => s + (r.tokens_total?.prompt || 0), 0),
+      completion: rows.reduce((s, r) => s + (r.tokens_total?.completion || 0), 0),
     },
   };
 }
@@ -113,6 +121,62 @@ function usePolledEndpoint(url, intervalMs, enabled) {
 }
 
 /**
+ * Polls /metrics for a DYNAMIC list of providers in a single tick (Promise.all),
+ * returning a { [providerId]: metricsJson | {reachable:false} } map. A React
+ * hook can't call usePolledEndpoint in a loop, so this batches the whole list;
+ * the effect re-subscribes only when the set of ids (not their order) changes.
+ */
+function useMultiMetrics(providers, win, enabled) {
+  const [byId, setById] = useState({});
+  const inFlightRef = useRef(false);
+  const ids = (Array.isArray(providers) ? providers : []).map((p) => p.id).sort().join(",");
+
+  useEffect(() => {
+    const list = Array.isArray(providers) ? providers : [];
+    if (!enabled || !list.length) {
+      setById({});
+      return undefined;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const tick = async () => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      try {
+        const pairs = await Promise.all(
+          list.map(async (p) => {
+            try {
+              const res = await fetch(
+                `/api/local/${encodeURIComponent(p.id)}/metrics?window=${encodeURIComponent(win)}`,
+                { signal: controller.signal },
+              );
+              return [p.id, res.ok ? await res.json() : { reachable: false }];
+            } catch (_) {
+              return [p.id, { reachable: false }];
+            }
+          }),
+        );
+        if (!cancelled) setById(Object.fromEntries(pairs));
+      } finally {
+        inFlightRef.current = false;
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      controller.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ids, win, enabled]);
+
+  return byId;
+}
+
+/**
  * useReportingData(providerId, { enabled, window })
  *
  * Returns { metrics, timeseries, queue, spillConfig, spills, models,
@@ -139,36 +203,31 @@ export default function useReportingData(providerId, { enabled = false, window =
     providerEnabled,
   );
 
-  // Direct-served backends (e.g. vLLM) bypass the broker, so the primary
-  // provider's /metrics never sees them. Discover the first metrics-capable
-  // provider that ISN'T the primary and poll it so it shows as its own backend
-  // column + counts toward local share. (One secondary today = vLLM; extend the
-  // list here if a second direct backend is ever added.)
+  // A reporting tool must show EVERY used backend. Direct-served providers
+  // (e.g. vLLM) bypass the broker, so the primary's /metrics never sees them —
+  // discover every metrics-capable provider EXCEPT the primary and poll them
+  // all together, then assemble one column per used backend.
   const providersList = usePolledEndpoint(enabled ? "/api/local/providers" : null, 60000, enabled);
-  const secondary = useMemo(() => {
+  const allProviders = useMemo(() => {
     const list = Array.isArray(providersList?.providers) ? providersList.providers : [];
-    return (
-      list.find(
-        (p) => p && p.id !== providerId && Array.isArray(p.capabilities) && p.capabilities.includes("metrics"),
-      ) || null
-    );
-  }, [providersList, providerId]);
-  const secId = secondary ? encodeURIComponent(secondary.id) : null;
-  const secondaryMetrics = usePolledEndpoint(
-    enabled && secId ? `/api/local/${secId}/metrics?window=${win}` : null,
-    10000,
-    enabled && !!secId,
+    return list.filter((p) => p && Array.isArray(p.capabilities) && p.capabilities.includes("metrics"));
+  }, [providersList]);
+  const secondaries = useMemo(
+    () => allProviders.filter((p) => p.id !== providerId),
+    [allProviders, providerId],
+  );
+  const secondaryMetrics = useMultiMetrics(secondaries, win, enabled);
+  const primaryLabel = useMemo(
+    () => allProviders.find((p) => p.id === providerId)?.label ?? providerId,
+    [allProviders, providerId],
   );
 
-  const metrics = useMemo(
-    () =>
-      secondary
-        ? mergeDirectBackends(primaryMetrics, [
-            { id: secondary.id, label: secondary.label, metrics: secondaryMetrics },
-          ])
-        : primaryMetrics,
-    [primaryMetrics, secondary, secondaryMetrics],
-  );
+  const metrics = useMemo(() => {
+    const rows = [];
+    if (providerId) rows.push({ id: providerId, label: primaryLabel, metrics: primaryMetrics });
+    for (const s of secondaries) rows.push({ id: s.id, label: s.label, metrics: secondaryMetrics[s.id] });
+    return assembleReportingMetrics(primaryMetrics, rows);
+  }, [primaryMetrics, secondaries, secondaryMetrics, providerId, primaryLabel]);
 
   const timeseries = usePolledEndpoint(
     providerEnabled ? `/api/local/${pid}/metrics/timeseries?window=${win}&bucket=${bucket}` : null,
