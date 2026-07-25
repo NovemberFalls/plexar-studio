@@ -31,7 +31,7 @@ import logging_config  # noqa: E402 -- deliberately imported after load_dotenv()
 logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
-from pty_manager import pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
+from pty_manager import ClaudeCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
 # _wait_for_idle_simple / _wrap are underscore-prefixed (bridge_manager treats
 # them as internal helpers), but they are exactly the typing-quiet + idle gate
@@ -556,9 +556,17 @@ async def create_terminal(request: Request):
             "provider": session.provider,
             "created_at": session.created_at,
         })
-    except FileNotFoundError:
+    except ClaudeCliNotFound as e:
+        # resolve_claude_cli() already probed every standard install location
+        # and built an actionable message (install link + CLAUDE_CLI_PATH
+        # escape hatch + what was searched) — surface it verbatim rather than
+        # flattening it to "not found".
+        logger.error("Claude CLI not found: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+    except FileNotFoundError as e:
+        logger.error("Spawn failed — executable not found", exc_info=True)
         return JSONResponse(
-            {"error": "'claude' CLI not found. Make sure it's installed and in PATH."},
+            {"error": f"Could not start the session: {e}"},
             status_code=500,
         )
     except Exception as e:

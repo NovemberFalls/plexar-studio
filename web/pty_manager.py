@@ -10,6 +10,8 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import sys
 import threading
 import time
 import uuid
@@ -31,6 +33,108 @@ logger = logging.getLogger("cockpit.pty")
 # Halved chunk size + tripled delay compared to earlier defaults to address
 # paste fragmentation on ~400-byte pastes where ConPTY silently drops bytes.
 _INTER_CHUNK_DELAY = 0.010
+
+# Environment override letting a user point cockpit at a `claude` binary that
+# lives somewhere none of the standard installers use.
+_CLAUDE_CLI_PATH_ENV = "CLAUDE_CLI_PATH"
+
+
+class ClaudeCliNotFound(FileNotFoundError):
+    """Raised when no `claude` executable can be located.
+
+    Subclasses FileNotFoundError so existing `except FileNotFoundError`
+    handlers (server.py's spawn route) keep working unchanged, while callers
+    that want the searched-location detail can read `.searched`.
+    """
+
+    def __init__(self, message: str, searched: list[str] | None = None):
+        super().__init__(message)
+        self.searched = searched or []
+
+
+def _candidate_claude_dirs() -> list[str]:
+    """Directories the official Claude Code installers write `claude` into.
+
+    Probed only as a fallback when the inherited PATH does not contain the CLI
+    — which happens whenever cockpit is launched from a process whose PATH
+    snapshot predates the install (Explorer, a long-running shell, the Tauri
+    desktop app started before `claude` was installed).
+    """
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        user_profile = os.environ.get("USERPROFILE", home)
+        appdata = os.environ.get(
+            "APPDATA", os.path.join(user_profile, "AppData", "Roaming")
+        )
+        local_appdata = os.environ.get(
+            "LOCALAPPDATA", os.path.join(user_profile, "AppData", "Local")
+        )
+        return [
+            os.path.join(user_profile, ".local", "bin"),   # native installer
+            os.path.join(appdata, "npm"),                  # npm -g
+            os.path.join(local_appdata, "Programs", "claude"),
+            os.path.join(user_profile, "bin"),
+        ]
+    return [
+        os.path.join(home, ".local", "bin"),   # native installer
+        "/usr/local/bin",
+        "/opt/homebrew/bin",                   # Homebrew on Apple Silicon
+        os.path.join(home, ".npm-global", "bin"),
+        os.path.join(home, ".bun", "bin"),
+    ]
+
+
+def resolve_claude_cli(search_path: str) -> tuple[str, str]:
+    """Locate the `claude` executable.
+
+    Returns ``(claude_exe, effective_path)`` where ``effective_path`` is
+    ``search_path`` extended with the CLI's directory when it had to be found
+    via the fallback probe — the child process resolves `claude` off PATH, so
+    the directory must travel with it.
+
+    Raises ClaudeCliNotFound with the list of searched locations when the CLI
+    is nowhere to be found.
+    """
+    override = os.environ.get(_CLAUDE_CLI_PATH_ENV, "").strip().strip('"')
+    if override:
+        if os.path.isfile(override):
+            override_dir = os.path.dirname(os.path.abspath(override))
+            logger.info("Using %s override: %s", _CLAUDE_CLI_PATH_ENV, override)
+            return override, override_dir + os.pathsep + search_path
+        raise ClaudeCliNotFound(
+            f"{_CLAUDE_CLI_PATH_ENV} is set to {override!r} but no file exists "
+            "there. Point it at the full path of the `claude` executable, or "
+            "unset it to fall back to PATH discovery.",
+            [override],
+        )
+
+    found = shutil.which("claude", path=search_path)
+    if found:
+        return found, search_path
+
+    searched = _candidate_claude_dirs()
+    for directory in searched:
+        if not os.path.isdir(directory):
+            continue
+        found = shutil.which("claude", path=directory)
+        if found:
+            logger.warning(
+                "`claude` was not on the inherited PATH; found it at %s via the "
+                "fallback probe. Cockpit's PATH is likely stale — restarting it "
+                "from a fresh shell avoids this lookup.",
+                found,
+            )
+            return found, directory + os.pathsep + search_path
+
+    raise ClaudeCliNotFound(
+        "Could not find the `claude` CLI. Install Claude Code "
+        "(https://claude.com/download), then restart Claude Cockpit so it "
+        "picks up the new PATH. If `claude` is installed somewhere unusual, "
+        f"set the {_CLAUDE_CLI_PATH_ENV} environment variable to its full "
+        "path. Searched PATH plus: " + ", ".join(searched),
+        searched,
+    )
+
 
 # Regex to strip ANSI escape sequences
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
@@ -542,11 +646,17 @@ class PtyManager:
             sys_root = os.environ.get("SystemRoot", r"C:\Windows")
             user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
             npm_dir = os.path.join(user_profile, "AppData", "Roaming", "npm")
+            # Claude Code's native (non-npm) installer drops claude.exe in
+            # %USERPROFILE%\.local\bin. If cockpit was launched from a shell or
+            # Explorer session whose PATH predates that install, shutil.which()
+            # misses it and every spawn fails with "'claude' CLI not found".
+            local_bin = os.path.join(user_profile, ".local", "bin")
             essential_dirs = [
                 os.path.join(sys_root, "System32"),
                 sys_root,
                 os.path.join(sys_root, "System32", "Wbem"),
                 npm_dir,
+                local_bin,
             ]
             path_lower = current_path.lower()
             for d in essential_dirs:
@@ -581,8 +691,6 @@ class PtyManager:
             )
 
         # Build the command
-        import shutil
-
         # Snapshot existing JSONL files BEFORE spawning so we can detect which
         # new file Claude Code creates. Claude ignores --session-id and generates
         # its own UUID, so we discover it by diffing the directory.
@@ -661,7 +769,13 @@ class PtyManager:
         elif fast:
             logger.info("Fast mode: requested but model %r is not Opus — ignoring", model)
 
-        claude_path = shutil.which("claude", path=current_path)
+        # Resolve the CLI before spawning so a missing install fails here with
+        # an actionable message, rather than as a bare "Command not found" from
+        # deep inside the PTY backend. resolve_claude_cli may extend PATH when
+        # it locates the CLI outside the inherited one — that extension has to
+        # reach the child, so re-stamp env["PATH"].
+        claude_path, current_path = resolve_claude_cli(current_path)
+        env["PATH"] = current_path
         logger.info("Spawning: %s", cmd)
         logger.info("Claude found at: %s", claude_path)
         logger.info("CWD: %s", workdir)
