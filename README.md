@@ -291,7 +291,20 @@ Tests run automatically on push and PR via GitHub Actions.
 
 ## Troubleshooting
 
-**"claude CLI not found"** — Install it: `npm install -g @anthropic-ai/claude-code`, then verify with `claude --version`.
+**"Could not find the `claude` CLI"** — Cockpit searches your `PATH` first, then the standard install locations (`~/.local/bin`, the npm global dir, `%LOCALAPPDATA%\Programs\claude`, `/usr/local/bin`, Homebrew). Three causes, in order of likelihood:
+
+1. **Not installed.** Get it from [claude.com/download](https://claude.com/download) or `npm install -g @anthropic-ai/claude-code`, then verify with `claude --version`.
+2. **Installed, but Cockpit's `PATH` is stale.** This is the common one: if Cockpit was already running when you installed Claude Code — or was launched from Explorer or a long-lived shell whose `PATH` predates the install — it inherited the old environment. **Fully quit and relaunch Cockpit.** The fallback probe usually covers this automatically; when it does, `cockpit.pty` logs a warning saying so.
+3. **Installed somewhere nonstandard.** Set `CLAUDE_CLI_PATH` to the full path of the executable before launching Cockpit:
+
+   ```bash
+   # Windows (PowerShell)
+   $env:CLAUDE_CLI_PATH = 'C:\path\to\claude.exe'
+   # macOS / Linux
+   export CLAUDE_CLI_PATH=/path/to/claude
+   ```
+
+The error message itself lists every directory that was searched — read it before guessing.
 
 **Port 8420 already in use** — `PORT=9000 python server.py`
 

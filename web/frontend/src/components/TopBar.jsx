@@ -5,6 +5,12 @@ import { useState, useEffect } from "react";
 import { PanelLeft, ChevronDown, KeyRound, Cpu } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
+import {
+  FALLBACK_MODEL_GROUPS,
+  useModelCatalog,
+  isOpusModel,
+  getModelProvider,
+} from "../modelCatalog";
 
 /** Queue depth = in-flight (0/1) + queued length. Field names pinned from
  * broker source (broker.py::_queue_state): in_flight (object|null), queued []. */
@@ -13,50 +19,13 @@ function queueDepth(q) {
   return (q.in_flight ? 1 : 0) + (Array.isArray(q.queued) ? q.queued.length : 0);
 }
 
-export const MODEL_GROUPS = [
-  {
-    label: "Claude 4.8",
-    models: [
-      { id: "claude-opus-4-8", label: "Opus 4.8" },
-      { id: "claude-opus-4-8[1m]", label: "Opus 4.8 (1M)" },
-    ],
-  },
-  {
-    label: "Claude 4.7",
-    models: [
-      { id: "claude-opus-4-7", label: "Opus 4.7" },
-      { id: "claude-opus-4-7[1m]", label: "Opus 4.7 (1M)" },
-    ],
-  },
-  {
-    label: "Claude 4.6",
-    models: [
-      { id: "sonnet", label: "Sonnet 4.6" },
-      { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 (1M)" },
-      { id: "opus", label: "Opus 4.6" },
-      { id: "claude-opus-4-6[1m]", label: "Opus 4.6 (1M)" },
-    ],
-  },
-  {
-    label: "Claude 4.5",
-    models: [
-      { id: "haiku", label: "Haiku 4.5" },
-    ],
-  },
-  {
-    label: "Fable",
-    models: [{ id: "claude-fable-5", label: "Fable 5" }],
-  },
-  {
-    label: "OpenRouter",
-    provider: "openrouter",
-    models: [
-      { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "openrouter" },
-      { id: "qwen/qwen3-coder-next", label: "Qwen3 Coder Next", provider: "openrouter" },
-    ],
-  },
-];
+// Re-exported for back-compat: PaneActionsMenu and the test suite import the
+// static model list from here. The LIVE, account-accurate catalog flows through
+// useModelCatalog() (backed by GET /api/models); these constants are the
+// fallback shape served when the live fetch is unavailable.
+export const MODEL_GROUPS = FALLBACK_MODEL_GROUPS;
 export const MODELS = MODEL_GROUPS.flatMap((g) => g.models);
+export { isOpusModel, getModelProvider };
 
 const PERMISSION_MODES = [
   { id: "default", label: "Ask" },
@@ -73,28 +42,6 @@ const EFFORT_OPTIONS = [
   { id: "xhigh", label: "XHigh" },
   { id: "max", label: "Max" },
 ];
-
-/** Returns true when the given model id is an Opus model (fast toggle eligible). */
-export function isOpusModel(modelId) {
-  return (
-    modelId === "opus" ||
-    modelId === "claude-opus-4-6[1m]" ||
-    modelId === "claude-opus-4-7" ||
-    modelId === "claude-opus-4-7[1m]" ||
-    modelId === "claude-opus-4-8" ||
-    modelId === "claude-opus-4-8[1m]"
-  );
-}
-
-/**
- * Returns "openrouter" for model ids that live in the OpenRouter group of
- * MODEL_GROUPS, "anthropic" for everything else (including unrecognized ids —
- * absent `provider` on a model entry is treated as anthropic, per convention).
- */
-export function getModelProvider(modelId) {
-  const entry = MODELS.find((m) => m.id === modelId);
-  return entry?.provider === "openrouter" ? "openrouter" : "anthropic";
-}
 
 export default function TopBar({
   model,
@@ -125,7 +72,9 @@ export default function TopBar({
   // tri-state: null = not yet checked, true/false = last known GET result
   const [openRouterConfigured, setOpenRouterConfigured] = useState(null);
 
-  const currentModel = MODELS.find((m) => m.id === model) || MODELS[0];
+  // Live, account-accurate catalog (falls back to the static list offline).
+  const { groups: modelGroups, models: modelList } = useModelCatalog();
+  const currentModel = modelList.find((m) => m.id === model) || modelList[0];
   const currentPermission = PERMISSION_MODES.find((p) => p.id === permissionMode) || PERMISSION_MODES[0];
   const currentEffort = EFFORT_OPTIONS.find((e) => e.id === effort) || EFFORT_OPTIONS[0];
   const modelProvider = getModelProvider(model);
@@ -426,7 +375,7 @@ export default function TopBar({
                   boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
                 }}
               >
-                {MODEL_GROUPS.map((group, gi) => {
+                {modelGroups.map((group, gi) => {
                   const isOpenRouterGroup = group.provider === "openrouter";
                   const groupDisabled = isOpenRouterGroup && !openRouterConfigured;
                   return (

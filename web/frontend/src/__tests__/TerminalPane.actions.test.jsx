@@ -424,14 +424,14 @@ describe("TerminalPane — More actions kebab menu", () => {
     const { unmount } = await openMenu();
 
     fireEvent.click(screen.getByRole("menuitem", { name: /Model:/ }));
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Opus 4.6" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Opus 4.8" }));
 
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
         "/api/terminals/term-1/command",
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ command: "/model opus" }),
+          body: JSON.stringify({ command: "/model claude-opus-4-8" }),
         }),
       );
     });

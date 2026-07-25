@@ -31,7 +31,7 @@ import logging_config  # noqa: E402 -- deliberately imported after load_dotenv()
 logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
-from pty_manager import pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
+from pty_manager import ClaudeCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
 # _wait_for_idle_simple / _wrap are underscore-prefixed (bridge_manager treats
 # them as internal helpers), but they are exactly the typing-quiet + idle gate
@@ -231,6 +231,101 @@ async def health():
         "sessions": len(pty_manager.sessions),
         "uptime_seconds": int(_time.time() - START_TIME),
     })
+
+
+# ── Model catalog (live from Anthropic /v1/models) ───────
+#
+# The model picker must reflect what the account can ACTUALLY run, not a
+# hardcoded list that drifts every time Anthropic ships a model (Opus 5 caught
+# us out). We read the session's Claude Code OAuth token from the credentials
+# file and ask Anthropic's /v1/models directly. The token NEVER leaves the
+# server — only {id, display_name} pairs reach the browser. On any failure
+# (offline, token expired/rotated) we serve the last good cache, then a static
+# fallback, so the picker is never empty.
+_MODELS_CACHE: dict = {"data": None, "ts": 0.0}
+_MODELS_TTL = 600.0  # 10 min — models change on the order of weeks
+_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+_ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models?limit=100"
+
+# Last resort only — mirrors the frontend FALLBACK_MODEL_GROUPS. Never reached
+# while the credentials file + network are healthy.
+_FALLBACK_MODELS = [
+    {"id": "claude-opus-5", "display_name": "Claude Opus 5"},
+    {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
+    {"id": "claude-fable-5", "display_name": "Claude Fable 5"},
+    {"id": "claude-opus-4-8", "display_name": "Claude Opus 4.8"},
+    {"id": "claude-haiku-4-5-20251001", "display_name": "Claude Haiku 4.5"},
+]
+
+
+def _read_oauth_token() -> str | None:
+    """Read the Claude Code OAuth access token from the credentials file.
+
+    Returns None if the file is missing/unreadable or has no token — callers
+    then serve the cache/fallback. The token is a secret: never logged, never
+    returned to the browser. Kept a free function so tests can monkeypatch it.
+    """
+    try:
+        data = json.loads(_CREDENTIALS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    tok = data.get("claudeAiOauth", {}).get("accessToken")
+    return tok if isinstance(tok, str) and tok else None
+
+
+def _fetch_models_blocking() -> list[dict] | None:
+    """GET Anthropic /v1/models with the OAuth bearer, newest-first.
+
+    Blocking (urllib) — run via ``asyncio.to_thread`` so it never blocks the
+    loop, matching the broker-proxy helpers. Returns [{id, display_name}] or
+    None on any transport/auth/parse failure (caller serves cache/fallback).
+    """
+    import urllib.error
+    import urllib.request
+
+    token = _read_oauth_token()
+    if not token:
+        return None
+    req = urllib.request.Request(
+        _ANTHROPIC_MODELS_URL,
+        headers={
+            "authorization": f"Bearer {token}",
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    out = []
+    for m in payload.get("data", []):
+        mid = m.get("id")
+        if isinstance(mid, str) and mid.startswith("claude-"):
+            out.append({"id": mid, "display_name": m.get("display_name") or mid})
+    return out or None
+
+
+@app.get("/api/models")
+async def get_models():
+    """Live Anthropic model catalog for the picker.
+
+    ``source``: "live" (fresh or within-TTL cache), "stale" (old cache after a
+    failed refresh), or "fallback" (static list — nothing else available).
+    """
+    now = _time.monotonic()
+    cached = _MODELS_CACHE["data"]
+    if cached and now - _MODELS_CACHE["ts"] < _MODELS_TTL:
+        return {"models": cached, "source": "live"}
+    live = await asyncio.to_thread(_fetch_models_blocking)
+    if live:
+        _MODELS_CACHE["data"] = live
+        _MODELS_CACHE["ts"] = now
+        return {"models": live, "source": "live"}
+    if cached:
+        return {"models": cached, "source": "stale"}
+    return {"models": _FALLBACK_MODELS, "source": "fallback"}
 
 
 # ── Routes ───────────────────────────────────────────────
@@ -567,9 +662,17 @@ async def create_terminal(request: Request):
             "provider": session.provider,
             "created_at": session.created_at,
         })
-    except FileNotFoundError:
+    except ClaudeCliNotFound as e:
+        # resolve_claude_cli() already probed every standard install location
+        # and built an actionable message (install link + CLAUDE_CLI_PATH
+        # escape hatch + what was searched) — surface it verbatim rather than
+        # flattening it to "not found".
+        logger.error("Claude CLI not found: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+    except FileNotFoundError as e:
+        logger.error("Spawn failed — executable not found", exc_info=True)
         return JSONResponse(
-            {"error": "'claude' CLI not found. Make sure it's installed and in PATH."},
+            {"error": f"Could not start the session: {e}"},
             status_code=500,
         )
     except Exception as e:
@@ -2440,6 +2543,112 @@ async def get_provider_trace(provider_id: str, trace_id: str):
         logger.debug("Provider %s /trace/%s unreachable", provider_id, trace_id, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
     return JSONResponse(data)
+
+
+@app.get("/api/local/{provider_id}/metrics/timeseries")
+async def get_provider_metrics_timeseries(provider_id: str, window: str = "24h", bucket: str = "1h"):
+    """Proxy the broker's recomputable timeseries (GET :broker/metrics/timeseries).
+
+    Same window validation as /metrics -- window is never forwarded unvalidated.
+    ``bucket`` is passed through as-is; the broker validates bucket sizing per
+    its own contract (5m/1h/1d), this proxy does not second-guess it.
+    """
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "metrics" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if window not in _LOCAL_METRICS_WINDOWS:
+        return JSONResponse(
+            {"error": f"window must be one of {list(_LOCAL_METRICS_WINDOWS)}"},
+            status_code=400,
+        )
+    try:
+        data = await asyncio.to_thread(
+            _broker_get, "/metrics/timeseries", f"window={window}&bucket={bucket}", provider["broker_url"]
+        )
+    except Exception:
+        logger.debug("Provider %s /metrics/timeseries unreachable", provider_id, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
+@app.get("/api/local/{provider_id}/spills")
+async def get_provider_spills(provider_id: str, limit: int = 20):
+    """Proxy the broker's per-spill-event log (GET :broker/spills?limit=)."""
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "spill" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if limit < 1 or limit > 100:
+        limit = max(1, min(100, limit))
+    try:
+        data = await asyncio.to_thread(_broker_get, "/spills", f"limit={limit}", provider["broker_url"])
+    except Exception:
+        logger.debug("Provider %s /spills unreachable", provider_id, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
+# ── API-side usage summary + reference pricing ────────────
+
+_USAGE_SUMMARY_WINDOWS = ("session", "24h", "7d", "lifetime")
+
+# Fallback pricing when web/pricing_models.json (owned by usage_tracker/W3) is
+# missing or unreadable -- keeps GET /api/pricing/models always returning 200
+# rather than surfacing an em-dash grid. $/1M tokens.
+_DEFAULT_PRICING_MODELS = [
+    {"id": "claude-sonnet", "label": "Claude Sonnet", "input_per_mtok": 3.0, "output_per_mtok": 15.0, "fetched_at": None},
+    {"id": "claude-opus", "label": "Claude Opus", "input_per_mtok": 5.0, "output_per_mtok": 25.0, "fetched_at": None},
+    {"id": "claude-haiku", "label": "Claude Haiku", "input_per_mtok": 1.0, "output_per_mtok": 5.0, "fetched_at": None},
+    {"id": "fable", "label": "Fable", "input_per_mtok": 10.0, "output_per_mtok": 50.0, "fetched_at": None},
+]
+
+_PRICING_MODELS_PATH = os.path.join(os.path.dirname(__file__), "pricing_models.json")
+
+
+@app.get("/api/usage/summary")
+async def get_usage_summary(window: str = "lifetime"):
+    """API-side usage comparison data, sourced from usage_tracker (never the broker).
+
+    Shape per the routing/reporting handoff: {runs, tokens{prompt,completion},
+    ttft_ms{p50,p95}, wall_ms{p50,p95}, errors_total, cost_usd, by_model:[...]}.
+    The API side has no queue -- callers null any field it genuinely cannot
+    supply rather than rendering a misleading 0.
+    """
+    if window not in _USAGE_SUMMARY_WINDOWS:
+        return JSONResponse(
+            {"error": f"window must be one of {list(_USAGE_SUMMARY_WINDOWS)}"},
+            status_code=400,
+        )
+    try:
+        data = usage_tracker.summary(window)
+    except Exception:
+        logger.debug("usage_tracker.summary(%s) failed", window, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
+@app.get("/api/pricing/models")
+async def get_pricing_models():
+    """Reference pricing table for the Ledger's 'avoided cost' math.
+
+    Reads web/pricing_models.json (owned by usage_tracker/W3, a checked-in
+    JSON with a fetched_at date, not a live call on render). Falls back to a
+    small inline default -- and still returns 200 -- when the file is missing
+    or unreadable.
+    """
+    try:
+        with open(_PRICING_MODELS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        models = data["models"] if isinstance(data, dict) else data
+        if not isinstance(models, list) or not models:
+            raise ValueError("pricing_models.json has no models")
+        return JSONResponse(models)
+    except Exception:
+        logger.debug("pricing_models.json unreadable, falling back to default pricing", exc_info=True)
+        return JSONResponse(_DEFAULT_PRICING_MODELS)
 
 
 # Legacy routes: delegate to the default provider so old clients keep working.

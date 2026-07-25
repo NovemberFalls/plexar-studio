@@ -205,10 +205,10 @@ export default function App() {
   });
   const [localQueue, setLocalQueue] = useState(null);   // GET /api/local/queue, or null/offline
   const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
-  const [localSpill, setLocalSpill] = useState(null);   // GET /api/local/spill (per-class thresholds + counters)
+  const [, setLocalSpill] = useState(null);   // GET /api/local/spill (per-class thresholds + counters)
   const [localStatus, setLocalStatus] = useState(null); // GET /api/local/status — what's actually connected
   const [showLocalBroker, setShowLocalBroker] = useState(false); // full-page Local Broker section (rail-opened)
-  const [metricsWindow, setMetricsWindow] = useState("lifetime"); // lifetime | 24h | session
+  const [metricsWindow] = useState("lifetime"); // lifetime | 24h | session (legacy TopBar quick-glance poller)
   // Provider registry (ProviderPicker owns the fetch + localStorage selection;
   // this mirrors the full selected provider object back up so App can gate
   // per-capability polling and panel rendering).
@@ -1620,11 +1620,9 @@ export default function App() {
                 setLocalEnabled={setLocalEnabled}
                 localStatus={localStatus}
                 localQueue={localQueue}
-                localSpill={localSpill}
-                localMetrics={localMetrics}
-                metricsWindow={metricsWindow}
-                setMetricsWindow={setMetricsWindow}
+                selectedProvider={selectedProvider}
                 onSpillChange={commitSpill}
+                onToast={toast}
                 onClose={() => setShowLocalBroker(false)}
               >
                 {/* Provider panels render inside the view's Provider card —

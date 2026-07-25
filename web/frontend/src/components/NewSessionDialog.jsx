@@ -11,6 +11,7 @@ function normPath(dir) {
 // selects for visual parity with the design; not wired into onConfirm so the
 // existing (name, workdir, bypassPermissions) contract stays byte-identical.
 const MODEL_OPTIONS = [
+  { id: "claude-opus-5", label: "Opus 5" },
   { id: "sonnet", label: "Sonnet 4.6" },
   { id: "opus", label: "Opus 4.6" },
   { id: "haiku", label: "Haiku 4.5" },
@@ -500,13 +501,25 @@ export default function NewSessionDialog({
 
           {/* footer */}
           <div
-            className="flex items-center justify-end gap-2.5"
+            className="flex items-center justify-between gap-2.5"
             style={{
               padding: "14px 18px",
               borderTop: "1px solid var(--cc-line)",
               background: "color-mix(in srgb, var(--cc-bg) 40%, transparent)",
             }}
           >
+            {/* CLI-path callout: the `claude` binary is discovered off PATH.
+                If it lives somewhere nonstandard, CLAUDE_CLI_PATH overrides —
+                surfaced here so users learn the escape hatch before a spawn
+                fails (the spawn error names it too). */}
+            <span
+              style={{ fontSize: 10, color: "var(--cc-muted)", lineHeight: 1.4, maxWidth: 230 }}
+            >
+              Can&apos;t find <code style={{ fontFamily: "var(--cc-mono, monospace)" }}>claude</code>? Set{" "}
+              <code style={{ fontFamily: "var(--cc-mono, monospace)", color: "var(--cc-dim)" }}>CLAUDE_CLI_PATH</code>{" "}
+              before launching Cockpit.
+            </span>
+            <div className="flex items-center gap-2.5">
             <button
               type="button"
               onClick={onCancel}
@@ -545,6 +558,7 @@ export default function NewSessionDialog({
               Open session
               <ArrowRight size={15} strokeWidth={2.5} />
             </button>
+            </div>
           </div>
         </form>
       </div>

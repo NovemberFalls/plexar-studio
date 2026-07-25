@@ -101,12 +101,39 @@ describe("LaneQueuePanel", () => {
   });
 });
 
-describe("LocalMetricsPanel", () => {
-  it("renders runs, prompts, tokens and derived runs/prompt", () => {
+describe("LocalMetricsPanel — Overview (default)", () => {
+  it("leads with a savings hero: local tokens valued at the reference model", () => {
+    // 900k prompt + 300k completion at Sonnet ($3/$15 per 1M) = 2.70 + 4.50 = $7.20
     render(<LocalMetricsPanel metrics={METRICS} window="lifetime" setWindow={() => {}} />);
-    expect(screen.getByText("812")).toBeInTheDocument();
-    expect(screen.getByText("640")).toBeInTheDocument();
-    expect(screen.getByText(/1\.27 runs\/prompt/)).toBeInTheDocument(); // 812/640
+    expect(screen.getByText("$7.20")).toBeInTheDocument();
+    expect(screen.getByText(/Saved vs API/i)).toBeInTheDocument();
+  });
+
+  it("recomputes savings when the reference model changes", () => {
+    // Same tokens at Opus ($5/$25) = 4.50 + 7.50 = $12.00
+    render(<LocalMetricsPanel metrics={METRICS} window="lifetime" setWindow={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Opus 5" }));
+    expect(screen.getByText("$12.00")).toBeInTheDocument();
+  });
+
+  it("shows real (token-bearing) requests, not the probe-inflated total", () => {
+    // by_session: client-a has 400 token-bearing runs; runs_total 812 incl. probes
+    render(<LocalMetricsPanel metrics={METRICS} window="lifetime" setWindow={() => {}} />);
+    expect(screen.getByText("400")).toBeInTheDocument();
+    expect(screen.getByText(/812 incl\. probes/)).toBeInTheDocument();
+  });
+
+  it("shows live queue depth + ETA from the queue prop", () => {
+    render(<LocalMetricsPanel metrics={METRICS} queue={QUEUE} window="lifetime" setWindow={() => {}} />);
+    // QUEUE: 1 in-flight + 2 queued = 3 deep
+    expect(screen.getByText("3 deep")).toBeInTheDocument();
+    expect(screen.getByText(/to clear/)).toBeInTheDocument();
+  });
+
+  it("names the busiest session", () => {
+    render(<LocalMetricsPanel metrics={METRICS} window="lifetime" setWindow={() => {}} />);
+    expect(screen.getByText(/Busiest sessions/i)).toBeInTheDocument();
+    expect(screen.getByText("client-a")).toBeInTheDocument();
   });
 
   it("calls setWindow when a window button is clicked", () => {
@@ -116,23 +143,47 @@ describe("LocalMetricsPanel", () => {
     expect(setWindow).toHaveBeenCalledWith("24h");
   });
 
-  it("renders the broker definitions as distinguishable term/definition rows", () => {
-    render(<LocalMetricsPanel metrics={METRICS} window="lifetime" setWindow={() => {}} />);
-    // Terms are separate elements from their definitions (not one crushed line).
-    expect(screen.getByText("run")).toBeInTheDocument();
-    expect(screen.getByText(/one completion call to a lane/)).toBeInTheDocument();
-    // "session" also appears as the by-session breakdown header — ≥1 is the dt.
-    expect(screen.getAllByText("session").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("X-Client-Id")).toBeInTheDocument();
+  it("surfaces the 'usage not reported' hint when runs exist but tokens are zero", () => {
+    const m = { ...METRICS, tokens_total: { prompt: 0, completion: 0 } };
+    render(<LocalMetricsPanel metrics={m} window="lifetime" setWindow={() => {}} />);
+    expect(screen.getByText(/stream_options\.include_usage/)).toBeInTheDocument();
   });
 });
 
-describe("LocalMetricsPanel — token honesty", () => {
-  it("shows 'not reported' when runs exist but tokens are zero", () => {
-    const m = { ...METRICS, tokens_total: { prompt: 0, completion: 0 } };
-    render(<LocalMetricsPanel metrics={m} window="lifetime" setWindow={() => {}} />);
-    expect(screen.getByText("not reported")).toBeInTheDocument();
-    expect(screen.getByText(/stream_options\.include_usage/)).toBeInTheDocument();
+describe("LocalMetricsPanel — API detail tab (lower layer)", () => {
+  const NOISY = {
+    ...METRICS,
+    runs_total: 18,
+    prompts_total: 18,
+    tokens_total: { prompt: 17, completion: 10 },
+    by_session: [
+      ...Array.from({ length: 17 }, (_, i) => ({
+        key: `127.0.0.1:${60000 + i}`,
+        runs_total: 1,
+        prompts_total: 1,
+        tokens_total: { prompt: 0, completion: 0 },
+      })),
+      { key: "cockpit-verify", runs_total: 1, prompts_total: 1, tokens_total: { prompt: 17, completion: 10 } },
+    ],
+  };
+
+  const openDetail = () => fireEvent.click(screen.getByRole("button", { name: "API detail" }));
+
+  it("shows raw runs/prompts and the verbatim broker definitions", () => {
+    render(<LocalMetricsPanel metrics={METRICS} window="lifetime" setWindow={() => {}} />);
+    openDetail();
+    expect(screen.getByText("812")).toBeInTheDocument();
+    expect(screen.getByText("640")).toBeInTheDocument();
+    expect(screen.getByText("run")).toBeInTheDocument();
+    expect(screen.getByText(/one completion call to a lane/)).toBeInTheDocument();
+    expect(screen.getByText("X-Client-Id")).toBeInTheDocument();
+  });
+
+  it("de-noises: token-bearing row surfaces, probe tail capped behind '+N more'", () => {
+    render(<LocalMetricsPanel metrics={NOISY} window="lifetime" setWindow={() => {}} />);
+    openDetail();
+    expect(screen.getByText("cockpit-verify")).toBeInTheDocument();
+    expect(screen.getByText(/\+10 more/)).toBeInTheDocument(); // 18 rows → 8 shown, 10 hidden
   });
 });
 
@@ -140,43 +191,42 @@ describe("LocalBrokerView", () => {
   const STATUS_OK = { reachable: true, compatible: true, service: "lane-broker", url: "http://127.0.0.1:1235" };
   const STATUS_LMS = { reachable: true, compatible: false, service: "lmstudio", url: "http://127.0.0.1:1235" };
 
-  it("renders connection + queue + reporting when broker connected", () => {
+  it("mounts the Routing & Reporting dashboard with a live badge when connected", () => {
     render(
       <LocalBrokerView
         localEnabled={true}
         setLocalEnabled={() => {}}
         localStatus={STATUS_OK}
-        localQueue={QUEUE}
-        localSpill={SPILL}
-        localMetrics={METRICS}
-        metricsWindow="lifetime"
-        setMetricsWindow={() => {}}
+        localQueue={{ ...QUEUE, shadow: false }}
         onSpillChange={() => {}}
+        onToast={() => {}}
         onClose={() => {}}
       />
     );
-    expect(screen.getByText("Lane broker connected")).toBeInTheDocument();
-    expect(screen.getByText("Queue & Spill")).toBeInTheDocument();
-    expect(screen.getByText("Reporting")).toBeInTheDocument();
+    expect(screen.getByText(/ROUTING & REPORTING/i)).toBeInTheDocument();
+    expect(screen.getByText("broker live")).toBeInTheDocument();
+    // Lead-with control + backend toolbar are always present when enabled.
+    expect(screen.getByText("Lead with")).toBeInTheDocument();
   });
 
-  it("names the wrong service and hides queue/reporting when incompatible", () => {
+  it("exposes Connection identity via the header settings popover", () => {
     render(
       <LocalBrokerView
         localEnabled={true}
         setLocalEnabled={() => {}}
         localStatus={STATUS_LMS}
         localQueue={null}
-        localSpill={null}
-        localMetrics={null}
-        metricsWindow="lifetime"
-        setMetricsWindow={() => {}}
         onSpillChange={() => {}}
+        onToast={() => {}}
         onClose={() => {}}
       />
     );
+    // Wrong service => badge reads offline and the reporting body is gated.
+    expect(screen.getByText("broker offline")).toBeInTheDocument();
+    // Connection detail is behind the settings popover, opened from the badge.
+    expect(screen.queryByText(/LM Studio is answering/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Connection & provider settings"));
     expect(screen.getByText(/LM Studio is answering/)).toBeInTheDocument();
-    expect(screen.queryByText("Queue & Spill")).not.toBeInTheDocument();
   });
 
   it("close button calls onClose", () => {
@@ -187,15 +237,12 @@ describe("LocalBrokerView", () => {
         setLocalEnabled={() => {}}
         localStatus={null}
         localQueue={null}
-        localSpill={null}
-        localMetrics={null}
-        metricsWindow="lifetime"
-        setMetricsWindow={() => {}}
         onSpillChange={() => {}}
+        onToast={() => {}}
         onClose={onClose}
       />
     );
-    fireEvent.click(screen.getByLabelText("Close Local Broker view"));
+    fireEvent.click(screen.getByLabelText("Close Routing & Reporting view"));
     expect(onClose).toHaveBeenCalled();
   });
 });

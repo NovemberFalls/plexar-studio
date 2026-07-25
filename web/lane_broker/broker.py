@@ -25,7 +25,7 @@ import os
 import statistics
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 CLASS_RANK = {"interactive": 0, "worker": 1, "batch": 2}
 DEFAULT_CLASS = "worker"
@@ -121,6 +121,33 @@ class Broker:
         self._kick = asyncio.Event()
         self.inflight: Job | None = None
         self.spilled: collections.Counter = collections.Counter()
+        # Persisted spill EVENTS (additive; separate from jobs.jsonl so metrics
+        # aggregation stays clean — a spilled request never ran, so it is not a run).
+        self.spill_log = os.path.join(
+            os.path.dirname(eta.log_path) or ".", "spills.jsonl")
+        self.spill_records: list[dict] = []
+        try:
+            with open(self.spill_log, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        self.spill_records.append(json.loads(line))
+                    except ValueError:
+                        continue
+        except OSError:
+            pass
+
+    def record_spill(self, event: dict) -> None:
+        self.spill_records.append(event)
+        try:
+            os.makedirs(os.path.dirname(self.spill_log) or ".", exist_ok=True)
+            with open(self.spill_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
+
+    def predicted_wait_by_class(self) -> dict:
+        return {c: round(self.predicted_wait(c), 1)
+                for c in ("interactive", "worker", "batch")}
 
     # ---- queue state -----------------------------------------------------
     def queued_jobs(self) -> list[Job]:
@@ -274,6 +301,158 @@ def prompt_chars_of(body: bytes) -> int:
         return len(body)
 
 
+# ---- metrics-v2 helpers (all additive; observation-only, never touch relay) ---
+
+def _pct_of(vals: list, p: float):
+    """Percentile of a numeric list, or None when empty (nulls excluded upstream)."""
+    s = sorted(vals)
+    n = len(s)
+    if not n:
+        return None
+    return s[min(n - 1, int(p * (n - 1) + 0.5))]
+
+
+def _parse_iso(ts: str):
+    """Parse the broker's own ISO-Z timestamp to an aware datetime, or None."""
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_bucket(s: str | None):
+    """'5m'|'1h'|'1d'|'<int>'(seconds) -> seconds, or None if unparseable."""
+    if not s:
+        return None
+    s = s.strip().lower()
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if s and s[-1] in units:
+        try:
+            return max(1, int(float(s[:-1]) * units[s[-1]]))
+        except ValueError:
+            return None
+    try:
+        return max(1, int(s))
+    except ValueError:
+        return None
+
+
+def _classify_status(http_status: int, raw: bytes) -> tuple[str, str | None]:
+    """Map an upstream HTTP status (0 = transport failure) + response bytes to the
+    jobs.jsonl status enum + error_kind. status: ok|error (spilled/cancelled are set
+    at their own call sites)."""
+    if http_status and 200 <= http_status < 300:
+        return "ok", None
+    body = raw.lower() if raw else b""
+    if not http_status:
+        return "error", "transport"
+    if http_status in (408, 504):
+        return "error", "timeout"
+    if 500 <= http_status < 600:
+        return "error", "upstream_5xx"
+    if b"context" in body and (
+            b"overflow" in body or b"length" in body
+            or b"maximum" in body or b"exceed" in body):
+        return "error", "context_overflow"
+    return "error", "other"
+
+
+def _sse_frame_has_content(payload: bytes) -> bool:
+    """True if an SSE `data:` payload carries the first model token the user is
+    waiting on (OpenAI choices[].delta.content, Anthropic content_block_delta).
+
+    Reasoning models served by LM Studio stream `reasoning_content` (or
+    `delta.reasoning`) deltas long before any `content` delta appears — often the
+    entire response is reasoning with a single trailing content frame. For those
+    models the first reasoning token IS the first token the user waits on, so we
+    count it as TTFT too. Anthropic-style `thinking_delta` is treated the same."""
+    if payload == b"[DONE]":
+        return False
+    try:
+        d = json.loads(payload)
+    except ValueError:
+        return False
+    for ch in d.get("choices", []) or []:
+        delta = ch.get("delta") or {}
+        if (delta.get("content") or delta.get("reasoning_content")
+                or delta.get("reasoning")):
+            return True
+    if d.get("type") == "content_block_delta":
+        dl = d.get("delta") or {}
+        if dl.get("text") or dl.get("partial_json") or dl.get("thinking"):
+            return True
+    return False
+
+
+class _ResponseEndDetector:
+    """Tracks how much of an upstream HTTP response body has been relayed and
+    reports when the message is COMPLETE — so the relay can stop reading at the
+    true end of the response instead of blocking until the upstream closes its
+    socket. LM Studio keeps streaming (SSE) connections alive for several seconds
+    after the terminating chunk, which otherwise delays (and, if the connection
+    is torn down first, loses) the jobs.jsonl record and inflates wall_ms.
+
+    Observation only — it is fed a COPY of the relayed body bytes and never alters
+    what the client receives. Framing is read from the response headers:
+      - chunked  -> complete after the terminal 0-length chunk
+      - content-length -> complete once that many body bytes have arrived
+      - neither  -> close-delimited; never signals done (fall back to EOF)."""
+
+    def __init__(self, header_block: bytes):
+        hl = header_block.lower()
+        self.mode = None
+        self.done = False
+        self._buf = bytearray()
+        self._need_size = True
+        self._remaining = 0
+        self._body_seen = 0
+        if b"transfer-encoding:" in hl and b"chunked" in hl:
+            self.mode = "chunked"
+        else:
+            cl = None
+            for line in hl.split(b"\r\n"):
+                if line.startswith(b"content-length:"):
+                    try:
+                        cl = int(line.split(b":", 1)[1].strip())
+                    except ValueError:
+                        cl = None
+                    break
+            if cl is not None:
+                self.mode, self._content_length = "length", cl
+
+    def feed(self, body: bytes) -> None:
+        if self.done or self.mode is None or not body:
+            return
+        if self.mode == "length":
+            self._body_seen += len(body)
+            if self._body_seen >= self._content_length:
+                self.done = True
+            return
+        # chunked: advance an incremental chunk parser over the body copy
+        self._buf += body
+        while not self.done:
+            if self._need_size:
+                i = self._buf.find(b"\r\n")
+                if i < 0:
+                    return
+                token = self._buf[:i].split(b";")[0].strip()
+                try:
+                    size = int(token, 16)
+                except ValueError:
+                    self.done = True  # malformed framing: stop trying, fall to EOF
+                    return
+                del self._buf[:i + 2]
+                if size == 0:
+                    self.done = True
+                    return
+                self._remaining, self._need_size = size, False
+            need = self._remaining + 2  # chunk data + trailing CRLF
+            if len(self._buf) < need:
+                return
+            del self._buf[:need]
+            self._need_size = True
+
+
 class Server:
     def __init__(self, broker: Broker, port: int):
         self.broker = broker
@@ -305,8 +484,14 @@ class Server:
         if path == "/queue":
             await self._serve_queue(writer, target)
             return
+        if path == "/metrics/timeseries":
+            await self._serve_timeseries(writer, target)
+            return
         if path == "/metrics":
             await self._serve_metrics(writer, target)
+            return
+        if path == "/spills":
+            await self._serve_spills(writer, target)
             return
         if path == "/config/spill":
             body = await read_body(reader, headers)
@@ -353,10 +538,17 @@ class Server:
         broker = self.broker
         lane_class = self._lane_class(headers)
         pchars = prompt_chars_of(body)
+        meta = self._job_meta(headers, body, target.split("?")[0], writer)
         threshold = broker.spill.get(lane_class)
         predicted = broker.predicted_wait(lane_class)
         if threshold is not None and predicted > threshold:
             broker.spilled[lane_class] += 1
+            broker.record_spill({
+                "ts": now_iso(), "lane_class": lane_class,
+                "predicted_wait_s": round(predicted, 1), "threshold_s": threshold,
+                "client_id": meta.get("client_id", ""), "agent": meta.get("agent", ""),
+                "trace_id": meta.get("trace_id", ""),
+            })
             payload = json.dumps({
                 "spill": True,
                 "predicted_wait_s": round(predicted, 1),
@@ -365,40 +557,67 @@ class Server:
             await send_simple(writer, 503, payload)
             return
 
-        job = Job(lane_class, pchars, self._job_meta(headers, body, target.split("?")[0], writer))
+        job = Job(lane_class, pchars, meta)
         broker.enqueue(job)
         try:
             await job.granted.wait()
+            queue_wait_ms = int((job.started_at - job.enqueued_at) * 1000) \
+                if job.started_at else 0
             t0 = time.monotonic()
-            status, raw = await self._forward(writer, method, target, headers, body,
-                                              relay_only=True)
+            try:
+                status, raw, ttft_ms = await self._forward(
+                    writer, method, target, headers, body, relay_only=True)
+            except (ConnectionError, asyncio.IncompleteReadError):
+                # client or upstream dropped mid-relay — log a cancelled attempt
+                rec = self._finalize_record(
+                    {"ts": now_iso(), "class": lane_class, "prompt_chars": pchars,
+                     "wall_ms": int((time.monotonic() - t0) * 1000), **meta},
+                    None, b"", None, queue_wait_ms, status_override="cancelled")
+                broker.eta.record(rec)
+                raise
             wall_ms = int((time.monotonic() - t0) * 1000)
-            rec = {
-                "ts": now_iso(), "class": lane_class, "prompt_chars": pchars,
-                "wall_ms": wall_ms, "status": status, **job.meta,
-            }
-            usage = extract_usage(raw)
-            rec.update(usage)
-            if usage.get("completion_tokens") and wall_ms > 0:
-                rec["tokens_per_sec"] = round(usage["completion_tokens"] / (wall_ms / 1000.0), 2)
+            rec = self._finalize_record(
+                {"ts": now_iso(), "class": lane_class, "prompt_chars": pchars,
+                 "wall_ms": wall_ms, **meta},
+                status, raw, ttft_ms, queue_wait_ms)
             broker.eta.record(rec)
         finally:
             job.cancelled = True
             job.done.set()
 
+    def _finalize_record(self, rec: dict, http_status, raw: bytes, ttft_ms,
+                         queue_wait_ms, status_override: str | None = None) -> dict:
+        """Attach the additive v2 fields to a jobs.jsonl record (observation-only).
+        http_status: upstream HTTP code (0/None = transport failure)."""
+        rec["http_status"] = http_status
+        if status_override is not None:
+            rec["status"], rec["error_kind"] = status_override, None
+        else:
+            rec["status"], rec["error_kind"] = _classify_status(http_status, raw or b"")
+        rec["ttft_ms"] = ttft_ms
+        rec["queue_wait_ms"] = queue_wait_ms
+        usage = extract_usage(raw) if raw else {}
+        rec.update(usage)
+        if usage.get("completion_tokens") and rec.get("wall_ms", 0) > 0:
+            rec["tokens_per_sec"] = round(
+                usage["completion_tokens"] / (rec["wall_ms"] / 1000.0), 2)
+        return rec
+
     async def _forward(self, writer, method, target, headers, body,
                        relay_only: bool = False, log_class: str | None = None
-                       ) -> tuple[int, bytes]:
+                       ) -> tuple[int, bytes, int | None]:
         """Open upstream, send the request, relay the response byte-verbatim.
-        Returns (status, captured response copy) — capture is observation only
-        and never alters what the client receives."""
+        Returns (status, captured response copy, ttft_ms) — capture and timing are
+        observation only and never alter what the client receives. ttft_ms is the
+        wall ms from upstream dispatch to the first SSE content frame, or None for
+        non-streaming responses. status 0 signals a transport failure."""
         host, port = self.broker.upstream
         t0 = time.monotonic()
         try:
             up_r, up_w = await asyncio.open_connection(host, port)
         except OSError:
             await send_simple(writer, 502, b'{"error":"upstream unreachable"}')
-            return 502, b""
+            return 0, b"", None
         try:
             out = [f"{method} {target} HTTP/1.1\r\n".encode("latin-1")]
             sent_host = False
@@ -413,9 +632,27 @@ class Server:
             out.append(b"\r\n")
             up_w.write(b"".join(out) + body)
             await up_w.drain()
+            dispatch_t = time.monotonic()
 
             status = 0
             captured = bytearray()
+            ttft_ms: int | None = None
+            sse_pending = bytearray()  # incremental SSE line buffer for TTFT detection
+
+            def scan_ttft(chunk: bytes) -> int | None:
+                # Body-only SSE scan on the tee copy; splits on newlines, keeps the
+                # remainder so a frame split across reads is still detected.
+                nonlocal sse_pending
+                sse_pending += chunk
+                while b"\n" in sse_pending:
+                    line, _, rest = sse_pending.partition(b"\n")
+                    sse_pending = bytearray(rest)
+                    line = line.strip()
+                    if line.startswith(b"data:") and _sse_frame_has_content(line[5:].strip()):
+                        return int((time.monotonic() - dispatch_t) * 1000)
+                return None
+
+            end_detector: _ResponseEndDetector | None = None
             first = await up_r.read(65536)
             if first:
                 try:
@@ -425,7 +662,16 @@ class Server:
                 writer.write(first)
                 await writer.drain()
                 captured += first
-            while True:
+                head_block, _, first_body = first.partition(b"\r\n\r\n")
+                end_detector = _ResponseEndDetector(head_block)
+                if first_body:
+                    ttft_ms = scan_ttft(first_body)
+                    end_detector.feed(first_body)
+            # Stop at the true end of the HTTP message (terminal chunk /
+            # content-length satisfied) rather than blocking until the upstream
+            # closes a kept-alive socket — otherwise streaming records land late
+            # (or are lost on teardown) and wall_ms is inflated by idle wait.
+            while not (end_detector and end_detector.done):
                 chunk = await up_r.read(65536)
                 if not chunk:
                     break
@@ -433,21 +679,19 @@ class Server:
                 await writer.drain()
                 if len(captured) < CAPTURE_CAP:
                     captured += chunk
+                if ttft_ms is None:
+                    ttft_ms = scan_ttft(chunk)
+                if end_detector is not None:
+                    end_detector.feed(chunk)
             if log_class is not None:  # shadow-mode observation logging
-                rec = {
-                    "ts": now_iso(), "class": log_class,
-                    "prompt_chars": prompt_chars_of(body),
-                    "wall_ms": int((time.monotonic() - t0) * 1000),
-                    "status": status, "shadow": True,
-                    **self._job_meta(headers, body, target.split("?")[0], writer),
-                }
-                usage = extract_usage(bytes(captured))
-                rec.update(usage)
-                if usage.get("completion_tokens") and rec["wall_ms"] > 0:
-                    rec["tokens_per_sec"] = round(
-                        usage["completion_tokens"] / (rec["wall_ms"] / 1000.0), 2)
+                rec = self._finalize_record(
+                    {"ts": now_iso(), "class": log_class,
+                     "prompt_chars": prompt_chars_of(body),
+                     "wall_ms": int((time.monotonic() - t0) * 1000), "shadow": True,
+                     **self._job_meta(headers, body, target.split("?")[0], writer)},
+                    status, bytes(captured), ttft_ms, 0)
                 self.broker.eta.record(rec)
-            return status, bytes(captured)
+            return status, bytes(captured), ttft_ms
         finally:
             try:
                 up_w.close()
@@ -463,25 +707,59 @@ class Server:
 
     @staticmethod
     def _aggregate(recs: list[dict]) -> dict:
-        walls = sorted(int(r.get("wall_ms", 0)) for r in recs)
-        n = len(walls)
+        # A record with no `status` is a legacy completed run -> treat as "ok".
+        ok = [r for r in recs if r.get("status", "ok") == "ok"]
+        errs = [r for r in recs if r.get("status") == "error"]
+        walls = sorted(int(r.get("wall_ms", 0)) for r in ok)
+        n = len(walls)  # runs_total = COMPLETED runs (contract unchanged)
 
         def pct(p: float) -> int:
             return walls[min(n - 1, int(p * (n - 1) + 0.5))] if n else 0
 
-        pt = sum(r.get("prompt_tokens", 0) or 0 for r in recs)
-        ct = sum(r.get("completion_tokens", 0) or 0 for r in recs)
-        tok_walls = sum(r["wall_ms"] for r in recs if r.get("completion_tokens"))
+        pt = sum(r.get("prompt_tokens", 0) or 0 for r in ok)
+        ct = sum(r.get("completion_tokens", 0) or 0 for r in ok)
+        tok_walls = sum(r["wall_ms"] for r in ok if r.get("completion_tokens"))
         tps_avg = round(ct / (tok_walls / 1000.0), 2) if tok_walls else None
-        tps_cur = next((r["tokens_per_sec"] for r in reversed(recs)
+        tps_cur = next((r["tokens_per_sec"] for r in reversed(ok)
                         if r.get("tokens_per_sec")), None)
         traces = [r.get("trace_id", "") for r in recs]
         prompts = len({t for t in traces if t}) + sum(1 for t in traces if not t)
+
+        # ---- v2 additive metrics (TTFT / true decode / queue wait / errors) ----
+        ttfts = [r["ttft_ms"] for r in ok if r.get("ttft_ms") is not None]
+
+        def _decodeable(r):
+            t = r.get("ttft_ms")
+            return (t is not None and r.get("completion_tokens")
+                    and int(r.get("wall_ms", 0)) > t)
+
+        per_run_decode = [
+            r["completion_tokens"] / ((int(r["wall_ms"]) - r["ttft_ms"]) / 1000.0)
+            for r in ok if _decodeable(r)
+        ]
+        dec_c = sum(r["completion_tokens"] for r in ok if _decodeable(r))
+        dec_s = sum((int(r["wall_ms"]) - r["ttft_ms"]) / 1000.0
+                    for r in ok if _decodeable(r))
+        dec_avg = round(dec_c / dec_s, 2) if dec_s else None
+        dec_cur = round(per_run_decode[-1], 2) if per_run_decode else None
+        dec_p50 = round(statistics.median(per_run_decode), 2) if per_run_decode else None
+        qwaits = [r["queue_wait_ms"] for r in recs if r.get("queue_wait_ms") is not None]
+        ek = collections.Counter(r.get("error_kind") for r in errs if r.get("error_kind"))
+
+        def _r(v):
+            return round(v, 2) if isinstance(v, float) else v
+
         return {
             "runs_total": n,
+            "attempts_total": len(recs),
             "prompts_total": prompts,
             "tokens_total": {"prompt": pt, "completion": ct},
             "tokens_per_sec": {"current": tps_cur, "avg": tps_avg},
+            "decode_tokens_per_sec": {"current": dec_cur, "avg": dec_avg, "p50": dec_p50},
+            "ttft_ms": {"p50": _r(_pct_of(ttfts, 0.50)), "p95": _r(_pct_of(ttfts, 0.95))},
+            "queue_wait_ms": {"p50": _pct_of(qwaits, 0.50), "p95": _pct_of(qwaits, 0.95)},
+            "errors_total": len(errs),
+            "errors_by_kind": dict(ek),
             "run_time_ms": {
                 "min": walls[0] if n else 0, "max": walls[-1] if n else 0,
                 "avg": int(sum(walls) / n) if n else 0,
@@ -494,9 +772,9 @@ class Server:
         if window == "session":
             recs = eta.records[eta.session_start_idx:]
             window_start, persisted = eta.session_start_ts, False
-        elif window == "24h":
-            from datetime import timedelta
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)
+        elif window in ("24h", "7d"):
+            hours = 24 if window == "24h" else 24 * 7
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)
                       ).strftime("%Y-%m-%dT%H:%M:%SZ")
             recs = [r for r in eta.records if r.get("ts", "") >= cutoff]
             window_start, persisted = cutoff, True
@@ -521,6 +799,7 @@ class Server:
             "by_session": breakdown("client_id"),
             "by_agent": breakdown("agent"),
             "by_lane_class": breakdown("class"),
+            "by_model": breakdown("model"),
         }
 
     async def _serve_metrics(self, writer, target: str) -> None:
@@ -698,6 +977,102 @@ class Server:
             "trace_id": trace_id, "nodes": nodes, "edges": edges,
         }).encode())
 
+    # ---- /metrics/timeseries ----------------------------------------------
+    # Recomputed from jobs.jsonl (+ spills.jsonl), so it survives restart and
+    # reports persisted:true. One provider entry (COCKPIT_PROVIDER_ID, default
+    # 'local') — the broker fronts one upstream today; the shape is N-ready.
+
+    def _timeseries(self, window: str, bucket_param: str | None) -> dict:
+        eta = self.broker.eta
+        recs = eta.records
+        now = datetime.now(timezone.utc)
+        if window == "session":
+            start = _parse_iso(eta.session_start_ts) or now
+            default_bucket = 300
+        elif window == "24h":
+            start, default_bucket = now - timedelta(hours=24), 3600
+        elif window == "7d":
+            start, default_bucket = now - timedelta(days=7), 86400
+        else:
+            window = "lifetime"
+            start = (_parse_iso(recs[0].get("ts", "")) if recs else None) or now
+            default_bucket = 86400
+        bucket_s = _parse_bucket(bucket_param) or default_bucket
+
+        start_e = (int(start.timestamp()) // bucket_s) * bucket_s
+        now_e = int(now.timestamp())
+        nbuckets = min(1000, max(1, (now_e - start_e) // bucket_s + 1))
+        pid = os.environ.get("COCKPIT_PROVIDER_ID", "local")
+
+        grouped: list[list[dict]] = [[] for _ in range(nbuckets)]
+        for r in recs:
+            dt = _parse_iso(r.get("ts", ""))
+            if dt is None:
+                continue
+            idx = (int(dt.timestamp()) - start_e) // bucket_s
+            if 0 <= idx < nbuckets:
+                grouped[idx].append(r)
+        spills = [0] * nbuckets
+        for ev in self.broker.spill_records:
+            dt = _parse_iso(ev.get("ts", ""))
+            if dt is None:
+                continue
+            idx = (int(dt.timestamp()) - start_e) // bucket_s
+            if 0 <= idx < nbuckets:
+                spills[idx] += 1
+
+        buckets = []
+        for i in range(nbuckets):
+            rs = grouped[i]
+            ok = [r for r in rs if r.get("status", "ok") == "ok"]
+            errors = sum(1 for r in rs if r.get("status") == "error")
+            tokens = sum((r.get("prompt_tokens", 0) or 0)
+                         + (r.get("completion_tokens", 0) or 0) for r in ok)
+            decodes = [
+                r["completion_tokens"] / ((int(r["wall_ms"]) - r["ttft_ms"]) / 1000.0)
+                for r in ok
+                if r.get("ttft_ms") is not None and r.get("completion_tokens")
+                and int(r.get("wall_ms", 0)) > r["ttft_ms"]
+            ]
+            ttfts = [r["ttft_ms"] for r in ok if r.get("ttft_ms") is not None]
+            qwaits = [r["queue_wait_ms"] for r in rs if r.get("queue_wait_ms") is not None]
+            buckets.append({
+                "ts": datetime.fromtimestamp(
+                    start_e + i * bucket_s, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "by_provider": {pid: {
+                    "runs": len(ok),
+                    "tokens": tokens,
+                    "decode_tps_p50": round(statistics.median(decodes), 2) if decodes else None,
+                    "ttft_ms_p50": _pct_of(ttfts, 0.50),
+                    "queue_wait_ms_p50": _pct_of(qwaits, 0.50),
+                    "spilled": spills[i],
+                    "errors": errors,
+                }},
+            })
+        return {"window": window, "bucket_s": bucket_s, "persisted": True,
+                "provider_id": pid, "buckets": buckets}
+
+    async def _serve_timeseries(self, writer, target: str) -> None:
+        qs = (target.split("?", 1) + [""])[1]
+        params = dict(kv.split("=", 1) for kv in qs.split("&") if "=" in kv)
+        state = self._timeseries(params.get("window", "24h"), params.get("bucket"))
+        await send_simple(writer, 200, json.dumps(state, indent=1).encode())
+
+    # ---- /spills ----------------------------------------------------------
+    async def _serve_spills(self, writer, target: str) -> None:
+        qs = (target.split("?", 1) + [""])[1]
+        params = dict(kv.split("=", 1) for kv in qs.split("&") if "=" in kv)
+        try:
+            limit = int(params.get("limit", 20))
+        except ValueError:
+            limit = 20
+        limit = max(1, min(1000, limit))
+        events = sorted(self.broker.spill_records,
+                        key=lambda e: e.get("ts", ""), reverse=True)[:limit]
+        await send_simple(writer, 200, json.dumps({
+            "spills": events, "count": len(events),
+        }).encode())
+
     # ---- /queue ----------------------------------------------------------
     def _queue_state(self) -> dict:
         b = self.broker
@@ -726,6 +1101,8 @@ class Server:
             })
             total += wall
         state["estimated_clear_seconds"] = round(total, 1)
+        # Per-class predicted wait — arms the offload alert banner (additive).
+        state["predicted_wait_s_by_class"] = b.predicted_wait_by_class()
         return state
 
     async def _serve_queue(self, writer, target: str) -> None:

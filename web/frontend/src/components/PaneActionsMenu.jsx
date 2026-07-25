@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import { Pencil, PackageMinus, Eraser, Download, Cpu, Zap, ChevronRight, ChevronDown } from "lucide-react";
-import { MODEL_GROUPS, isOpusModel } from "./TopBar";
+import { useModelCatalog, isOpusModel } from "../modelCatalog";
 
 const BUSY_TITLE = "Session is busy — try again when it's idle.";
 
@@ -111,7 +111,8 @@ export default function PaneActionsMenu({ session, busy, toast, onClose, onStart
     [session.terminalId, toast]
   );
 
-  const currentModel = MODEL_GROUPS.flatMap((g) => g.models).find((m) => m.id === session.model);
+  const { groups: modelGroups } = useModelCatalog();
+  const currentModel = modelGroups.flatMap((g) => g.models).find((m) => m.id === session.model);
   const fastEligible = isOpusModel(session.model);
 
   // In-session /model switching can only change the model within the current
@@ -119,7 +120,7 @@ export default function PaneActionsMenu({ session, busy, toast, onClose, onStart
   // Anthropic to OpenRouter (or vice versa). That requires spawning a new
   // terminal via TopBar/NewSessionDialog instead, so OpenRouter groups are
   // filtered out of this submenu entirely.
-  const switchableModelGroups = MODEL_GROUPS.filter((g) => g.provider !== "openrouter");
+  const switchableModelGroups = modelGroups.filter((g) => g.provider !== "openrouter");
 
   return (
     <>

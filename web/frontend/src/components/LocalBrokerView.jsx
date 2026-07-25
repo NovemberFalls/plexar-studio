@@ -1,27 +1,24 @@
 /**
- * LocalBrokerView — the full-page Local Broker section (config + reporting).
+ * LocalBrokerView — the Local Broker section shell.
  *
  * Opened from the ActivityRail (Cpu icon), mirroring the FleetView overlay
- * pattern. This is where the broker actually lives; the TopBar popover is
- * only a quick glance. Composes:
- *   - Connection card: identity (what's actually answering at the URL),
- *     enable toggle, plain-English guidance when the wrong service answers.
- *   - Queue & spill card: LaneQueuePanel (live queue + per-class spill sliders).
- *   - Reporting card: LocalMetricsPanel (windowed metrics + breakdowns).
+ * pattern. As of W6 (design_handoff_local_reporting) the body is the full-width
+ * RoutingReportingView dashboard; this shell only supplies the read-at-setup
+ * Connection + Provider panels, rendered inside the dashboard header's settings
+ * popover so the enable toggle, identity line, and provider picker stay
+ * reachable without taking screen real estate from the reporting layer.
  *
  * Props:
  *   localEnabled / setLocalEnabled — feature flag (localStorage-backed in App)
  *   localStatus  — GET /api/local/status result or null
- *   localQueue   — GET /api/local/queue result or null
- *   localSpill   — GET /api/local/spill result or null
- *   localMetrics — GET /api/local/metrics result or null
- *   metricsWindow / setMetricsWindow — lifetime | 24h | session
+ *   localQueue   — GET /api/local/queue result or null (for the badge shadow state)
+ *   selectedProvider — the picked provider ({ id, capabilities, ... }) or null
  *   onSpillChange — (cls, seconds|null) => void
+ *   onToast — (message, kind) => void
  *   onClose — () => void
+ *   children — extra provider panels (picker / models / traces) from App
  */
-import { X, Cpu } from "lucide-react";
-import LaneQueuePanel from "./LaneQueuePanel.jsx";
-import LocalMetricsPanel from "./LocalMetricsPanel.jsx";
+import RoutingReportingView from "./RoutingReportingView.jsx";
 
 const SERVICE_LABEL = {
   lmstudio: "LM Studio",
@@ -135,106 +132,37 @@ export default function LocalBrokerView({
   setLocalEnabled,
   localStatus,
   localQueue,
-  localSpill,
-  localMetrics,
-  metricsWindow,
-  setMetricsWindow,
+  selectedProvider,
   onSpillChange,
+  onToast,
   onClose,
   children, // extra provider panels (picker / models / traces) from App
 }) {
   const compatible = localStatus?.compatible === true;
 
+  // Connection + Provider live in the dashboard header's settings popover —
+  // read-at-setup, not read-at-a-glance.
+  const settings = (
+    <>
+      <ConnectionCard
+        localEnabled={localEnabled}
+        setLocalEnabled={setLocalEnabled}
+        status={localStatus}
+      />
+      {localEnabled && children && <Card title="Provider">{children}</Card>}
+    </>
+  );
+
   return (
-    <div
-      role="region"
-      aria-label="Local Broker"
-      className="flex-1 min-w-0"
-      style={{
-        // In-area view: fills the terminal region only — rail/sidebar/top bar
-        // stay visible, so the rail Cpu icon is the natural way in and out.
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-        backgroundColor: "var(--cc-bg, var(--bg-primary))",
-        color: "var(--cc-fg, var(--text-primary))",
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0 22px",
-          height: 52,
-          borderBottom: "1px solid var(--cc-border, var(--border-color))",
-          flexShrink: 0,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Cpu size={17} style={{ color: "var(--cc-accent, var(--accent))" }} />
-          <span style={{ fontSize: 14, fontWeight: 800, letterSpacing: ".08em" }}>LOCAL BROKER</span>
-        </div>
-        <button
-          onClick={onClose}
-          className="transition-colors hover-bg-surface"
-          style={{ display: "flex", padding: 6, borderRadius: 7, color: "var(--cc-dim, var(--text-secondary))" }}
-          aria-label="Close Local Broker view"
-        >
-          <X size={17} />
-        </button>
-      </div>
-
-      {/* Body */}
-      <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(300px, 380px) minmax(360px, 1fr)",
-            gap: 14,
-            maxWidth: 1100,
-            margin: "0 auto",
-            alignItems: "start",
-          }}
-        >
-          {/* Left column: connection + queue/spill */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <ConnectionCard
-              localEnabled={localEnabled}
-              setLocalEnabled={setLocalEnabled}
-              status={localStatus}
-            />
-            {localEnabled && compatible && (
-              <Card title="Queue & Spill">
-                <LaneQueuePanel queue={localQueue} spillConfig={localSpill} onSpillChange={onSpillChange} />
-              </Card>
-            )}
-            {localEnabled && children && (
-              <Card title="Provider">
-                {children}
-              </Card>
-            )}
-          </div>
-
-          {/* Right column: reporting */}
-          <Card title="Reporting">
-            {localEnabled && compatible ? (
-              <LocalMetricsPanel
-                metrics={localMetrics}
-                window={metricsWindow}
-                setWindow={setMetricsWindow}
-              />
-            ) : (
-              <div className="text-xs" style={{ color: "var(--text-muted)", padding: "12px 14px", lineHeight: 1.5 }}>
-                {localEnabled
-                  ? "Reporting appears once the lane broker is connected."
-                  : "Enable the local broker to start polling queue and reporting metrics."}
-              </div>
-            )}
-          </Card>
-        </div>
-      </div>
-    </div>
+    <RoutingReportingView
+      providerId={selectedProvider?.id}
+      enabled={!!localEnabled && compatible}
+      status={localStatus}
+      queueShadow={localQueue?.shadow}
+      onSpillChange={onSpillChange}
+      onToast={onToast}
+      settings={settings}
+      onClose={onClose}
+    />
   );
 }

@@ -9,7 +9,7 @@ import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import WorkflowsPanel from "./WorkflowsPanel";
 import PaneActionsMenu from "./PaneActionsMenu";
-import { MODELS } from "./TopBar";
+import { useModelCatalog } from "../modelCatalog";
 import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import "@xterm/xterm/css/xterm.css";
 
@@ -87,7 +87,8 @@ const TerminalPane = forwardRef(function TerminalPane({
   // Long OpenRouter slugs (e.g. "deepseek/deepseek-v4-pro") would overflow the
   // pill in the header — display the friendly label when the id is known,
   // falling back to the raw string (covers unrecognized/future model ids).
-  const modelLabel = MODELS.find((m) => m.id === session.model)?.label || session.model;
+  const { models: modelList } = useModelCatalog();
+  const modelLabel = modelList.find((m) => m.id === session.model)?.label || session.model;
 
   // Compact number formatter for header usage stats: 1.2M / 45.3k / 812
   const fmtTokens = useCallback((n) => {
@@ -803,7 +804,11 @@ const TerminalPane = forwardRef(function TerminalPane({
               <span
                 className="text-[10px] truncate"
                 style={{ color: "var(--cc-muted, var(--text-muted))" }}
-                title="Total tokens this session"
+                title={
+                  typeof usage.est_cost_usd === "number"
+                    ? "Total tokens this session · estimated API-equivalent cost (what these tokens would cost at pay-as-you-go API rates — not your subscription bill)"
+                    : "Total tokens this session"
+                }
               >
                 {"⏶"}{fmtTokens(usage.total_tokens)}
                 {typeof usage.est_cost_usd === "number" && ` · $${usage.est_cost_usd.toFixed(2)}`}

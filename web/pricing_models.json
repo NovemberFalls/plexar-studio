@@ -1,0 +1,33 @@
+{
+  "_comment": "Reference API pricing (USD per 1M tokens) for the Ledger / API comparison views. Hand-updated checked-in JSON, not a live fetch — bump fetched_at whenever rates are re-verified against the vendor's published pricing page. Values here mirror the verified PRICING table in usage_tracker.py; keep them in sync.",
+  "models": [
+    {
+      "id": "sonnet",
+      "label": "Sonnet 5",
+      "input_per_mtok": 3,
+      "output_per_mtok": 15,
+      "fetched_at": "2026-07-25"
+    },
+    {
+      "id": "opus",
+      "label": "Opus 5",
+      "input_per_mtok": 5,
+      "output_per_mtok": 25,
+      "fetched_at": "2026-07-25"
+    },
+    {
+      "id": "haiku",
+      "label": "Haiku 4.5",
+      "input_per_mtok": 1,
+      "output_per_mtok": 5,
+      "fetched_at": "2026-07-25"
+    },
+    {
+      "id": "fable",
+      "label": "Fable 5",
+      "input_per_mtok": 10,
+      "output_per_mtok": 50,
+      "fetched_at": "2026-07-25"
+    }
+  ]
+}

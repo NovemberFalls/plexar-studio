@@ -11,8 +11,10 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+_SUMMARY_WINDOWS = ("session", "24h", "7d", "lifetime")
 
 logger = logging.getLogger("cockpit.usage")
 
@@ -76,6 +78,9 @@ class UsageTracker:
         self._lock = threading.Lock()
         # Per-file byte offset cache for incremental ingest (keyed by jsonl_path).
         self._offsets: dict[str, int] = {}
+        # ISO timestamp captured at process start — powers the "session" window
+        # for summary(): usage since this tracker instance came up.
+        self._started_at = datetime.now(timezone.utc).isoformat()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         try:
@@ -308,6 +313,78 @@ class UsageTracker:
             "cache_read_tokens": cr,
             "by_model": by_model,
             "by_terminal": by_terminal,
+        }
+
+    def summary(self, window: str = "lifetime") -> dict:
+        """API-side usage summary for the Routing & Reporting dashboard.
+
+        `window` in {'session','24h','7d','lifetime'}. Aggregates the same
+        usage_events store as session_summary/daily_summary, filtered by ts.
+        Cost is computed exclusively via the existing verified _row_cost /
+        _pricing_for path — no reimplementation of token x rate here.
+
+        The store does not carry TTFT or wall-clock timing, so ttft_ms and
+        wall_ms are always emitted as null (per-percentile). errors_total is
+        always 0 — the JSONL ingest only sees successful assistant turns.
+        """
+        if window not in _SUMMARY_WINDOWS:
+            window = "lifetime"
+
+        cutoff: str | None = None
+        if window == "session":
+            cutoff = self._started_at
+        elif window == "24h":
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        elif window == "7d":
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+        with self._lock:
+            if cutoff is None:
+                rows = self._conn.execute(
+                    "SELECT model, input_tokens, output_tokens, "
+                    "cache_creation_tokens, cache_read_tokens FROM usage_events"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT model, input_tokens, output_tokens, "
+                    "cache_creation_tokens, cache_read_tokens "
+                    "FROM usage_events WHERE ts >= ?",
+                    (cutoff,),
+                ).fetchall()
+
+        prompt_tokens = completion_tokens = 0
+        cost = 0.0
+        by_model: dict[str, dict] = {}
+        for r in rows:
+            row_cost = _row_cost(
+                r["model"], r["input_tokens"], r["output_tokens"],
+                r["cache_creation_tokens"], r["cache_read_tokens"],
+            )
+            prompt_tokens += r["input_tokens"]
+            completion_tokens += r["output_tokens"]
+            cost += row_cost
+
+            m = r["model"] or ""
+            bm = by_model.setdefault(m, {"model": m, "runs": 0, "tokens": 0, "cost_usd": 0.0})
+            bm["runs"] += 1
+            bm["tokens"] += (
+                r["input_tokens"] + r["output_tokens"]
+                + r["cache_creation_tokens"] + r["cache_read_tokens"]
+            )
+            bm["cost_usd"] += row_cost
+
+        for m in by_model:
+            by_model[m]["cost_usd"] = round(by_model[m]["cost_usd"], 4)
+
+        return {
+            "window": window,
+            "runs": len(rows),
+            "tokens": {"prompt": prompt_tokens, "completion": completion_tokens},
+            "ttft_ms": {"p50": None, "p95": None},
+            "wall_ms": {"p50": None, "p95": None},
+            "errors_total": 0,
+            "cost_usd": round(cost, 4),
+            "by_model": sorted(by_model.values(), key=lambda b: b["tokens"], reverse=True),
         }
 
     def close(self) -> None:
