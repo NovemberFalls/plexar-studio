@@ -2075,8 +2075,10 @@ _PROVIDERS = {
         "broker_url": _VLLM_URL,
         "management_url": _VLLM_URL,
         "auth": {"type": "none"},
-        # vLLM does not serve the broker's queue/spill/traces shapes.
-        "capabilities": ["models", "health"],
+        # vLLM does not serve the broker's queue/spill/traces shapes, but it
+        # DOES export a Prometheus /metrics endpoint that _vllm_metrics reshapes
+        # into the broker metrics contract (cumulative-since-start; see adapter).
+        "capabilities": ["models", "health", "metrics"],
     },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
@@ -2365,6 +2367,187 @@ def _mgmt_get(provider: dict, path: str) -> dict:
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+# ── vLLM /metrics adapter (Prometheus → broker metrics contract) ──
+#
+# vLLM has no lane broker in front of it, but it DOES export a Prometheus
+# text-exposition /metrics endpoint. This adapter scrapes it and reshapes it
+# into the same contract the broker's /metrics returns, so a vLLM provider can
+# carry the `metrics` capability and light up the Routing & Reporting dashboard
+# exactly like the broker-fronted providers.
+#
+# HONESTY BOUNDARIES (surfaced in the payload, not hidden):
+#   - vLLM counters are cumulative SINCE SERVER START -- there is no 24h/session
+#     windowing, so `window_exact` is True only for "lifetime".
+#   - by_session/by_agent/by_lane_class are empty: vLLM tags samples by
+#     model_name only, not by client/agent/lane class.
+
+
+def _http_get_text(url: str, timeout: float | None = None) -> str:
+    """GET *url* and return the raw response body as text (no JSON parse).
+
+    Used for scraping Prometheus text-exposition endpoints (vLLM /metrics).
+    Same no-redirect / blocking / monkeypatch-friendly shape as ``_broker_get``.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Accept": "text/plain"})
+    with _NO_REDIRECT_OPENER.open(req, timeout=timeout or _LOCAL_BROKER_TIMEOUT) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def _split_labels(label_str: str) -> list:
+    """Split a Prometheus label block ``a="1",b="2"`` on commas OUTSIDE quotes.
+
+    Naive ``str.split(",")`` would break on a comma inside a quoted value (e.g.
+    a model path); this respects quotes.
+    """
+    pairs, buf, in_q = [], [], False
+    for ch in label_str:
+        if ch == '"':
+            in_q = not in_q
+            buf.append(ch)
+        elif ch == "," and not in_q:
+            pairs.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    if "".join(buf).strip():
+        pairs.append("".join(buf))
+    return pairs
+
+
+def _parse_prometheus(text: str) -> dict:
+    """Parse Prometheus text-exposition format into {name: [(labels, value), ...]}.
+
+    Minimal and dependency-free: skips ``# HELP``/``# TYPE`` comment lines,
+    splits each sample into metric name, optional ``{label="v",...}`` set, and a
+    float value. Malformed lines are skipped rather than raising -- a scrape is
+    best-effort telemetry.
+    """
+    out: dict = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "{" in line:
+            name, rest = line.split("{", 1)
+            label_str, _, val_str = rest.rpartition("}")
+        else:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name, label_str, val_str = parts[0], "", parts[1]
+        name = name.strip()
+        val_str = val_str.strip().split()[0] if val_str.strip() else ""
+        try:
+            value = float(val_str)
+        except ValueError:
+            continue
+        labels = {}
+        for pair in _split_labels(label_str):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                labels[k.strip()] = v.strip().strip('"')
+        out.setdefault(name, []).append((labels, value))
+    return out
+
+
+def _hist_sum_count(samples: dict, base: str) -> tuple:
+    """Return (sum, count) totalled across all label sets for a histogram."""
+    total = sum(v for _, v in samples.get(base + "_sum", []))
+    count = sum(v for _, v in samples.get(base + "_count", []))
+    return total, count
+
+
+def _hist_quantile(samples: dict, base: str, q: float):
+    """Approximate the *q*-quantile (0..1) of a Prometheus histogram by linear
+    interpolation across cumulative ``_bucket{le=...}`` counts.
+
+    Returns the value in the histogram's native unit (seconds for vLLM latency
+    histograms), or None if the histogram is absent/empty. Buckets are summed
+    across label sets (vLLM tags by model_name; we aggregate the whole server).
+    """
+    def _le(x):
+        return float("inf") if x in ("+Inf", "Inf") else float(x)
+
+    buckets: dict = {}
+    for labels, v in samples.get(base + "_bucket", []):
+        le = labels.get("le")
+        if le is None:
+            continue
+        buckets[le] = buckets.get(le, 0.0) + v
+    if not buckets:
+        return None
+    ordered = sorted(buckets.items(), key=lambda kv: _le(kv[0]))
+    total = ordered[-1][1]
+    if total <= 0:
+        return None
+    target = q * total
+    prev_le, prev_c = 0.0, 0.0
+    for le_str, cum in ordered:
+        if cum >= target:
+            le = _le(le_str)
+            if le == float("inf"):
+                return prev_le or None
+            if cum == prev_c:
+                return le
+            frac = (target - prev_c) / (cum - prev_c)
+            return prev_le + frac * (le - prev_le)
+        prev_le, prev_c = _le(le_str), cum
+    return None
+
+
+def _vllm_metrics(base_url: str, window: str) -> dict:
+    """Scrape vLLM's Prometheus /metrics and map it into the broker's metrics
+    contract shape. Raises on transport error (route handler -> 503)."""
+    s = _parse_prometheus(_http_get_text(base_url + "/metrics"))
+
+    def _sum(name):
+        return sum(v for _, v in s.get(name, []))
+
+    runs = int(_sum("vllm:request_success_total"))
+    pt = int(_sum("vllm:prompt_tokens_total"))
+    ct = int(_sum("vllm:generation_tokens_total"))
+
+    e2e_sum, _e2e_count = _hist_sum_count(s, "vllm:e2e_request_latency_seconds")
+    tpot_sum, tpot_count = _hist_sum_count(s, "vllm:time_per_output_token_seconds")
+
+    tps_avg = round(ct / e2e_sum, 2) if e2e_sum > 0 and ct else None
+    decode_avg = round(tpot_count / tpot_sum, 2) if tpot_sum > 0 else None
+
+    def _ms(name, q):
+        v = _hist_quantile(s, name, q)
+        return round(v * 1000, 1) if v is not None else None
+
+    return {
+        "window": window,
+        "window_exact": window == "lifetime",
+        "source": "vllm-prometheus",
+        "note": "vLLM counters are cumulative since server start; time windows are not applied.",
+        "persisted": False,
+        "runs_total": runs,
+        "prompts_total": runs,  # vLLM has no distinct X-Trace-Id / prompt concept
+        "tokens_total": {"prompt": pt, "completion": ct},
+        "tokens_per_sec": {"current": None, "avg": tps_avg},
+        "decode_tokens_per_sec": {"current": None, "avg": decode_avg, "p50": None},
+        "ttft_ms": {
+            "p50": _ms("vllm:time_to_first_token_seconds", 0.50),
+            "p95": _ms("vllm:time_to_first_token_seconds", 0.95),
+        },
+        "queue_wait_ms": {
+            "p50": _ms("vllm:request_queue_time_seconds", 0.50),
+            "p95": _ms("vllm:request_queue_time_seconds", 0.95),
+        },
+        "run_time_ms": {
+            "p50": _ms("vllm:e2e_request_latency_seconds", 0.50),
+            "p95": _ms("vllm:e2e_request_latency_seconds", 0.95),
+        },
+        "by_session": [],
+        "by_agent": [],
+        "by_lane_class": [],
+    }
 
 
 # ── Service identity (the middleware layer) ──────────────
@@ -2665,7 +2848,10 @@ async def get_provider_metrics(provider_id: str, window: str = "lifetime"):
             status_code=400,
         )
     try:
-        data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}", provider["broker_url"])
+        if provider.get("kind") == "vllm":
+            data = await asyncio.to_thread(_vllm_metrics, provider["broker_url"], window)
+        else:
+            data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}", provider["broker_url"])
     except Exception:
         logger.debug("Provider %s /metrics unreachable", provider_id, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
@@ -2923,6 +3109,15 @@ async def get_provider_metrics_timeseries(provider_id: str, window: str = "24h",
         return JSONResponse(
             {"error": f"window must be one of {list(_LOCAL_METRICS_WINDOWS)}"},
             status_code=400,
+        )
+    # vLLM's Prometheus counters are cumulative-since-start -- there is no
+    # per-bucket history to recompute. Say so honestly instead of proxying a
+    # /metrics/timeseries the vLLM server does not serve (which would 503 as if
+    # it were merely unreachable).
+    if provider.get("kind") == "vllm":
+        return JSONResponse(
+            {"window": window, "bucket": bucket, "buckets": [], "supported": False,
+             "note": "vLLM exposes cumulative counters only; no recomputable timeseries."}
         )
     try:
         data = await asyncio.to_thread(

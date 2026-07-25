@@ -25,10 +25,10 @@ vLLM is now a fully working first-class local provider AND the live orchestratio
 - **Lane wired**: `team/bench/local_lane/local-lanes.json` `gpu-main` → vLLM :8001 (LM Studio preserved as `gpu-lmstudio`). Live-verified: a real agentic worker card ran on vLLM via `local_worker.sh` and completed using the Write tool.
 - Measured: vLLM 3.4x single-stream / ~12x batched vs LM Studio on the 30B-a3b MoE.
 
-## NEXT (post-compact — the two remaining pieces)
+## NEXT (post-compact)
 
-1. **vLLM `/metrics` adapter** — map vLLM's Prometheus `/metrics` into the broker's runs/TTFT/decode shape, bump the `vllm-local` provider capabilities to include `metrics`, so vLLM shows up in the Routing & Reporting dashboard (today LOCAL SHARE stays 0% there because vLLM traffic doesn't flow through the broker and exposes no broker-shaped metrics). THEN it becomes a visible reporting backend.
-2. **Quality crown** — run 30B-a3b vs the crowned 27B through the team arena (champion cells k=2 on WORKHORSE/MUNDANE fixtures). Adopted on speed + arch-fit ahead of this; the profile notes it's uncrowned.
+1. ~~**vLLM `/metrics` adapter**~~ — **DONE (v1.6.3, 2026-07-25).** `_parse_prometheus` + `_hist_quantile` + `_vllm_metrics` in server.py scrape vLLM's Prometheus `/metrics` and reshape it into the broker metrics contract (runs/prompts/tokens/tps/decode/ttft/run_time). `vllm-local` capabilities now include `metrics`. Honesty markers: counters are cumulative-since-server-start so `window_exact` is True only for `lifetime`; `by_session`/`by_agent`/`by_lane_class` are empty (vLLM tags by model_name only); `/metrics/timeseries` returns an honest `supported:false` instead of a misleading 503. 10 new tests (`test_vllm_metrics.py`); full suite 466 passed. **QA:** select vLLM in ProviderPicker → the Reporting card should populate (see QA note in the crown section).
+2. **Quality crown** — run 30B-a3b vs the crowned 27B through the team arena (champion cells k=2 on WORKHORSE/MUNDANE fixtures). Adopted on speed + arch-fit ahead of this; the profile notes it's uncrowned. STILL PENDING — needs the physical GPU swap (vLLM and LM Studio can't co-reside on the 3090).
 
 ## Other follow-ups
 - A "managed by Cockpit" indicator for the vLLM provider in the Connection card.

@@ -299,7 +299,7 @@ async def test_providers_list_shape_no_urls(client):
             "label": "vLLM (local)",
             "kind": "vllm",
             "scope": "local",
-            "capabilities": ["models", "health"],
+            "capabilities": ["models", "health", "metrics"],
             "endpoint_hint": "127.0.0.1:8001",
         },
     ]
