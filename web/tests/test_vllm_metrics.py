@@ -113,6 +113,18 @@ def test_vllm_metrics_reshape(monkeypatch):
     assert server_module._looks_like(m, server_module._METRICS_SHAPE_KEYS)
 
 
+def test_vllm_metrics_accepts_renamed_tpot_histogram(monkeypatch):
+    # Newer vLLM builds name the per-output-token histogram
+    # request_time_per_output_token_seconds (SAMPLE uses the old name).
+    renamed = SAMPLE.replace(
+        "vllm:time_per_output_token_seconds",
+        "vllm:request_time_per_output_token_seconds",
+    )
+    monkeypatch.setattr(server_module, "_http_get_text", lambda url, timeout=None: renamed)
+    m = server_module._vllm_metrics("http://127.0.0.1:8001", "lifetime")
+    assert m["decode_tokens_per_sec"]["avg"] == 200.0  # count/sum = 4000/20
+
+
 def test_vllm_metrics_window_not_exact(monkeypatch):
     monkeypatch.setattr(server_module, "_http_get_text", lambda url, timeout=None: SAMPLE)
     m = server_module._vllm_metrics("http://127.0.0.1:8001", "24h")

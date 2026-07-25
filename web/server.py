@@ -2512,7 +2512,12 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
     ct = int(_sum("vllm:generation_tokens_total"))
 
     e2e_sum, _e2e_count = _hist_sum_count(s, "vllm:e2e_request_latency_seconds")
-    tpot_sum, tpot_count = _hist_sum_count(s, "vllm:time_per_output_token_seconds")
+    # Per-output-token histogram was renamed across vLLM versions
+    # (time_per_output_token_seconds -> request_time_per_output_token_seconds);
+    # accept whichever this build exposes.
+    tpot_sum, tpot_count = _hist_sum_count(s, "vllm:request_time_per_output_token_seconds")
+    if tpot_count == 0:
+        tpot_sum, tpot_count = _hist_sum_count(s, "vllm:time_per_output_token_seconds")
 
     tps_avg = round(ct / e2e_sum, 2) if e2e_sum > 0 and ct else None
     decode_avg = round(tpot_count / tpot_sum, 2) if tpot_sum > 0 else None
