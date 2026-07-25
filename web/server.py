@@ -2524,6 +2524,17 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
     pt = int(_sum("vllm:prompt_tokens_total"))
     ct = int(_sum("vllm:generation_tokens_total"))
 
+    # The served model name rides on every counter's labels; surface it so the
+    # reporting UI can subtitle the vLLM backend column.
+    served_model = None
+    for _name in ("vllm:generation_tokens_total", "vllm:prompt_tokens_total", "vllm:request_success_total"):
+        for labels, _v in s.get(_name, []):
+            if labels.get("model_name"):
+                served_model = labels["model_name"]
+                break
+        if served_model:
+            break
+
     e2e_sum, _e2e_count = _hist_sum_count(s, "vllm:e2e_request_latency_seconds")
     # Per-output-token histogram was renamed across vLLM versions
     # (time_per_output_token_seconds -> request_time_per_output_token_seconds);
@@ -2543,6 +2554,7 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
         "window": window,
         "window_exact": window == "lifetime",
         "source": "vllm-prometheus",
+        "served_model": served_model,
         "note": "vLLM counters are cumulative since server start; time windows are not applied.",
         "persisted": False,
         "runs_total": runs,

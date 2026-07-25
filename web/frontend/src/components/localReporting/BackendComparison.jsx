@@ -242,7 +242,7 @@ export default function BackendComparison({ data, view, actions }) {
     >
       <CardHeader
         title="Backend comparison"
-        right="best value per row highlighted · TTFT/decode measured broker-side"
+        right="best value per row highlighted · TTFT/decode measured at each backend"
       />
 
       {offline ? (

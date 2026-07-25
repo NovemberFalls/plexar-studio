@@ -108,6 +108,7 @@ def test_vllm_metrics_reshape(monkeypatch):
     # honesty markers
     assert m["window_exact"] is True
     assert m["source"] == "vllm-prometheus"
+    assert m["served_model"] == "qwen3-coder-30b-awq"  # from counter labels
     assert m["by_session"] == [] and m["by_agent"] == [] and m["by_lane_class"] == []
     # satisfies the shape-validation contract keys
     assert server_module._looks_like(m, server_module._METRICS_SHAPE_KEYS)
@@ -133,7 +134,9 @@ def test_vllm_metrics_window_not_exact(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_vllm_metrics_uses_adapter(client, monkeypatch):
+async def test_route_vllm_metrics_uses_adapter(client, monkeypatch, _tmp_store):
+    # _tmp_store isolates the persistence path (empty rollup) so the overlay is a
+    # no-op and the raw adapter numbers pass through unchanged.
     monkeypatch.setattr(server_module, "_http_get_text", lambda url, timeout=None: SAMPLE)
 
     def _boom(*a, **k):  # broker path must NOT be taken for a vllm provider
