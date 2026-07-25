@@ -176,3 +176,75 @@ async def test_route_vllm_timeseries_honest_unsupported(client):
     body = resp.json()
     assert body["supported"] is False
     assert body["buckets"] == []
+
+
+# ── Persistence (reset-aware accumulator + JSONL dataset) ──
+
+@pytest.fixture
+def _tmp_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "_VLLM_METRICS_DIR", str(tmp_path))
+    monkeypatch.setattr(server_module, "_VLLM_METRICS_LOG", str(tmp_path / "vllm-metrics.jsonl"))
+    monkeypatch.setattr(server_module, "_VLLM_METRICS_ROLLUP", str(tmp_path / "vllm-metrics-rollup.json"))
+    return tmp_path
+
+
+def _metrics(runs, prompt, completion):
+    return {"runs_total": runs, "tokens_total": {"prompt": prompt, "completion": completion},
+            "tokens_per_sec": {"avg": 10.0}, "decode_tokens_per_sec": {"avg": 90.0}}
+
+
+def test_record_sample_writes_log_and_rollup(_tmp_store):
+    server_module._record_vllm_sample(_metrics(10, 1000, 200))
+    rollup = server_module._load_vllm_rollup()
+    assert rollup["carried"] == {"runs": 0, "prompt": 0, "completion": 0}
+    assert rollup["last_raw"] == {"runs": 10, "prompt": 1000, "completion": 200}
+    lines = (_tmp_store / "vllm-metrics.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1
+    import json as _j
+    assert _j.loads(lines[0])["runs"] == 10
+
+
+def test_record_sample_banks_on_reset(_tmp_store):
+    server_module._record_vllm_sample(_metrics(10, 1000, 200))   # pre-restart peak
+    server_module._record_vllm_sample(_metrics(3, 300, 60))      # vLLM restarted -> lower
+    rollup = server_module._load_vllm_rollup()
+    # the pre-restart totals are banked into carried
+    assert rollup["carried"] == {"runs": 10, "prompt": 1000, "completion": 200}
+    assert rollup["last_raw"] == {"runs": 3, "prompt": 300, "completion": 60}
+
+
+def test_apply_persistence_overlays_baseline(_tmp_store):
+    server_module._save_vllm_rollup(
+        {"carried": {"runs": 10, "prompt": 1000, "completion": 200},
+         "last_raw": {"runs": 3, "prompt": 300, "completion": 60}})
+    live = _metrics(5, 500, 100)      # current vLLM session climbed past last_raw
+    out = server_module._vllm_apply_persistence(live)
+    assert out["runs_total"] == 15                 # 10 carried + 5 live
+    assert out["tokens_total"] == {"prompt": 1500, "completion": 300}
+    assert out["persisted"] is True
+    assert out["live_session"]["runs"] == 5
+
+
+def test_apply_persistence_honors_unbanked_reset(_tmp_store):
+    # last_raw is high but live is lower => a restart the sampler hasn't banked
+    # yet; the overlay must still count the pre-reset total (no dip).
+    server_module._save_vllm_rollup(
+        {"carried": {"runs": 0, "prompt": 0, "completion": 0},
+         "last_raw": {"runs": 100, "prompt": 9000, "completion": 800}})
+    out = server_module._vllm_apply_persistence(_metrics(2, 150, 30))
+    assert out["runs_total"] == 102                # 100 pre-reset + 2 live, not 2
+    assert out["tokens_total"]["completion"] == 830
+
+
+@pytest.mark.asyncio
+async def test_route_metrics_is_persisted(client, _tmp_store, monkeypatch):
+    monkeypatch.setattr(server_module, "_http_get_text", lambda url, timeout=None: SAMPLE)
+    server_module._save_vllm_rollup(
+        {"carried": {"runs": 100, "prompt": 5000, "completion": 900},
+         "last_raw": {"runs": 10, "prompt": 12000, "completion": 4000}})
+    async with client as c:
+        resp = await c.get("/api/local/vllm-local/metrics")
+    body = resp.json()
+    assert body["persisted"] is True
+    assert body["runs_total"] == 110              # 100 carried + 10 live (SAMPLE)
+    assert body["live_session"]["runs"] == 10

@@ -143,6 +143,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.error("Managed vLLM startup failed", exc_info=True)
 
+    # vLLM metrics sampler: persists vLLM's reset-prone counters to a crude
+    # on-disk dataset so lifetime usage survives container restarts. Best-effort.
+    app.state.vllm_sampler_task = asyncio.create_task(_vllm_sampler_loop())
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
     yield
@@ -166,6 +170,15 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     usage_tracker.close()
+
+    # Cancel the vLLM metrics sampler
+    vllm_sampler = getattr(app.state, "vllm_sampler_task", None)
+    if vllm_sampler:
+        vllm_sampler.cancel()
+        try:
+            await vllm_sampler
+        except asyncio.CancelledError:
+            pass
 
     # Stop the background state ticker
     await pty_manager.stop_state_ticker()
@@ -2555,6 +2568,158 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
     }
 
 
+# ── vLLM metrics persistence (crude, DB-free dataset) ─────
+#
+# vLLM's Prometheus counters reset to zero on every container restart, so a
+# restart would otherwise lose all history. Cockpit persists them under
+# ~/.claude-cockpit/ as a plain dataset the user can open directly:
+#   vllm-metrics.jsonl        -- append-only, one timestamped sample per line
+#   vllm-metrics-rollup.json  -- running lifetime total, reset-detected
+# The rollup "banks" the last-seen totals whenever a counter drops (= restart),
+# so the reported lifetime survives restarts and downtime. Single writer: the
+# background sampler loop (via _record_vllm_sample). The /metrics read path only
+# OVERLAYS the persisted baseline (read-only) and honors an un-banked reset so
+# the number never dips in the window before the next sample.
+
+_VLLM_METRICS_DIR = os.path.join(os.path.expanduser("~"), ".claude-cockpit")
+_VLLM_METRICS_LOG = os.path.join(_VLLM_METRICS_DIR, "vllm-metrics.jsonl")
+_VLLM_METRICS_ROLLUP = os.path.join(_VLLM_METRICS_DIR, "vllm-metrics-rollup.json")
+_VLLM_SAMPLE_INTERVAL = float(os.getenv("COCKPIT_VLLM_SAMPLE_INTERVAL", "60"))
+_VLLM_COUNTER_KEYS = ("runs", "prompt", "completion")
+
+
+def _now_iso() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def _raw_counters(m: dict) -> dict:
+    """Extract the three cumulative counters from a live _vllm_metrics dict."""
+    tt = m.get("tokens_total") or {}
+    return {
+        "runs": int(m.get("runs_total") or 0),
+        "prompt": int(tt.get("prompt") or 0),
+        "completion": int(tt.get("completion") or 0),
+    }
+
+
+def _load_vllm_rollup() -> dict:
+    """Read the rollup; a fresh (zeroed) rollup on missing/parse error."""
+    try:
+        with open(_VLLM_METRICS_ROLLUP, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.warning("Failed to read %s; starting fresh", _VLLM_METRICS_ROLLUP, exc_info=True)
+    return {"carried": {k: 0 for k in _VLLM_COUNTER_KEYS}, "last_raw": None}
+
+
+def _save_vllm_rollup(rollup: dict) -> None:
+    """Best-effort write of the rollup. Never raises."""
+    try:
+        os.makedirs(_VLLM_METRICS_DIR, exist_ok=True)
+        with open(_VLLM_METRICS_ROLLUP, "w", encoding="utf-8") as f:
+            json.dump(rollup, f, indent=2)
+    except Exception:
+        logger.error("Failed to persist vLLM rollup to %s", _VLLM_METRICS_ROLLUP, exc_info=True)
+
+
+def _vllm_effective(raw: dict, rollup: dict) -> dict:
+    """Effective lifetime counters = live raw + banked carried (+ an un-banked
+    pre-reset total, if a restart is visible but the sampler hasn't banked it
+    yet). Pure -- shared by the overlay and by tests."""
+    carried = {k: int((rollup.get("carried") or {}).get(k, 0)) for k in _VLLM_COUNTER_KEYS}
+    last = rollup.get("last_raw") or {}
+    reset_pending = bool(last) and any(raw[k] < int(last.get(k, 0)) for k in _VLLM_COUNTER_KEYS)
+    add = last if reset_pending else {}
+    return {k: raw[k] + carried[k] + int(add.get(k, 0)) for k in _VLLM_COUNTER_KEYS}
+
+
+def _append_vllm_sample(raw: dict, m: dict, ts: str) -> None:
+    """Append one line to the JSONL dataset. Best-effort; never raises."""
+    try:
+        os.makedirs(_VLLM_METRICS_DIR, exist_ok=True)
+        line = {
+            "ts": ts,
+            "runs": raw["runs"],
+            "prompt_tokens": raw["prompt"],
+            "completion_tokens": raw["completion"],
+            "decode_tps_avg": (m.get("decode_tokens_per_sec") or {}).get("avg"),
+            "tps_avg": (m.get("tokens_per_sec") or {}).get("avg"),
+        }
+        with open(_VLLM_METRICS_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line) + "\n")
+    except Exception:
+        logger.error("Failed to append vLLM metrics sample", exc_info=True)
+
+
+def _record_vllm_sample(m: dict) -> dict:
+    """Reset-aware accumulate + append (SINGLE WRITER -- sampler loop only).
+
+    Banks the pre-restart totals into ``carried`` when any counter dropped since
+    the last sample, updates ``last_raw``, appends the raw sample to the dataset,
+    and returns the new rollup.
+    """
+    raw = _raw_counters(m)
+    rollup = _load_vllm_rollup()
+    last = rollup.get("last_raw")
+    carried = {k: int((rollup.get("carried") or {}).get(k, 0)) for k in _VLLM_COUNTER_KEYS}
+    if last and any(raw[k] < int(last.get(k, 0)) for k in _VLLM_COUNTER_KEYS):
+        for k in _VLLM_COUNTER_KEYS:
+            carried[k] += int(last.get(k, 0))
+        logger.info("vLLM counter reset detected; banked pre-restart totals into rollup")
+    rollup = {"carried": carried, "last_raw": raw, "updated": _now_iso()}
+    _save_vllm_rollup(rollup)
+    _append_vllm_sample(raw, m, rollup["updated"])
+    return rollup
+
+
+def _vllm_apply_persistence(m: dict) -> dict:
+    """Overlay the persisted lifetime baseline onto a live-scraped metrics dict
+    (read-only on the rollup). Percentiles stay live-session -- only the
+    cumulative counters carry across restarts."""
+    raw = _raw_counters(m)
+    eff = _vllm_effective(raw, _load_vllm_rollup())
+    out = dict(m)
+    out["runs_total"] = eff["runs"]
+    out["prompts_total"] = eff["runs"]
+    out["tokens_total"] = {"prompt": eff["prompt"], "completion": eff["completion"]}
+    out["persisted"] = True
+    out["live_session"] = {
+        "runs": raw["runs"],
+        "tokens": {"prompt": raw["prompt"], "completion": raw["completion"]},
+    }
+    return out
+
+
+def _vllm_metrics_persisted(base_url: str, window: str) -> dict:
+    """Live scrape + persisted-baseline overlay, in one blocking call for
+    ``asyncio.to_thread``. Raises on transport error (route -> 503)."""
+    return _vllm_apply_persistence(_vllm_metrics(base_url, window))
+
+
+async def _vllm_sampler_loop() -> None:
+    """Background sampler: every _VLLM_SAMPLE_INTERVAL, scrape the vLLM provider
+    and accumulate+append. Best-effort -- a scrape failure (vLLM down/absent) is
+    swallowed so the loop keeps running until shutdown cancels it."""
+    provider = _PROVIDERS.get("vllm-local")
+    if provider is None:
+        return
+    while True:
+        try:
+            await asyncio.sleep(_VLLM_SAMPLE_INTERVAL)
+            m = await asyncio.to_thread(_vllm_metrics, provider["broker_url"], "lifetime")
+            await asyncio.to_thread(_record_vllm_sample, m)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.debug("vLLM metrics sample skipped (provider unreachable?)", exc_info=True)
+
+
 # ── Service identity (the middleware layer) ──────────────
 #
 # LM Studio's dev server answers UNKNOWN paths with "200 anyway" + a non-broker
@@ -2854,7 +3019,7 @@ async def get_provider_metrics(provider_id: str, window: str = "lifetime"):
         )
     try:
         if provider.get("kind") == "vllm":
-            data = await asyncio.to_thread(_vllm_metrics, provider["broker_url"], window)
+            data = await asyncio.to_thread(_vllm_metrics_persisted, provider["broker_url"], window)
         else:
             data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}", provider["broker_url"])
     except Exception:
