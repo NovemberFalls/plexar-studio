@@ -1621,6 +1621,7 @@ export default function App() {
                 localStatus={localStatus}
                 localQueue={localQueue}
                 selectedProvider={selectedProvider}
+                localModels={localModels}
                 onSpillChange={commitSpill}
                 onToast={toast}
                 onClose={() => setShowLocalBroker(false)}

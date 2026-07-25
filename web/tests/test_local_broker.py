@@ -292,11 +292,24 @@ async def test_providers_list_shape_no_urls(client):
             "kind": "lmstudio",
             "scope": "local",
             "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
-        }
+            "endpoint_hint": "127.0.0.1:1234",
+        },
+        {
+            "id": "vllm-local",
+            "label": "vLLM (local)",
+            "kind": "vllm",
+            "scope": "local",
+            "capabilities": ["models", "health"],
+            "endpoint_hint": "127.0.0.1:8001",
+        },
     ]
     dumped = str(body)
-    assert "127.0.0.1" not in dumped  # no broker_url/management_url leaked
+    # SSRF stance: local providers may expose a display-only host:port
+    # (endpoint_hint) so the user knows where to boot the service, but the FULL
+    # url, scheme, auth, and the raw url keys must never reach the browser.
+    assert "http://" not in dumped and "https://" not in dumped
     assert "auth" not in dumped
+    assert "broker_url" not in dumped and "management_url" not in dumped
 
 
 @pytest.mark.asyncio

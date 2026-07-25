@@ -1,34 +1,60 @@
 # Backlog 02 — vLLM as second local provider (3090-only)
 
-**Status: RESOLVED via Docker — vLLM SERVES. Benchmark done (2026-07-25). Verdict: on the
-shared 3090 the 27B is strictly SLOWER than LM Studio; do NOT adopt vLLM+27B for the lane.**
+**Status: RESOLVED (2026-07-25, corrected). vLLM WINS decisively — but ONLY on the right
+model. The 27B loses (it's a hybrid Mamba+vision model that cripples vLLM); Qwen3-Coder-30B-A3B
+(a dense-attention MoE) runs vLLM's fast path clean and beats LM Studio 3.4x single-stream
+and up to ~12x batched. ADOPT vLLM + Qwen3-Coder-30B-A3B-AWQ for the local lane (quality
+crown pending team bench).**
 
-## RESULT (2026-07-25) — Docker sidestep worked; benchmark settles it
-The native venv ABI hell (below) was sidestepped exactly as recommended: the official
-`vllm/vllm-openai` image serves the downloaded 27B on the 3090.
+## CORRECTED RESULT (2026-07-25) — the model, not the engine, was the variable
+The first pass (below) benchmarked the **27B and concluded vLLM loses**. That conclusion was
+an artifact of the model: Qwen3.6-27B is a **hybrid Mamba + vision** model. vLLM's memory-
+profiling / CUDA-graph fast path HANGS on it, forcing `--enforce-eager` (no graphs) → ~8-9.5
+tok/s, and its 20GB weights starve the KV cache. That first pass even predicted the fix
+("serve a 7B/14B AWQ, drop --enforce-eager … the only config where vLLM could plausibly beat
+LM Studio"). We did exactly that with a dense-attention MoE, and the verdict flips.
 
-- **Docker path works.** Enabled Docker Desktop WSL integration for Ubuntu (settings
-  `EnableIntegrationWithDefaultWslDistro=true`, `IntegratedWslDistros=["Ubuntu"]`) so the
-  ext4 model path bind-mounts natively (no 9p). WSL2 GPU pin quirk: `--gpus device=UUID`
-  does NOT filter (dxg exposes all GPUs; nvidia-smi lists both) — pin the CUDA process
-  with `-e CUDA_DEVICE_ORDER=PCI_BUS_ID -e CUDA_VISIBLE_DEVICES=<3090 UUID>`. vLLM obeys it.
-- **Serve cmd that fit:** `--model /model --served-model-name qwen3.6-27b --max-model-len 2048
-  --gpu-memory-utilization 0.93 --enforce-eager --ipc=host -p 18000:8000`. Weights 19.2GB,
-  peak activation 1.89GB, KV cache only **0.69GB → 4,778 tokens (2.33x concurrency)**.
-  0.95 util OOMs (needs 22.8GB, only 22.76 free); 0.88 gives zero KV blocks. 0.93 is the
-  needle. Boot/profile ~186s.
-- **Throughput (vs LM Studio ~26 tok/s single-stream baseline):**
-  - single-stream: **9.5 tok/s** (2.7x SLOWER than LM Studio)
-  - concurrency=2: 19.3 tok/s aggregate — still slower
-  - concurrency=4: 18.1 tok/s aggregate — still slower
-- **Why vLLM loses here:** the 20GB weights force `--enforce-eager` (no VRAM for CUDA
-  graphs) and a 0.69GB KV cache, capping concurrency at 2.33x. vLLM's only edge is batched
-  throughput — and the 27B leaves no room to deliver it. The 1-deep local lanes wouldn't
-  use batching anyway.
-- **Recommendation:** if a vLLM lane is still wanted, serve a **7B/14B AWQ** (drop
-  `--enforce-eager`, real KV headroom) and re-benchmark — that is the only config where
-  vLLM could plausibly beat LM Studio. Otherwise LM Studio remains the better local backend
-  on this hardware. Container was stopped/removed after the test (freed the 3090 for LM Studio).
+### The winning config — Qwen3-Coder-30B-A3B (`qwen3moe`, MoE ~3B active), AWQ INT4
+`QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ` (~16GB, 6 shards). Served with vLLM's FAST path
+(no `--enforce-eager`): `--quantization awq_marlin --dtype half --max-model-len 16384
+--gpu-memory-utilization 0.92 --max-num-seqs 16`. KV cache **5.49GB → 59,984 tokens (3.66x
+concurrency at 16K ctx)**. First boot ~7min (torch.compile + graph capture; cached after).
+Arch is text-only dense attention → NONE of the 27B's hang. `/v1/messages` (Anthropic API)
+is served natively, so `claude` CLI → broker :1235 → vLLM works with no translation shim.
+
+### Measured — same 32 requests, same prompts/tokens, one 3090
+| conc | LM Studio (GGUF) wall / agg | vLLM (AWQ fast) wall / agg | vLLM |
+|---|---|---|---|
+| 1 | 137.7s / 46.5 tok/s | **39.9s / 160.4 tok/s** | **3.4x** |
+| 4 | 70.1s / 91.3 | **11.7s / 546** | **6.0x** |
+| 8 | 52.1s / 123.0 | **6.6s / 968** | **7.9x** |
+| 16 | (parallel=4 cap) | **4.1s / 1558** | — |
+
+- **Single-stream (conc=1): vLLM 3.4x faster** — matters even for the 1-deep worker lane
+  (`/orchestrate-anthropic-local` runs workers sequentially → this ~3.4x cuts every wall).
+- **Batched: ~12x peak throughput**, near-linear scaling (9.71x at conc16) vs LM Studio
+  flattening by conc4 — the win for any throughput-bound lane (e.g. the podcast).
+- Surprise: llama.cpp's GGUF MoE path is far less optimized than vLLM's Marlin-AWQ kernels
+  on Ampere, so vLLM wins even single-stream (earlier assumption "LM Studio ties single-stream"
+  was wrong for MoE).
+
+### The one honest gap
+**Quality is NOT yet crowned.** Speed measured; whether 30B-a3b matches the 27B's arena-crowned
+coding quality (AWQ vs GGUF quant, dense-27B vs 3B-active-MoE) is the team bench's call
+(champion cells k=2 on WORKHORSE/MUNDANE fixtures). Speed adopts it as a candidate; the arena
+crowns it.
+
+### KV / context caveat
+5.49GB KV → ~60K tokens. Short/medium requests pack 16-way fine; but a real worker card at
+22-55K context uses that whole budget → only ~1-2 concurrent long-context workers per card.
+Fine for the 1-deep lane; the concurrency win is for short/medium requests. More cards (replicas)
+raise the ceiling.
+
+### Adoption lever (broker repoint)
+The broker's upstream is one env var: `COCKPIT_LMSTUDIO_URL` (server.py). Set it to the vLLM
+port to front vLLM instead of LM Studio; everything downstream (worker dispatch + Cockpit's
+provider observation) keeps working. vLLM lifecycle is a Docker container (launch script;
+Cockpit-managed vLLM is a follow-up — the in-process managed broker can't host a container).
 
 ---
 ## Original blocker (kept for history — native venv path, now sidestepped)

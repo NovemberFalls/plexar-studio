@@ -124,10 +124,24 @@ async def lifespan(app: FastAPI):
     # 5. Managed lane broker: Cockpit owns the broker unless an external one
     # already answers (or COCKPIT_MANAGED_BROKER=0). Best-effort — a broker
     # failure must never block Cockpit startup.
+    # Apply any browser-configured local provider endpoints BEFORE the managed
+    # broker starts, so a configured endpoint is live from boot. Defensive — a
+    # bad config file must never block startup.
+    try:
+        apply_persisted_endpoints()
+    except Exception:
+        logger.error("Applying persisted provider endpoints failed", exc_info=True)
+
     try:
         await start_managed_broker()
     except Exception:
         logger.error("Managed broker startup failed", exc_info=True)
+
+    # Managed vLLM: opt-in coexisting local provider, same best-effort posture.
+    try:
+        await start_managed_vllm()
+    except Exception:
+        logger.error("Managed vLLM startup failed", exc_info=True)
 
     logger.info("Startup complete (PID %d)", os.getpid())
 
@@ -158,6 +172,7 @@ async def lifespan(app: FastAPI):
 
     # Stop the managed lane broker (no-op when external/disabled)
     await stop_managed_broker()
+    await stop_managed_vllm()
 
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
@@ -2028,6 +2043,19 @@ _SPILL_MAX_S = 86400
 # ever sees {id,label,kind,scope,capabilities} — broker_url/management_url/auth
 # are server-side only (same SSRF stance as _LOCAL_BROKER_URL above).
 
+COCKPIT_MANAGED_VLLM = os.getenv("COCKPIT_MANAGED_VLLM", "0")
+COCKPIT_VLLM_PORT = os.getenv("COCKPIT_VLLM_PORT", "8001")
+COCKPIT_VLLM_MODEL = os.getenv("COCKPIT_VLLM_MODEL", "/models/Qwen3-Coder-30B-A3B-AWQ")
+COCKPIT_VLLM_SERVED_NAME = os.getenv("COCKPIT_VLLM_SERVED_NAME", "qwen3-coder-30b-awq")
+COCKPIT_VLLM_IMAGE = os.getenv("COCKPIT_VLLM_IMAGE", "vllm/vllm-openai:latest")
+COCKPIT_VLLM_GPU_UUID = os.getenv("COCKPIT_VLLM_GPU_UUID", "")
+COCKPIT_VLLM_MODELS_DIR = os.getenv("COCKPIT_VLLM_MODELS_DIR", "")
+COCKPIT_VLLM_MAX_MODEL_LEN = os.getenv("COCKPIT_VLLM_MAX_MODEL_LEN", "49152")
+COCKPIT_VLLM_MAX_NUM_SEQS = os.getenv("COCKPIT_VLLM_MAX_NUM_SEQS", "2")
+COCKPIT_VLLM_GPU_UTIL = os.getenv("COCKPIT_VLLM_GPU_UTIL", "0.90")
+COCKPIT_VLLM_TOOL_PARSER = os.getenv("COCKPIT_VLLM_TOOL_PARSER", "qwen3_coder")
+_VLLM_URL = "http://127.0.0.1:" + COCKPIT_VLLM_PORT
+
 _PROVIDERS = {
     "lmstudio-local": {
         "id": "lmstudio-local", "label": "LM Studio (local)", "kind": "lmstudio",
@@ -2036,6 +2064,19 @@ _PROVIDERS = {
         "management_url": os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234").rstrip("/"),
         "auth": {"type": "none"},
         "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
+    },
+    "vllm-local": {
+        "id": "vllm-local", "label": "vLLM (local)", "kind": "vllm",
+        "scope": "local",
+        # vLLM does its own continuous batching and must be served DIRECT --
+        # not through the broker (max_concurrent=1 would serialize requests
+        # and kill vLLM's throughput). Coexists beside the broker-fronted
+        # LM Studio provider; the user picks via ProviderPicker.
+        "broker_url": _VLLM_URL,
+        "management_url": _VLLM_URL,
+        "auth": {"type": "none"},
+        # vLLM does not serve the broker's queue/spill/traces shapes.
+        "capabilities": ["models", "health"],
     },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
@@ -2056,6 +2097,31 @@ def _is_safe_provider_url(url) -> bool:
         return False
     parsed = urllib.parse.urlsplit(url)
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _is_allowed_local_host(host) -> bool:
+    """SSRF host allowlist shared by the endpoint setter and the persistence
+    loader. True iff *host* is the literal "localhost" OR an IP literal that,
+    after rejecting the dangerous ranges (unspecified / link-local / multicast /
+    reserved) FIRST, is loopback or private (RFC-1918 / ULA).
+
+    Non-IP, non-"localhost" hostnames are rejected to prevent DNS rebinding.
+    Reject-first ordering mirrors set_provider_endpoint exactly — a link-local
+    IPv4 also matches is_private in some stdlib versions.
+    """
+    import ipaddress
+
+    if not isinstance(host, str):
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.is_unspecified or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+        return False
+    return bool(ip.is_loopback or ip.is_private)
 
 
 def _load_providers_from_file(path: str) -> dict | None:
@@ -2099,9 +2165,109 @@ if _providers_file:
         )
 
 
+# ── Configurable local-provider endpoints (persisted) ────
+#
+# The browser may reconfigure a LOCAL provider's endpoint (host:port). The
+# server proxies to whatever URL is stored, so this is an SSRF surface — the
+# setter route (POST /api/local/{id}/endpoint) does the validation. Here we
+# only persist/restore the *already-validated* result. Config lives beside the
+# managed-broker state at ~/.claude-cockpit/.
+_PROVIDER_ENDPOINTS_FILE = os.path.join(
+    os.path.expanduser("~"), ".claude-cockpit", "provider-endpoints.json"
+)
+
+
+def _load_provider_endpoints() -> dict:
+    """Read the {provider_id: url} map. Returns {} on missing/parse error."""
+    try:
+        with open(_PROVIDER_ENDPOINTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            logger.warning(
+                "provider-endpoints.json is not a JSON object; ignoring"
+            )
+            return {}
+        return data
+    except FileNotFoundError:
+        logger.debug("No provider-endpoints.json at %s", _PROVIDER_ENDPOINTS_FILE)
+        return {}
+    except Exception:
+        logger.warning(
+            "Failed to read %s; ignoring persisted endpoints",
+            _PROVIDER_ENDPOINTS_FILE,
+            exc_info=True,
+        )
+        return {}
+
+
+def _save_provider_endpoints(mapping: dict) -> None:
+    """Best-effort write of the {provider_id: url} map. Never raises."""
+    try:
+        os.makedirs(os.path.dirname(_PROVIDER_ENDPOINTS_FILE), exist_ok=True)
+        with open(_PROVIDER_ENDPOINTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, indent=2)
+    except Exception:
+        logger.error(
+            "Failed to persist provider endpoints to %s",
+            _PROVIDER_ENDPOINTS_FILE,
+            exc_info=True,
+        )
+
+
+def apply_persisted_endpoints() -> None:
+    """Override management_url/broker_url from the persisted config at startup.
+
+    Only LOCAL providers present in the registry are touched, and only when the
+    persisted URL is http(s) AND its host passes the SAME allowlist as the
+    endpoint setter (_is_allowed_local_host) — closing the crafted-json /
+    arbitrary-host bypass at load. Defensive — a bad config file must never
+    block startup.
+    """
+    import urllib.parse
+
+    mapping = _load_provider_endpoints()
+    for provider_id, url in mapping.items():
+        provider = _PROVIDERS.get(provider_id)
+        if provider is None:
+            logger.debug("Persisted endpoint for unknown provider %s ignored", provider_id)
+            continue
+        if provider.get("scope") != "local":
+            logger.debug("Persisted endpoint for non-local provider %s ignored", provider_id)
+            continue
+        parsed = urllib.parse.urlsplit(url) if isinstance(url, str) else None
+        if parsed is None or parsed.scheme not in ("http", "https") or not _is_allowed_local_host(parsed.hostname):
+            logger.warning(
+                "ignoring unsafe persisted endpoint for %s: %s", provider_id, url
+            )
+            continue
+        provider["management_url"] = url
+        provider["broker_url"] = url
+        logger.info("Applied persisted endpoint for provider %s: %s", provider_id, url)
+
+
+def _endpoint_hint(p: dict) -> str | None:
+    """Display-only host:port for a LOCAL provider, so the UI can tell the user
+    where to boot the service ("vLLM · 127.0.0.1:8001 · offline").
+
+    LOCAL scope only. Returns just the netloc (host:port) -- never the scheme,
+    path, query, or auth, which stay server-side (the SSRF stance is about not
+    leaking full/controllable URLs, not a bare localhost host:port the user runs
+    themselves). Remote providers get None.
+    """
+    if p.get("scope") != "local":
+        return None
+    import urllib.parse
+    parsed = urllib.parse.urlsplit(p.get("management_url") or p.get("broker_url") or "")
+    host = parsed.hostname  # .hostname (not .netloc) drops any user:pass@ userinfo
+    if not host:
+        return None
+    return f"{host}:{parsed.port}" if parsed.port else host
+
+
 @app.get("/api/local/providers")
 async def get_local_providers():
-    """List registered providers -- URLs and auth are never sent to the browser."""
+    """List registered providers -- full URLs and auth are never sent to the
+    browser; local providers carry a display-only host:port endpoint_hint."""
     return JSONResponse({
         "providers": [
             {
@@ -2110,10 +2276,30 @@ async def get_local_providers():
                 "kind": p["kind"],
                 "scope": p["scope"],
                 "capabilities": p["capabilities"],
+                "endpoint_hint": _endpoint_hint(p),
             }
             for p in _PROVIDERS.values()
         ]
     })
+
+
+import urllib.request as _urllib_request
+
+
+class _NoRedirect(_urllib_request.HTTPRedirectHandler):
+    """Refuse to follow HTTP 3xx redirects on server-side proxy fetches.
+
+    SSRF hardening: a validated loopback/private endpoint could otherwise 302 us
+    to an arbitrary (e.g. cloud-metadata) URL. Returning None makes urllib raise
+    the 3xx as an HTTPError, which the fetch helpers' callers already treat as
+    unreachable/error — the correct safe outcome.
+    """
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_NO_REDIRECT_OPENER = _urllib_request.build_opener(_NoRedirect)
 
 
 def _broker_get(path: str, query: str = "", base_url: str | None = None) -> dict:
@@ -2134,7 +2320,7 @@ def _broker_get(path: str, query: str = "", base_url: str | None = None) -> dict
     if query:
         url += f"?{query}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -2154,8 +2340,17 @@ def _broker_put(path: str, body: dict, base_url: str | None = None) -> dict:
         method="PUT",
         headers={"Accept": "application/json", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _models_path(provider: dict) -> str:
+    """Return the model-catalog path for *provider*'s management plane.
+
+    LM Studio exposes its richer catalog at /api/v0/models; everything else
+    (vLLM and any OpenAI-compatible server) uses the standard /v1/models.
+    """
+    return "/api/v0/models" if provider.get("kind") == "lmstudio" else "/v1/models"
 
 
 def _mgmt_get(provider: dict, path: str) -> dict:
@@ -2168,7 +2363,7 @@ def _mgmt_get(provider: dict, path: str) -> dict:
 
     url = f"{provider['management_url']}{path}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -2318,6 +2513,103 @@ async def stop_managed_broker() -> None:
     _MANAGED_BROKER["task"] = None
 
 
+# ── Managed vLLM (coexisting local provider) ──────────────
+#
+# vLLM does its own continuous batching, so it must be served DIRECT (not
+# behind the max_concurrent=1 lane broker, which would serialize requests and
+# kill vLLM's throughput). Cockpit optionally owns a vLLM container the same
+# way it owns the lane broker: opt-in, double-bind guarded, best-effort, and
+# never blocking startup/shutdown.
+_MANAGED_VLLM = {"proc": None, "container": "cockpit-vllm"}
+
+
+def _vllm_docker_argv(action: str = "run") -> list[str]:
+    """Build the docker argv (or WSL-wrapped shell string) for run/rm.
+
+    On Windows the Docker CLI lives in WSL, so the command is wrapped as
+    ["wsl", "-e", "bash", "-lc", "<docker ... as one shell string>"]; on
+    other platforms the argv is returned as-is for direct exec.
+    """
+    if action == "rm":
+        docker_argv = ["docker", "rm", "-f", _MANAGED_VLLM["container"]]
+    else:
+        gpus = f'--gpus "device={COCKPIT_VLLM_GPU_UUID}"' if COCKPIT_VLLM_GPU_UUID else "--gpus all"
+        mount = f"-v {COCKPIT_VLLM_MODELS_DIR}:/models" if COCKPIT_VLLM_MODELS_DIR else ""
+        gpu_pin = (
+            f"-e CUDA_DEVICE_ORDER=PCI_BUS_ID -e CUDA_VISIBLE_DEVICES={COCKPIT_VLLM_GPU_UUID}"
+            if COCKPIT_VLLM_GPU_UUID else ""
+        )
+        parts = [
+            "docker", "run", "-d", "--rm", "--name", _MANAGED_VLLM["container"], "--ipc=host",
+            "-p", f"{COCKPIT_VLLM_PORT}:8001", gpus, gpu_pin, mount,
+            COCKPIT_VLLM_IMAGE,
+            "--model", COCKPIT_VLLM_MODEL,
+            "--served-model-name", COCKPIT_VLLM_SERVED_NAME,
+            "--quantization", "awq_marlin", "--dtype", "half",
+            "--enable-auto-tool-choice", "--tool-call-parser", COCKPIT_VLLM_TOOL_PARSER,
+            "--max-model-len", COCKPIT_VLLM_MAX_MODEL_LEN,
+            "--gpu-memory-utilization", COCKPIT_VLLM_GPU_UTIL,
+            "--max-num-seqs", COCKPIT_VLLM_MAX_NUM_SEQS, "--port", "8001",
+        ]
+        docker_argv = [p for p in parts if p]
+
+    if sys.platform == "win32":
+        shell_str = " ".join(docker_argv)
+        return ["wsl", "-e", "bash", "-lc", shell_str]
+    return docker_argv
+
+
+async def start_managed_vllm() -> bool:
+    """Launch the managed vLLM container unless disabled or already answering.
+
+    Returns True when Cockpit's own vLLM container is (being) launched.
+    """
+    if COCKPIT_MANAGED_VLLM != "1":
+        return False
+    if _MANAGED_VLLM["proc"] is not None:
+        return True
+    try:
+        await asyncio.to_thread(_broker_get, "/v1/models", "", _VLLM_URL)
+        logger.info("External vLLM already at %s — not spawning managed one", _VLLM_URL)
+        return False
+    except Exception:
+        pass  # nothing listening — ours to run
+
+    try:
+        argv = _vllm_docker_argv("run")
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        _MANAGED_VLLM["proc"] = proc
+        logger.info(
+            "Managed vLLM starting: container=%s image=%s model=%s port=%s",
+            _MANAGED_VLLM["container"], COCKPIT_VLLM_IMAGE, COCKPIT_VLLM_MODEL, COCKPIT_VLLM_PORT,
+        )
+        return True
+    except Exception:
+        logger.error("Managed vLLM startup failed", exc_info=True)
+        return False
+
+
+async def stop_managed_vllm() -> None:
+    if _MANAGED_VLLM["proc"] is None:
+        return
+    try:
+        argv = _vllm_docker_argv("rm")
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+    except Exception:
+        logger.error("Managed vLLM shutdown failed", exc_info=True)
+    _MANAGED_VLLM["proc"] = None
+
+
 @app.get("/api/local/status")
 async def get_local_status():
     """Report what is actually connected at the configured broker URL."""
@@ -2447,6 +2739,75 @@ async def set_provider_spill(provider_id: str, request: Request):
     return JSONResponse(data)
 
 
+@app.post("/api/local/{provider_id}/endpoint")
+async def set_provider_endpoint(provider_id: str, request: Request):
+    """Reconfigure a LOCAL provider's endpoint (host:port).
+
+    SECURITY-CRITICAL: whatever URL is stored here is fetched server-side, so
+    this is an SSRF surface. Only loopback / RFC-1918 private IP literals (plus
+    the literal "localhost") are accepted; non-IP hostnames are rejected to
+    prevent DNS rebinding, and link-local / cloud-metadata / multicast /
+    reserved / unspecified / public addresses are rejected explicitly.
+    """
+    import ipaddress
+
+    provider = _PROVIDERS.get(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if provider["scope"] != "local":
+        return JSONResponse({"error": "endpoint config is local-only"}, status_code=403)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+
+    host = body.get("host")
+    port = body.get("port")
+    if not isinstance(host, str) or isinstance(port, bool) or not isinstance(port, int):
+        return JSONResponse(
+            {"error": "body must carry host (str) and port (int)"}, status_code=400
+        )
+
+    # Port range.
+    if port < 1 or port > 65535:
+        return JSONResponse({"error": "port must be in 1..65535"}, status_code=400)
+
+    host = host.strip()
+    if not host:
+        return JSONResponse({"error": "host must not be empty"}, status_code=400)
+
+    # Host: accept the literal "localhost"; otherwise require a loopback/private
+    # IP literal. The reject-first allowlist lives in _is_allowed_local_host so
+    # the persistence loader can apply the SAME decision.
+    if not _is_allowed_local_host(host):
+        return JSONResponse(
+            {"error": "host must be 'localhost' or a loopback/private IP address"},
+            status_code=400,
+        )
+
+    # Bracket IPv6 literals so the assembled URL is well-formed (the allowlist
+    # already gated the host; "localhost"/IPv4 pass through unchanged).
+    host_for_url = host
+    try:
+        if host != "localhost" and ipaddress.ip_address(host).version == 6:
+            host_for_url = f"[{host}]"
+    except ValueError:
+        logger.error("host %r passed allowlist but failed to parse as IP", host, exc_info=True)
+        return JSONResponse({"error": "invalid host"}, status_code=400)
+
+    url = f"http://{host_for_url}:{port}"
+    provider["management_url"] = url
+    provider["broker_url"] = url
+    mapping = _load_provider_endpoints()
+    mapping[provider_id] = url
+    _save_provider_endpoints(mapping)
+    logger.info("Provider %s endpoint set to %s", provider_id, url)
+    return JSONResponse({"ok": True, "endpoint_hint": f"{host}:{port}"})
+
+
 @app.get("/api/local/{provider_id}/models")
 async def get_provider_models(provider_id: str):
     provider = _require_provider(provider_id)
@@ -2455,7 +2816,7 @@ async def get_provider_models(provider_id: str):
     if "models" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
     try:
-        data = await asyncio.to_thread(_mgmt_get, provider, "/api/v0/models")
+        data = await asyncio.to_thread(_mgmt_get, provider, _models_path(provider))
     except Exception:
         logger.debug("Provider %s /models unreachable", provider_id, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
@@ -2493,7 +2854,7 @@ async def get_provider_health(provider_id: str):
 
     async def probe_provider():
         try:
-            data = await asyncio.to_thread(_mgmt_get, provider, "/api/v0/models")
+            data = await asyncio.to_thread(_mgmt_get, provider, _models_path(provider))
             return True, _provider_models_loaded_count(data)
         except Exception:
             return False, 0
