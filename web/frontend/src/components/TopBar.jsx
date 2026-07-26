@@ -19,6 +19,39 @@ function queueDepth(q) {
   return (q.in_flight ? 1 : 0) + (Array.isArray(q.queued) ? q.queued.length : 0);
 }
 
+/** Short human duration: 45 -> "45s", 130 -> "2m", 3900 -> "1h5m". */
+function fmtEta(sec) {
+  if (typeof sec !== "number" || !isFinite(sec) || sec <= 0) return null;
+  if (sec < 60) return `${Math.round(sec)}s`;
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${m % 60}m`;
+}
+
+/** Unified live lane readout: prefers the vLLM in-engine block (running/waiting/
+ * decode + wall to estimate drain) and falls back to the broker queue snapshot.
+ * Returns {running, queued, tps, etaSec, total} or null when nothing is live. */
+function laneLive(localQueue, localMetrics) {
+  const m = localMetrics && localMetrics.reachable !== false ? localMetrics : null;
+  const eng = m?.engine;
+  if (eng && (typeof eng.running === "number" || typeof eng.waiting === "number")) {
+    const running = eng.running || 0;
+    const queued = eng.waiting || 0;
+    const tps = m.decode_tokens_per_sec?.avg ?? m.tokens_per_sec?.avg ?? null;
+    // 1-deep continuous-batching lane: drain ≈ (in-flight + waiting) × median wall.
+    const wallMs = m.run_time_ms?.p50;
+    const etaSec = typeof wallMs === "number" && (running + queued) > 0 ? ((running + queued) * wallMs) / 1000 : null;
+    return { running, queued, tps, etaSec, total: running + queued };
+  }
+  const d = queueDepth(localQueue);
+  if (d == null) return null;
+  const running = localQueue?.in_flight ? 1 : 0;
+  const queued = Array.isArray(localQueue?.queued) ? localQueue.queued.length : 0;
+  const tps = m?.tokens_per_sec?.current ?? null;
+  const etaSec = typeof localQueue?.estimated_clear_seconds === "number" ? localQueue.estimated_clear_seconds : null;
+  return { running, queued, tps, etaSec, total: d };
+}
+
 // Re-exported for back-compat: PaneActionsMenu and the test suite import the
 // static model list from here. The LIVE, account-accurate catalog flows through
 // useModelCatalog() (backed by GET /api/models); these constants are the
@@ -119,10 +152,8 @@ export default function TopBar({
     setLocalOpen(false);
   }
 
-  const localDepth = queueDepth(localQueue);
-  const localTps = localMetrics && localMetrics.reachable !== false
-    ? localMetrics.tokens_per_sec?.current
-    : null;
+  const live = laneLive(localQueue, localMetrics);
+  const liveEta = live ? fmtEta(live.etaSec) : null;
 
   return (
     <header
@@ -178,11 +209,20 @@ export default function TopBar({
             aria-haspopup="dialog"
           >
             <Cpu size={15} />
-            {localEnabled && localDepth != null && (
-              <span style={{ fontSize: 11, fontWeight: 600 }}>
-                {localDepth}
-                {typeof localTps === "number" && localTps > 0 && (
-                  <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {Math.round(localTps)} tps</span>
+            {localEnabled && live && (
+              <span
+                style={{ fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}
+                title="running now / queued · decode tok/s · est. time to drain the queue"
+              >
+                {/* current running ▸ queued */}
+                {live.running}
+                <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>▸</span>
+                {live.queued}
+                {typeof live.tps === "number" && live.tps > 0 && (
+                  <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {Math.round(live.tps)} tps</span>
+                )}
+                {liveEta && live.total > 0 && (
+                  <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · ~{liveEta}</span>
                 )}
               </span>
             )}
@@ -264,33 +304,46 @@ export default function TopBar({
                 )}
 
                 {/* Quick glance only — config + full reporting live in the
-                    Local Broker section (rail icon / button below). */}
-                {localEnabled && localStatus && !localStatus.compatible ? (
+                    Local Broker section (rail icon / button below). Shows the
+                    unified live readout (vLLM in-engine depth OR broker queue)
+                    whenever there is live data, so a direct-served provider
+                    isn't hidden behind the "not the lane broker" note. */}
+                {localEnabled && live ? (
+                  <div style={{ padding: "8px 12px", fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Running now</span>
+                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{live.running}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Queued</span>
+                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{live.queued}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Tokens/sec</span>
+                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                        {typeof live.tps === "number" && live.tps > 0 ? Math.round(live.tps) : "—"}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Est. time to drain</span>
+                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                        {live.total > 0 && liveEta ? `~${liveEta}` : "idle"}
+                      </span>
+                    </div>
+                  </div>
+                ) : localEnabled && localStatus && !localStatus.compatible ? (
                   <div className="text-xs" style={{ color: "var(--text-muted)", padding: "10px 12px", lineHeight: 1.5 }}>
                     {localStatus.reachable
                       ? "The connected service is not the lane broker — open Local Broker for details."
                       : "Nothing answering at the broker URL — open Local Broker for details."}
                   </div>
                 ) : localEnabled ? (
-                  <div style={{ padding: "8px 12px", fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span>Queue</span>
-                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                        {localDepth != null ? localDepth : "—"}
-                        {typeof localQueue?.estimated_clear_seconds === "number" && localDepth > 0 &&
-                          ` · clears ~${Math.round(localQueue.estimated_clear_seconds)}s`}
-                      </span>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span>Tokens/sec</span>
-                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                        {typeof localTps === "number" && localTps > 0 ? Math.round(localTps) : "—"}
-                      </span>
-                    </div>
+                  <div className="text-xs" style={{ color: "var(--text-muted)", padding: "10px 12px" }}>
+                    Waiting for the selected provider to report live activity…
                   </div>
                 ) : (
                   <div className="text-xs" style={{ color: "var(--text-muted)", padding: "10px 12px" }}>
-                    Enable to poll the local-lane broker for live queue depth and tokens/sec.
+                    Enable to poll the selected local provider for live queue depth and tokens/sec.
                   </div>
                 )}
 
