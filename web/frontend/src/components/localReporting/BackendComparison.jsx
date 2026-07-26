@@ -66,6 +66,8 @@ function buildProviders(data, hidden) {
       errors_total: p.errors_total,
       attempts_total: p.attempts_total,
       spilled_out: p.spilled_out,
+      ctx_in: p.context?.in || null,
+      ctx_out: p.context?.out || null,
       cost_avoided: null, // computed below once we know ref pricing (not owned by this worker's props)
       hasQueue: true,
     }));
@@ -128,6 +130,36 @@ const ROWS = [
       sub: null,
       raw: typeof p.tokens === "number" ? p.tokens : null,
     }),
+  },
+  {
+    id: "ctx_in",
+    label: "Context in — prompt",
+    unit: "avg · p95",
+    best: null,
+    value: (p) => {
+      const a = p.ctx_in?.avg;
+      const p95 = p.ctx_in?.p95;
+      return {
+        display: typeof a === "number" ? fmtInt(a) : "—",
+        sub: typeof p95 === "number" ? `p95 ${fmtInt(p95)}` : (p.kind === "api" ? "not measured" : null),
+        raw: typeof a === "number" ? a : null,
+      };
+    },
+  },
+  {
+    id: "ctx_out",
+    label: "Context out — completion",
+    unit: "avg · p95",
+    best: null,
+    value: (p) => {
+      const a = p.ctx_out?.avg;
+      const p95 = p.ctx_out?.p95;
+      return {
+        display: typeof a === "number" ? fmtInt(a) : "—",
+        sub: typeof p95 === "number" ? `p95 ${fmtInt(p95)}` : (p.kind === "api" ? "not measured" : null),
+        raw: typeof a === "number" ? a : null,
+      };
+    },
   },
   {
     id: "ttft",

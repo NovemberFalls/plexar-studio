@@ -30,11 +30,12 @@ def test_render_prometheus_shape_and_labels():
         "tokens_per_sec": {"avg": 11.4}, "decode_tokens_per_sec": {"avg": 90.0},
         "ttft_ms": {"p50": 100, "p95": 900}, "run_time_ms": {"p50": 1000, "p95": 2000},
         "engine": {"running": 1, "waiting": 9, "kv_cache_pct": 82.0},
+        "context": {"in": {"avg": 16000, "p95": 20000}, "out": {"avg": 100, "p95": 460}},
     }
     broker_metrics = {"reachable": True, "runs_total": 5, "tokens_total": {"prompt": 100, "completion": 50}}
     broker_queue = {"reachable": True, "in_flight": {"id": "x"}, "queued": [1, 2]}
     pairs = [
-        ({"id": "vllm-local", "kind": "vllm"}, {"up": True, "metrics": vllm_metrics, "queue": None}),
+        ({"id": "vllm-local", "kind": "vllm"}, {"up": True, "metrics": vllm_metrics, "queue": None, "model_max": 49152}),
         ({"id": "lmstudio-local", "kind": "lmstudio"}, {"up": True, "metrics": broker_metrics, "queue": broker_queue}),
     ]
     text = server_module._render_prometheus(pairs)
@@ -51,6 +52,10 @@ def test_render_prometheus_shape_and_labels():
     assert 'cockpit_provider_kv_cache_pct{provider="vllm-local",kind="vllm"} 82.0' in text
     # broker queue depth = in_flight(1) + queued(2) = 3
     assert 'cockpit_provider_queue_depth{provider="lmstudio-local",kind="lmstudio"} 3.0' in text
+    # per-request context sizes + model ceiling (for card tuning)
+    assert 'cockpit_provider_req_prompt_tokens_avg{provider="vllm-local",kind="vllm"} 16000.0' in text
+    assert 'cockpit_provider_req_completion_tokens_p95{provider="vllm-local",kind="vllm"} 460.0' in text
+    assert 'cockpit_provider_model_max_tokens{provider="vllm-local",kind="vllm"} 49152.0' in text
 
 
 def test_render_skips_null_subvalues():

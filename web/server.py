@@ -2576,9 +2576,28 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
         "max_concurrency": max_conc,
     }
 
+    # Per-request context sizes (for worker-card tuning): how big are the prompts
+    # we actually send (IN) and the completions we actually get (OUT). avg is
+    # exact (sum/count); p95 is the histogram's practical-max (coarse at the top
+    # bucket, so a floor). model ceiling comes from /v1/models via the caller.
+    def _avg(base):
+        tot, cnt = _hist_sum_count(s, base)
+        return int(round(tot / cnt)) if cnt else None
+
+    def _p95_tokens(base):
+        v = _hist_quantile(s, base, 0.95)
+        return int(round(v)) if v is not None else None
+
+    context = {
+        "in": {"avg": _avg("vllm:request_prompt_tokens"), "p95": _p95_tokens("vllm:request_prompt_tokens")},
+        "out": {"avg": _avg("vllm:request_generation_tokens"), "p95": _p95_tokens("vllm:request_generation_tokens")},
+        "model_max": None,  # filled by the caller from /v1/models (ceiling)
+    }
+
     return {
         "window": window,
         "engine": engine,
+        "context": context,
         "window_exact": window == "lifetime",
         "source": "vllm-prometheus",
         "served_model": served_model,
@@ -3457,6 +3476,15 @@ def _provider_snapshot(provider: dict) -> dict:
             out["up"] = True
         except Exception:
             logger.debug("Prometheus export: %s queue unreachable", provider["id"], exc_info=True)
+    if "models" in caps:
+        try:
+            md = _mgmt_get(provider, _models_path(provider))
+            rows = md.get("data") or md.get("models") or []
+            ceilings = [m.get("max_model_len") or m.get("max_context_length") for m in rows]
+            ceilings = [c for c in ceilings if isinstance(c, (int, float)) and c > 0]
+            out["model_max"] = max(ceilings) if ceilings else None
+        except Exception:
+            logger.debug("Prometheus export: %s models unreachable", provider["id"], exc_info=True)
     return out
 
 
@@ -3508,6 +3536,14 @@ def _render_prometheus(pairs: list) -> str:
             emit("cockpit_provider_running", "Requests decoding now (in-engine)", pid, kind, eng.get("running"))
             emit("cockpit_provider_waiting", "Requests waiting (in-engine)", pid, kind, eng.get("waiting"))
             emit("cockpit_provider_kv_cache_pct", "KV-cache utilization %", pid, kind, eng.get("kv_cache_pct"))
+            ctx = m.get("context") or {}
+            cin = ctx.get("in") or {}
+            cout = ctx.get("out") or {}
+            emit("cockpit_provider_req_prompt_tokens_avg", "Avg prompt (input) tokens per request", pid, kind, cin.get("avg"))
+            emit("cockpit_provider_req_prompt_tokens_p95", "p95 prompt (input) tokens per request", pid, kind, cin.get("p95"))
+            emit("cockpit_provider_req_completion_tokens_avg", "Avg completion (output) tokens per request", pid, kind, cout.get("avg"))
+            emit("cockpit_provider_req_completion_tokens_p95", "p95 completion (output) tokens per request", pid, kind, cout.get("p95"))
+            emit("cockpit_provider_model_max_tokens", "Model max context window (ceiling)", pid, kind, snap.get("model_max"))
         q = snap.get("queue")
         if isinstance(q, dict) and q.get("reachable") is not False:
             depth = (1 if q.get("in_flight") else 0) + (len(q["queued"]) if isinstance(q.get("queued"), list) else 0)

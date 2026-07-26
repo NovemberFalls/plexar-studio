@@ -64,6 +64,18 @@ vllm:num_requests_running{model_name="m"} 1.0
 vllm:num_requests_waiting{model_name="m"} 9.0
 vllm:kv_cache_usage_perc{model_name="m"} 0.82
 vllm:cache_config_info{kv_cache_size_tokens="63664",kv_cache_max_concurrency="1.3",model_name="m"} 1.0
+# TYPE vllm:request_prompt_tokens histogram
+vllm:request_prompt_tokens_sum{model_name="m"} 32000.0
+vllm:request_prompt_tokens_count{model_name="m"} 2.0
+vllm:request_prompt_tokens_bucket{le="10000.0",model_name="m"} 0.0
+vllm:request_prompt_tokens_bucket{le="20000.0",model_name="m"} 1.0
+vllm:request_prompt_tokens_bucket{le="+Inf",model_name="m"} 2.0
+# TYPE vllm:request_generation_tokens histogram
+vllm:request_generation_tokens_sum{model_name="m"} 200.0
+vllm:request_generation_tokens_count{model_name="m"} 2.0
+vllm:request_generation_tokens_bucket{le="100.0",model_name="m"} 1.0
+vllm:request_generation_tokens_bucket{le="500.0",model_name="m"} 2.0
+vllm:request_generation_tokens_bucket{le="+Inf",model_name="m"} 2.0
 this_is_malformed
 """
 
@@ -120,6 +132,11 @@ def test_vllm_metrics_reshape(monkeypatch):
     assert m["engine"]["kv_cache_pct"] == 82.0
     assert m["engine"]["kv_cache_tokens"] == 63664
     assert m["engine"]["max_concurrency"] == 1.3
+    # per-request context sizes (for card tuning): avg exact, p95 from histogram
+    assert m["context"]["in"]["avg"] == 16000   # 32000 / 2
+    assert m["context"]["in"]["p95"] == 20000   # saturates at top finite bucket
+    assert m["context"]["out"]["avg"] == 100    # 200 / 2
+    assert m["context"]["out"]["p95"] == 460    # interpolated 100..500
     assert m["by_session"] == [] and m["by_agent"] == [] and m["by_lane_class"] == []
     # satisfies the shape-validation contract keys
     assert server_module._looks_like(m, server_module._METRICS_SHAPE_KEYS)
