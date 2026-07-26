@@ -28,7 +28,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Cpu, X, Settings } from "lucide-react";
 
-import { seriesColor } from "./localReporting/format";
+import { seriesColor, fmtInt, fmtNum, fmtUsd } from "./localReporting/format";
 import AlertBanner from "./localReporting/AlertBanner.jsx";
 import HeroStrip from "./localReporting/HeroStrip.jsx";
 import RoutingTimeline from "./localReporting/RoutingTimeline.jsx";
@@ -154,6 +154,27 @@ export default function RoutingReportingView({
   const toggleBackend = (id) =>
     setHiddenBackends((h) => ({ ...h, [id]: !h[id] }));
 
+  // At-a-glance "is the local lane doing anything, and what did it save?" —
+  // pinned in the header so it's visible on EVERY tab, not just the Ledger lead.
+  // Answers the two questions directly: local share (are we using it) + avoided $
+  // (what it saved vs the reference model). Reuses the HeroStrip math.
+  const glance = useMemo(() => {
+    const m = data.metrics;
+    const api = data.apiUsage;
+    const mOk = m && m.reachable !== false;
+    const apiOk = api && api.reachable !== false;
+    const localRuns = mOk && typeof m.runs_total === "number" ? m.runs_total : 0;
+    const apiRuns = apiOk && typeof api.runs === "number" ? api.runs : 0;
+    const total = localRuns + apiRuns;
+    const share = total > 0 ? Math.round((localRuns / total) * 100) : null;
+    const pricing = Array.isArray(data.pricing) ? data.pricing : [];
+    const ref = pricing.find((x) => x.id === refModel) || pricing[0] || null;
+    const lp = mOk && m.tokens_total ? m.tokens_total.prompt || 0 : 0;
+    const lc = mOk && m.tokens_total ? m.tokens_total.completion || 0 : 0;
+    const avoided = ref ? (lp / 1e6) * (ref.input_per_mtok || 0) + (lc / 1e6) * (ref.output_per_mtok || 0) : null;
+    return { localRuns, share, avoided, hasLocal: localRuns > 0 };
+  }, [data.metrics, data.apiUsage, data.pricing, refModel]);
+
   const runsTotal = data.metrics?.runs_total;
   const persisted = data.metrics?.persisted;
 
@@ -252,6 +273,45 @@ export default function RoutingReportingView({
               <Settings size={11} style={{ color: "var(--cc-dim)" }} />
             </button>
           )}
+
+          {/* At-a-glance local-lane usage + savings — pinned, visible on every tab. */}
+          <span
+            title={
+              glance.hasLocal
+                ? "Share of runs served locally, and estimated API spend avoided vs the reference model"
+                : "No local runs in this window yet — everything is going to the API"
+            }
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "3px 10px",
+              borderRadius: 999,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: ".04em",
+              background: "var(--cc-elev)",
+              border: `1px solid ${glance.hasLocal ? "var(--cc-ok)" : "var(--cc-border)"}`,
+              color: glance.hasLocal ? "var(--cc-ok)" : "var(--cc-muted)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {glance.hasLocal ? (
+              <>
+                <span>LOCAL {glance.share != null ? `${fmtNum(glance.share, 0)}%` : "—"}</span>
+                <span style={{ opacity: 0.4 }}>·</span>
+                <span style={{ color: "var(--cc-dim)", fontWeight: 600 }}>{fmtInt(glance.localRuns)} runs</span>
+                {glance.avoided != null && (
+                  <>
+                    <span style={{ opacity: 0.4 }}>·</span>
+                    <span>saved ~{fmtUsd(glance.avoided)}</span>
+                  </>
+                )}
+              </>
+            ) : (
+              <span style={{ textTransform: "uppercase" }}>Local lane idle · 0 local runs</span>
+            )}
+          </span>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -264,11 +324,23 @@ export default function RoutingReportingView({
           <button
             type="button"
             onClick={onClose}
-            className="transition-colors hover-bg-surface"
-            style={{ display: "flex", padding: 6, borderRadius: 7, color: "var(--cc-dim)" }}
             aria-label="Close Routing & Reporting view"
+            className="hover-bg-surface flex items-center justify-center"
+            style={{
+              gap: 7,
+              height: 34,
+              padding: "0 14px",
+              borderRadius: 9,
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--cc-dim, var(--text-secondary))",
+              background: "var(--cc-elev, var(--bg-surface))",
+              border: "1px solid var(--cc-border, var(--border-color))",
+              cursor: "pointer",
+            }}
           >
-            <X size={17} />
+            <X size={14} style={{ marginRight: 6 }} />
+            Close
           </button>
         </div>
 
