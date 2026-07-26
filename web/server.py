@@ -3430,6 +3430,101 @@ async def get_local_queue():
     return await get_provider_queue(_DEFAULT_PROVIDER)
 
 
+# ── Unified Prometheus exporter (Cockpit as the fleet metrics hub) ──
+#
+# vLLM speaks Prometheus natively; LM Studio (behind the broker) does NOT. Since
+# Cockpit already holds every provider's stats via its adapters, it re-exports
+# them ALL as one Prometheus target at GET /metrics, each series labeled by
+# provider — so Prometheus/Grafana see every backend (vLLM + LM Studio + future)
+# side by side from a single scrape. Read-only; best-effort per provider.
+
+def _provider_snapshot(provider: dict) -> dict:
+    """Blocking: normalized {metrics, queue, up} for one provider (or up:False)."""
+    caps = provider.get("capabilities", [])
+    out = {"up": False, "metrics": None, "queue": None}
+    if "metrics" in caps:
+        try:
+            if provider.get("kind") == "vllm":
+                out["metrics"] = _vllm_metrics(provider["broker_url"], "lifetime")
+            else:
+                out["metrics"] = _broker_get("/metrics", "window=lifetime", provider["broker_url"])
+            out["up"] = True
+        except Exception:
+            logger.debug("Prometheus export: %s metrics unreachable", provider["id"], exc_info=True)
+    if "queue" in caps:
+        try:
+            out["queue"] = _broker_get("/queue", "", provider["broker_url"])
+            out["up"] = True
+        except Exception:
+            logger.debug("Prometheus export: %s queue unreachable", provider["id"], exc_info=True)
+    return out
+
+
+def _render_prometheus(pairs: list) -> str:
+    """Render (provider, snapshot) pairs as Prometheus text-exposition format.
+
+    Emits a stable ``cockpit_provider_*`` gauge family, each series labeled
+    ``provider`` + ``kind``. Null sub-values are skipped (no misleading zeros).
+    """
+    seen_help: set = set()
+    lines: list = []
+
+    def emit(name, help_text, provider, kind, value):
+        if value is None:
+            return
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return
+        if name not in seen_help:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} gauge")
+            seen_help.add(name)
+        pid = str(provider).replace("\\", "").replace('"', "")
+        k = str(kind).replace("\\", "").replace('"', "")
+        lines.append(f'{name}{{provider="{pid}",kind="{k}"}} {v}')
+
+    for provider, snap in pairs:
+        pid = provider["id"]
+        kind = provider.get("kind", "")
+        emit("cockpit_provider_up", "1 if the provider answered this scrape", pid, kind, 1 if snap["up"] else 0)
+        m = snap.get("metrics")
+        if isinstance(m, dict) and m.get("reachable") is not False:
+            tt = m.get("tokens_total") or {}
+            emit("cockpit_provider_runs_total", "Completed runs (lifetime)", pid, kind, m.get("runs_total"))
+            emit("cockpit_provider_prompt_tokens_total", "Prompt tokens (lifetime)", pid, kind, tt.get("prompt"))
+            emit("cockpit_provider_completion_tokens_total", "Completion tokens (lifetime)", pid, kind, tt.get("completion"))
+            tps = m.get("tokens_per_sec") or {}
+            emit("cockpit_provider_tps", "Tokens/sec (completion ÷ wall)", pid, kind, tps.get("avg") if tps.get("avg") is not None else tps.get("current"))
+            dec = m.get("decode_tokens_per_sec") or {}
+            emit("cockpit_provider_decode_tps", "Per-stream decode tokens/sec", pid, kind, dec.get("avg") if dec.get("avg") is not None else dec.get("current"))
+            ttft = m.get("ttft_ms") or {}
+            emit("cockpit_provider_ttft_p50_seconds", "Time-to-first-token p50", pid, kind, (ttft.get("p50") / 1000) if isinstance(ttft.get("p50"), (int, float)) else None)
+            emit("cockpit_provider_ttft_p95_seconds", "Time-to-first-token p95", pid, kind, (ttft.get("p95") / 1000) if isinstance(ttft.get("p95"), (int, float)) else None)
+            rt = m.get("run_time_ms") or {}
+            emit("cockpit_provider_run_time_p50_seconds", "Wall time per run p50", pid, kind, (rt.get("p50") / 1000) if isinstance(rt.get("p50"), (int, float)) else None)
+            emit("cockpit_provider_run_time_p95_seconds", "Wall time per run p95", pid, kind, (rt.get("p95") / 1000) if isinstance(rt.get("p95"), (int, float)) else None)
+            eng = m.get("engine") or {}
+            emit("cockpit_provider_running", "Requests decoding now (in-engine)", pid, kind, eng.get("running"))
+            emit("cockpit_provider_waiting", "Requests waiting (in-engine)", pid, kind, eng.get("waiting"))
+            emit("cockpit_provider_kv_cache_pct", "KV-cache utilization %", pid, kind, eng.get("kv_cache_pct"))
+        q = snap.get("queue")
+        if isinstance(q, dict) and q.get("reachable") is not False:
+            depth = (1 if q.get("in_flight") else 0) + (len(q["queued"]) if isinstance(q.get("queued"), list) else 0)
+            emit("cockpit_provider_queue_depth", "Broker queue depth (in-flight + queued)", pid, kind, depth)
+
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Unified Prometheus scrape for ALL registered providers (fleet hub)."""
+    providers = list(_PROVIDERS.values())
+    snaps = await asyncio.gather(*[asyncio.to_thread(_provider_snapshot, p) for p in providers])
+    body = _render_prometheus(list(zip(providers, snaps)))
+    return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
 @app.get("/api/local/metrics")
 async def get_local_metrics(window: str = "lifetime"):
     """Proxy the broker's read-only metrics aggregates for a time window.
