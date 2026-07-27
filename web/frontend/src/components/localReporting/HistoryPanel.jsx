@@ -1,9 +1,9 @@
 /**
- * HistoryPanel — in-app time-series history, Prometheus-backed (replaces Grafana
- * for the at-a-glance view). Queries Cockpit's server-side proxy (/api/tsdb/*),
- * which owns the PromQL; this component only picks a curated metric key + window.
- * Renders themed multi-series SVG line charts (one line per provider), matching
- * the hand-rolled SVG idiom used elsewhere in localReporting.
+ * HistoryPanel — in-app time-series history, derived from Cockpit's OWN store
+ * (/api/history/*). No Prometheus/Grafana dependency: Cockpit samples every
+ * provider to a local JSONL and serves curated series from it. This component
+ * picks a metric key + window and renders themed multi-series SVG line charts
+ * (one line per provider), matching the hand-rolled SVG idiom used elsewhere.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { seriesColor, fmtNum } from "./format";
@@ -17,33 +17,33 @@ const CHARTS = [
   { metric: "completion_tokens_p95", title: "Context out (completion p95)", unit: "tok", digits: 0 },
 ];
 
-function useTsdbStatus(enabled) {
-  const [ok, setOk] = useState(null);
+function useHistoryStatus(enabled) {
+  const [status, setStatus] = useState(null); // { samples } once known
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
     const tick = async () => {
       try {
-        const r = await fetch("/api/tsdb/status");
-        const d = r.ok ? await r.json() : { reachable: false };
-        if (!cancelled) setOk(d.reachable === true);
-      } catch (_) { if (!cancelled) setOk(false); }
+        const r = await fetch("/api/history/status");
+        const d = r.ok ? await r.json() : { reachable: false, samples: 0 };
+        if (!cancelled) setStatus(d);
+      } catch (_) { if (!cancelled) setStatus({ reachable: false, samples: 0 }); }
     };
     tick();
     const id = setInterval(tick, 30000);
     return () => { cancelled = true; clearInterval(id); };
   }, [enabled]);
-  return ok;
+  return status;
 }
 
-/** Parse Prometheus matrix -> [{label, kind, points:[[t,v]]}]. */
-function parseMatrix(json) {
-  const result = json?.data?.result;
+/** Parse the fleet-history shape -> [{label, kind, points:[[t,v]]}]. */
+function parseSeries(json) {
+  const result = json?.series;
   if (!Array.isArray(result)) return [];
   return result.map((s) => ({
-    label: s.metric?.provider ?? "series",
-    kind: s.metric?.kind ?? "",
-    points: (s.values || [])
+    label: s.provider ?? "series",
+    kind: s.kind ?? "",
+    points: (s.points || [])
       .map(([t, v]) => [Number(t), Number(v)])
       .filter(([, v]) => Number.isFinite(v)),
   })).filter((s) => s.points.length);
@@ -58,9 +58,9 @@ function TsdbChart({ metric, title, unit, digits, window }) {
       if (inFlight.current) return;
       inFlight.current = true;
       try {
-        const r = await fetch(`/api/tsdb/query_range?metric=${metric}&provider=all&window=${encodeURIComponent(window)}`);
+        const r = await fetch(`/api/history/query?metric=${metric}&provider=all&window=${encodeURIComponent(window)}`);
         const d = r.ok ? await r.json() : null;
-        if (!cancelled) setSeries(d ? parseMatrix(d) : []);
+        if (!cancelled) setSeries(d ? parseSeries(d) : []);
       } catch (_) {
         if (!cancelled) setSeries([]);
       } finally { inFlight.current = false; }
@@ -122,21 +122,22 @@ function TsdbChart({ metric, title, unit, digits, window }) {
 }
 
 export default function HistoryPanel({ window, enabled = true }) {
-  const ready = useTsdbStatus(enabled);
+  const status = useHistoryStatus(enabled);
+  const warming = status != null && (status.samples || 0) < 3;
 
   return (
     <div style={{ border: "1px solid var(--cc-border)", borderRadius: 12, background: "var(--cc-surface)", overflow: "hidden" }}>
       <div style={{ padding: "11px 16px 9px", borderBottom: "1px solid var(--cc-border)", display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".1em", color: "var(--cc-dim)", textTransform: "uppercase" }}>History</span>
-        <span style={{ fontSize: 10, color: "var(--cc-muted)" }}>Prometheus-backed · all backends</span>
+        <span style={{ fontSize: 10, color: "var(--cc-muted)" }}>Cockpit time-series · all backends</span>
       </div>
-      {ready === false ? (
+      {status == null ? (
+        <div style={{ fontSize: 12, color: "var(--cc-muted)", padding: "16px" }}>Loading history…</div>
+      ) : warming ? (
         <div style={{ fontSize: 12, color: "var(--cc-muted)", padding: "16px", lineHeight: 1.5 }}>
-          History store offline. Start it with <code style={{ color: "var(--cc-fg)" }}>docker compose up -d</code> in
-          <code style={{ color: "var(--cc-fg)" }}> aim-observability</code>, then history appears here automatically.
+          Building history — Cockpit samples every minute. Charts appear here once a few
+          data points have accrued; nothing else to set up.
         </div>
-      ) : ready == null ? (
-        <div style={{ fontSize: 12, color: "var(--cc-muted)", padding: "16px" }}>Checking history store…</div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10, padding: 12 }}>
           {CHARTS.map((c) => (

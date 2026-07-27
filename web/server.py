@@ -147,6 +147,10 @@ async def lifespan(app: FastAPI):
     # on-disk dataset so lifetime usage survives container restarts. Best-effort.
     app.state.vllm_sampler_task = asyncio.create_task(_vllm_sampler_loop())
 
+    # Fleet history sampler: snapshots ALL providers to a local JSONL time-series
+    # so the in-app History view is derived from Cockpit alone (no Prometheus).
+    app.state.fleet_history_task = asyncio.create_task(_fleet_history_loop())
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
     yield
@@ -177,6 +181,14 @@ async def lifespan(app: FastAPI):
         vllm_sampler.cancel()
         try:
             await vllm_sampler
+        except asyncio.CancelledError:
+            pass
+
+    fleet_task = getattr(app.state, "fleet_history_task", None)
+    if fleet_task:
+        fleet_task.cancel()
+        try:
+            await fleet_task
         except asyncio.CancelledError:
             pass
 
@@ -2807,6 +2819,162 @@ async def _vllm_sampler_loop() -> None:
             logger.debug("vLLM metrics sample skipped (provider unreachable?)", exc_info=True)
 
 
+# ── Self-contained fleet history (no Prometheus/Grafana needed) ──
+#
+# Cockpit is already the metrics hub; it samples EVERY provider to a local JSONL
+# time-series so the in-app History view can be derived from Cockpit alone. One
+# line per provider per tick. Age-capped so the file can't grow unbounded.
+
+_FLEET_LOG = os.path.join(os.path.expanduser("~"), ".claude-cockpit", "fleet-metrics.jsonl")
+_FLEET_INTERVAL = float(os.getenv("COCKPIT_FLEET_SAMPLE_INTERVAL", "60"))
+_FLEET_RETENTION_S = float(os.getenv("COCKPIT_FLEET_RETENTION_S", str(45 * 86400)))  # ~45 days
+_FLEET_MAX_LINES = 200_000
+# History metric key -> record field. Curated set the History view charts.
+_FLEET_METRICS = {
+    "throughput_tps": "tps",
+    "decode_tps": "decode",
+    "queue_depth": "queue_depth",
+    "running": "running",
+    "waiting": "waiting",
+    "kv_cache_pct": "kv",
+    "ttft_p95_seconds": "ttft_p95",
+    "run_time_p95_seconds": "run_time_p95",
+    "prompt_tokens_p95": "prompt_p95",
+    "completion_tokens_p95": "completion_p95",
+    "runs_total": "runs",
+}
+_FLEET_WINDOW_S = {"session": 3600, "24h": 86400, "7d": 604800, "lifetime": 2592000}
+
+
+def _fleet_record(provider: dict, snap: dict, ts: int) -> dict:
+    """Flatten one provider snapshot into a compact time-series record."""
+    m = snap.get("metrics") if isinstance(snap.get("metrics"), dict) else {}
+    m = m if (m and m.get("reachable") is not False) else {}
+    tps = (m.get("tokens_per_sec") or {})
+    dec = (m.get("decode_tokens_per_sec") or {})
+    ttft = (m.get("ttft_ms") or {})
+    rt = (m.get("run_time_ms") or {})
+    eng = (m.get("engine") or {})
+    ctx = (m.get("context") or {})
+    cin = (ctx.get("in") or {})
+    cout = (ctx.get("out") or {})
+    q = snap.get("queue") if isinstance(snap.get("queue"), dict) else {}
+    qdepth = None
+    if q and q.get("reachable") is not False:
+        qdepth = (1 if q.get("in_flight") else 0) + (len(q["queued"]) if isinstance(q.get("queued"), list) else 0)
+
+    def _s(v):  # ms -> seconds
+        return round(v / 1000, 3) if isinstance(v, (int, float)) else None
+
+    return {
+        "ts": ts, "provider": provider["id"], "kind": provider.get("kind", ""),
+        "up": bool(snap.get("up")),
+        "runs": m.get("runs_total"),
+        "tps": tps.get("avg") if tps.get("avg") is not None else tps.get("current"),
+        "decode": dec.get("avg") if dec.get("avg") is not None else dec.get("current"),
+        "queue_depth": qdepth if qdepth is not None else eng.get("waiting"),
+        "running": eng.get("running"),
+        "waiting": eng.get("waiting"),
+        "kv": eng.get("kv_cache_pct"),
+        "ttft_p95": _s(ttft.get("p95")),
+        "run_time_p95": _s(rt.get("p95")),
+        "prompt_p95": cin.get("p95"),
+        "completion_p95": cout.get("p95"),
+    }
+
+
+def _append_fleet_samples(records: list) -> None:
+    """Append records + age/size-trim. Best-effort; never raises."""
+    try:
+        os.makedirs(os.path.dirname(_FLEET_LOG), exist_ok=True)
+        with open(_FLEET_LOG, "a", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        _trim_fleet_log()
+    except Exception:
+        logger.error("Failed to append fleet samples", exc_info=True)
+
+
+def _trim_fleet_log() -> None:
+    """Drop lines older than retention (and hard-cap total lines). Cheap-ish;
+    only rewrites when over the line cap or the oldest line is stale."""
+    try:
+        with open(_FLEET_LOG, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return
+    if not lines:
+        return
+    cutoff = int(_time.time() - _FLEET_RETENTION_S)
+    try:
+        first_ts = json.loads(lines[0]).get("ts", 0)
+    except Exception:
+        first_ts = 0
+    if len(lines) <= _FLEET_MAX_LINES and first_ts >= cutoff:
+        return
+    kept = []
+    for ln in lines[-_FLEET_MAX_LINES:]:
+        try:
+            if json.loads(ln).get("ts", 0) >= cutoff:
+                kept.append(ln)
+        except Exception:
+            continue
+    try:
+        with open(_FLEET_LOG, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+    except Exception:
+        logger.error("Failed to trim fleet log", exc_info=True)
+
+
+def _query_fleet_history(metric_field: str, provider: str, span_s: int, max_points: int = 240) -> dict:
+    """Read the JSONL, filter to window + provider, return {provider: [[ts,v],...]}
+    downsampled to <= max_points per series. Blocking; run via to_thread."""
+    since = int(_time.time() - span_s)
+    series: dict = {}
+    try:
+        with open(_FLEET_LOG, "r", encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    r = json.loads(ln)
+                except Exception:
+                    continue
+                if r.get("ts", 0) < since:
+                    continue
+                if provider != "all" and r.get("provider") != provider:
+                    continue
+                v = r.get(metric_field)
+                if not isinstance(v, (int, float)):
+                    continue
+                series.setdefault(r.get("provider", "?"), {"kind": r.get("kind", ""), "points": []})
+                series[r["provider"]]["points"].append([r["ts"], v])
+    except FileNotFoundError:
+        return {}
+    # downsample each series by striding
+    for s in series.values():
+        pts = s["points"]
+        if len(pts) > max_points:
+            stride = len(pts) // max_points + 1
+            s["points"] = pts[::stride]
+    return series
+
+
+async def _fleet_history_loop() -> None:
+    """Background: every _FLEET_INTERVAL, snapshot ALL providers to the JSONL
+    time-series. Best-effort; the loop survives any per-tick failure."""
+    while True:
+        try:
+            await asyncio.sleep(_FLEET_INTERVAL)
+            providers = list(_PROVIDERS.values())
+            snaps = await asyncio.gather(*[asyncio.to_thread(_provider_snapshot, p) for p in providers])
+            ts = int(_time.time())
+            records = [_fleet_record(p, s, ts) for p, s in zip(providers, snaps)]
+            await asyncio.to_thread(_append_fleet_samples, records)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.debug("Fleet history sample skipped", exc_info=True)
+
+
 # ── Service identity (the middleware layer) ──────────────
 #
 # LM Studio's dev server answers UNKNOWN paths with "200 anyway" + a non-broker
@@ -3665,6 +3833,36 @@ async def tsdb_query_range(metric: str, provider: str = "all", window: str = "24
         logger.debug("TSDB query_range unreachable (metric=%s)", metric, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
     return JSONResponse(data)
+
+
+# ── In-app history from Cockpit's OWN store (no Prometheus dependency) ──
+
+@app.get("/api/history/status")
+async def history_status():
+    """History is derived from Cockpit's own JSONL — always 'reachable'; report
+    how many samples have accrued so the UI can show an empty-until-warm state."""
+    try:
+        with open(_FLEET_LOG, "r", encoding="utf-8") as f:
+            n = sum(1 for _ in f)
+    except FileNotFoundError:
+        n = 0
+    return JSONResponse({"reachable": True, "samples": n})
+
+
+@app.get("/api/history/query")
+async def history_query(metric: str, provider: str = "all", window: str = "24h"):
+    """Curated time-series from Cockpit's fleet log — the self-contained History
+    view backend (replaces the Prometheus proxy; no external TSDB needed)."""
+    field = _FLEET_METRICS.get(metric)
+    if field is None:
+        return JSONResponse({"error": "unknown metric"}, status_code=404)
+    if window not in _FLEET_WINDOW_S:
+        return JSONResponse({"error": "unknown window"}, status_code=400)
+    if provider != "all" and not _TSDB_PROVIDER_RE.match(provider):
+        return JSONResponse({"error": "invalid provider"}, status_code=400)
+    grouped = await asyncio.to_thread(_query_fleet_history, field, provider, _FLEET_WINDOW_S[window])
+    series = [{"provider": pid, "kind": g["kind"], "points": g["points"]} for pid, g in grouped.items()]
+    return JSONResponse({"reachable": True, "series": series})
 
 
 @app.get("/api/local/metrics")
