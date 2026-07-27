@@ -3600,6 +3600,73 @@ async def prometheus_metrics():
     return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
+# ── Time-series history (Prometheus proxy for the in-app History view) ──
+#
+# Cockpit fronts its own themed History view instead of Grafana. PromQL stays
+# SERVER-SIDE (curated named metrics only) — the browser sends a metric key +
+# provider + window, never raw PromQL, and never learns the Prometheus URL
+# (same SSRF stance as the broker proxy). Read-only.
+
+_PROMETHEUS_URL = os.getenv("COCKPIT_PROMETHEUS_URL", "http://127.0.0.1:9491").rstrip("/")
+
+# metric key -> PromQL template (%s = provider label regex). All are gauges the
+# Cockpit exporter emits, so query_range over them is a clean time-series.
+_TSDB_METRICS = {
+    "throughput_tps": 'cockpit_provider_tps{provider=~"%s"}',
+    "decode_tps": 'cockpit_provider_decode_tps{provider=~"%s"}',
+    "queue_depth": 'cockpit_provider_queue_depth{provider=~"%s"}',
+    "running": 'cockpit_provider_running{provider=~"%s"}',
+    "waiting": 'cockpit_provider_waiting{provider=~"%s"}',
+    "kv_cache_pct": 'cockpit_provider_kv_cache_pct{provider=~"%s"}',
+    "ttft_p95_seconds": 'cockpit_provider_ttft_p95_seconds{provider=~"%s"}',
+    "run_time_p95_seconds": 'cockpit_provider_run_time_p95_seconds{provider=~"%s"}',
+    "prompt_tokens_p95": 'cockpit_provider_req_prompt_tokens_p95{provider=~"%s"}',
+    "completion_tokens_p95": 'cockpit_provider_req_completion_tokens_p95{provider=~"%s"}',
+    "runs_total": 'cockpit_provider_runs_total{provider=~"%s"}',
+}
+# window -> (range seconds, step seconds)
+_TSDB_WINDOWS = {
+    "session": (3600, 15),
+    "24h": (86400, 300),
+    "7d": (604800, 3600),
+    "lifetime": (2592000, 21600),
+}
+_TSDB_PROVIDER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+@app.get("/api/tsdb/status")
+async def tsdb_status():
+    """Is the Prometheus history store reachable? (History view gates on this.)"""
+    try:
+        await asyncio.to_thread(_http_get_text, _PROMETHEUS_URL + "/-/ready")
+        return JSONResponse({"reachable": True})
+    except Exception:
+        return JSONResponse({"reachable": False})
+
+
+@app.get("/api/tsdb/query_range")
+async def tsdb_query_range(metric: str, provider: str = "all", window: str = "24h"):
+    """Curated time-series for the in-app History view. Server owns the PromQL."""
+    expr = _TSDB_METRICS.get(metric)
+    if expr is None:
+        return JSONResponse({"error": "unknown metric"}, status_code=404)
+    if window not in _TSDB_WINDOWS:
+        return JSONResponse({"error": "unknown window"}, status_code=400)
+    if provider != "all" and not _TSDB_PROVIDER_RE.match(provider):
+        return JSONResponse({"error": "invalid provider"}, status_code=400)
+    import urllib.parse
+    prov = ".*" if provider == "all" else provider
+    span, step = _TSDB_WINDOWS[window]
+    now = int(_time.time())
+    query = urllib.parse.urlencode({"query": expr % prov, "start": now - span, "end": now, "step": step})
+    try:
+        data = await asyncio.to_thread(_broker_get, "/api/v1/query_range", query, _PROMETHEUS_URL)
+    except Exception:
+        logger.debug("TSDB query_range unreachable (metric=%s)", metric, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
 @app.get("/api/local/metrics")
 async def get_local_metrics(window: str = "lifetime"):
     """Proxy the broker's read-only metrics aggregates for a time window.

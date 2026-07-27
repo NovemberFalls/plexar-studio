@@ -38,6 +38,7 @@ import LatencyBudget from "./localReporting/LatencyBudget.jsx";
 import SpillControl from "./localReporting/SpillControl.jsx";
 import PerModelAgent from "./localReporting/PerModelAgent.jsx";
 import Ledger from "./localReporting/Ledger.jsx";
+import HistoryPanel from "./localReporting/HistoryPanel.jsx";
 import useReportingData from "./localReporting/useReportingData.js";
 
 const WINDOWS = [
@@ -56,9 +57,9 @@ const LEADS = [
 // Content-section order per lead mode. AlertBanner (0) + HeroStrip (1) are
 // pinned above; these six take order 2..7 in the listed sequence.
 const SECTION_SEQUENCE = {
-  routing: ["routing", "backend", "perf", "spill", "models", "ledger"],
-  performance: ["perf", "backend", "routing", "spill", "models", "ledger"],
-  ledger: ["ledger", "models", "backend", "routing", "perf", "spill"],
+  routing: ["routing", "backend", "perf", "history", "spill", "models", "ledger"],
+  performance: ["perf", "history", "backend", "routing", "spill", "models", "ledger"],
+  ledger: ["ledger", "models", "backend", "routing", "perf", "history", "spill"],
 };
 
 function readStored(key, fallback) {
@@ -213,6 +214,7 @@ export default function RoutingReportingView({
     spill: <SpillControl data={data} actions={actions} />,
     models: <PerModelAgent data={data} view={view} />,
     ledger: <Ledger data={data} view={view} actions={actions} />,
+    history: <HistoryPanel window={window} enabled={enabled} />,
   };
 
   return (
