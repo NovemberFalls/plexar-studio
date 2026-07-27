@@ -29,6 +29,7 @@ function backendRow(id, label, m) {
     spilled_out: m.spilled_out,
     engine: m.engine ?? null,
     context: m.context ?? null,
+    stale: m.stale === true,
   };
 }
 

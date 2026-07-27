@@ -188,7 +188,8 @@ async def test_route_vllm_metrics_bad_window(client):
 
 
 @pytest.mark.asyncio
-async def test_route_vllm_metrics_unreachable(client, monkeypatch):
+async def test_route_vllm_metrics_unreachable_no_history(client, monkeypatch, _tmp_store):
+    # offline AND no persisted rollup -> honest 503 (nothing to show)
     def _down(url, timeout=None):
         raise OSError("connection refused")
 
@@ -197,6 +198,32 @@ async def test_route_vllm_metrics_unreachable(client, monkeypatch):
         resp = await c.get("/api/local/vllm-local/metrics")
     assert resp.status_code == 503
     assert resp.json() == {"reachable": False}
+
+
+@pytest.mark.asyncio
+async def test_route_vllm_metrics_offline_serves_persisted(client, monkeypatch, _tmp_store):
+    # offline BUT persisted lifetime exists -> serve it (stale), don't 503, so the
+    # backend stays in the report when the GPU is running the other engine.
+    server_module._save_vllm_rollup(
+        {"carried": {"runs": 100, "prompt": 90000, "completion": 4000},
+         "last_raw": {"runs": 10, "prompt": 9000, "completion": 400}})
+
+    def _down(url, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(server_module, "_http_get_text", _down)
+    async with client as c:
+        resp = await c.get("/api/local/vllm-local/metrics")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["stale"] is True
+    assert body["runs_total"] == 110          # carried 100 + last-seen 10
+    assert body["tokens_total"] == {"prompt": 99000, "completion": 4400}
+    assert body["engine"] is None             # live-only, unknown offline
+
+
+def test_offline_snapshot_none_without_history(_tmp_store):
+    assert server_module._vllm_offline_snapshot() is None
 
 
 @pytest.mark.asyncio

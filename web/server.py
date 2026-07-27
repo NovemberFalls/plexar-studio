@@ -2760,6 +2760,35 @@ def _vllm_metrics_persisted(base_url: str, window: str) -> dict:
     return _vllm_apply_persistence(_vllm_metrics(base_url, window))
 
 
+def _vllm_offline_snapshot() -> dict | None:
+    """When vLLM is DOWN, build a metrics dict from the persisted rollup alone so
+    the backend still appears in reports (marked stale) instead of vanishing —
+    the user swaps LM Studio <-> vLLM on one GPU, and the idle one must not drop
+    off the report. Returns None when there is no persisted history to show.
+
+    Live-only fields (engine/latency/decode) are null: they're unknown while the
+    engine is off. Cumulative counters come from carried + last-seen raw.
+    """
+    rollup = _load_vllm_rollup()
+    eff = _vllm_effective({"runs": 0, "prompt": 0, "completion": 0}, rollup)
+    if eff["runs"] <= 0:
+        return None
+    return {
+        "reachable": True, "stale": True, "source": "vllm-persisted",
+        "note": "vLLM is offline; showing persisted lifetime totals.",
+        "window": "lifetime", "window_exact": True, "persisted": True,
+        "runs_total": eff["runs"], "prompts_total": eff["runs"],
+        "tokens_total": {"prompt": eff["prompt"], "completion": eff["completion"]},
+        "tokens_per_sec": {"current": None, "avg": None},
+        "decode_tokens_per_sec": {"current": None, "avg": None, "p50": None},
+        "ttft_ms": {"p50": None, "p95": None},
+        "queue_wait_ms": {"p50": None, "p95": None},
+        "run_time_ms": {"p50": None, "p95": None},
+        "engine": None, "context": None,
+        "by_session": [], "by_agent": [], "by_lane_class": [],
+    }
+
+
 async def _vllm_sampler_loop() -> None:
     """Background sampler: every _VLLM_SAMPLE_INTERVAL, scrape the vLLM provider
     and accumulate+append. Best-effort -- a scrape failure (vLLM down/absent) is
@@ -3082,6 +3111,12 @@ async def get_provider_metrics(provider_id: str, window: str = "lifetime"):
             data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}", provider["broker_url"])
     except Exception:
         logger.debug("Provider %s /metrics unreachable", provider_id, exc_info=True)
+        # vLLM offline: serve persisted lifetime so the backend stays in reports
+        # (stale) instead of vanishing when the GPU is running the other engine.
+        if provider.get("kind") == "vllm":
+            snap = await asyncio.to_thread(_vllm_offline_snapshot)
+            if snap is not None:
+                return JSONResponse(snap)
         return JSONResponse({"reachable": False}, status_code=503)
     if not _looks_like(data, _METRICS_SHAPE_KEYS):
         return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
@@ -3470,6 +3505,10 @@ def _provider_snapshot(provider: dict) -> dict:
             out["up"] = True
         except Exception:
             logger.debug("Prometheus export: %s metrics unreachable", provider["id"], exc_info=True)
+            # vLLM offline: keep exporting persisted lifetime so the Grafana
+            # series stays continuous (up=0 but counters don't drop to nothing).
+            if provider.get("kind") == "vllm":
+                out["metrics"] = _vllm_offline_snapshot()
     if "queue" in caps:
         try:
             out["queue"] = _broker_get("/queue", "", provider["broker_url"])
