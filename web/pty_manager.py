@@ -560,6 +560,11 @@ class PtyManager:
         if provider not in _ALLOWED_PROVIDERS:
             raise ValueError(f"Invalid provider: {provider!r}")
 
+        # Generated up front (not down with the rest of the session fields
+        # below) so the provider="local" branch can pass it into
+        # resolve_local_base_url() for session-scoped attribution.
+        terminal_id = uuid.uuid4().hex[:8]
+
         openrouter_key: Optional[str] = None
         local_base_url: Optional[str] = None
         local_model_id: Optional[str] = None
@@ -600,7 +605,7 @@ class PtyManager:
             # safe since server.py is fully loaded by the time a session is
             # created).
             import server as _server
-            local_base_url = _server.resolve_local_base_url(local_provider_id)
+            local_base_url = _server.resolve_local_base_url(local_provider_id, terminal_id)
             if not local_base_url:
                 raise ValueError(f"Unknown or non-local provider id: {local_provider_id!r}")
         else:
@@ -622,7 +627,6 @@ class PtyManager:
         if resume_session_id and not _SESSION_ID_RE.match(resume_session_id):
             raise ValueError(f"Invalid session ID format: {resume_session_id!r}")
 
-        terminal_id = uuid.uuid4().hex[:8]
         if not name:
             name = f"Session {len(self.sessions) + 1}"
         if not workdir:

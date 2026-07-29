@@ -17,43 +17,49 @@
  * broker adds that attribution — it never falls back to guessing from the
  * agent's name.
  */
-import { fmtInt, fmtTokens, fmtMs, seriesColor, rowTokens } from "./format";
+import { useState } from "react";
+import { fmtInt, fmtTokens, fmtUsd, seriesColor } from "./format";
 
 const CAP = 8;
+const REPO_CAP = 5;
 
-const SEAT_META = {
-  "context window": { color: "var(--cc-thinking)" },
-  "agent loop": { color: "var(--cc-type)" },
-  batch: { color: "var(--cc-waiting)" },
-  embedding: { color: "var(--cc-macro)" },
+// Badge color per provider — anthropic/openrouter/local. "anthropic" is a
+// reserved series color (see format.js); openrouter/local cycle by fixed
+// index so they stay visually distinct and stable across renders.
+const PROVIDER_COLOR = {
+  anthropic: seriesColor("anthropic"),
+  openrouter: seriesColor("openrouter", 0),
+  local: seriesColor("local", 1),
 };
 
-function deriveSeat(row) {
-  if (row.seat) return row.seat;
-  if (row.class === "batch" || row.lane_class === "batch") return "batch";
-  if (typeof row.endpoint === "string" && row.endpoint.toLowerCase().includes("embed")) return "embedding";
-  if (row.trace_parent) return "agent loop";
-  return "context window";
+function providerColor(provider) {
+  return PROVIDER_COLOR[provider] || seriesColor(provider, 2);
 }
 
-function refRate(pricing, refModel) {
-  const list = Array.isArray(pricing) ? pricing : [];
-  const found = list.find((m) => m.id === refModel) || list[0];
-  if (!found) return null;
-  return found;
+// tokens:null means "not reported" (streaming client didn't send usage), NOT
+// zero — never collapse the two per the reporting-honesty convention.
+function fmtTokensReport(n) {
+  return n == null ? "not reported" : fmtTokens(n);
 }
 
-function isEmbeddingModel(id) {
-  return typeof id === "string" && /embed/i.test(id);
+// cost_usd:null means "not applicable/unknown" (e.g. local models), NOT free
+// — never render "$0.00" for a null cost.
+function fmtCostReport(n) {
+  return n == null ? "n/a" : fmtUsd(n);
 }
 
-function PerModelTable({ byModel, pricing, refModel }) {
-  const rate = refRate(pricing, refModel);
-  const rows = [...(Array.isArray(byModel) ? byModel : [])]
-    .sort((a, b) => rowTokens(b) - rowTokens(a));
+function rowKey(row, i) {
+  return `${row.provider || "?"}:${row.provider_id || ""}:${row.model || i}`;
+}
+
+function UnifiedModelTable({ report }) {
+  const [expanded, setExpanded] = useState({});
+  const rows = Array.isArray(report?.models) ? report.models : [];
   const shown = rows.slice(0, CAP);
   const extra = rows.length - shown.length;
-  const cols = "minmax(0,2fr) 62px 68px 62px 74px 76px";
+  const cols = "minmax(0,1.7fr) 88px 55px 74px 68px 16px";
+
+  const toggle = (key) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
 
   return (
     <div style={{ border: "1px solid var(--cc-border)", borderRadius: 12, background: "var(--cc-surface)", overflow: "hidden" }}>
@@ -70,7 +76,7 @@ function PerModelTable({ byModel, pricing, refModel }) {
           Per model
         </span>
         <span style={{ fontSize: 10, color: "var(--cc-muted)" }}>
-          cost avoided at {rate?.label || "—"} rates{rate?.fetched_at ? ` · priced ${rate.fetched_at}` : ""}
+          {report?.totals?.runs != null ? `${fmtInt(report.totals.runs)} runs total` : "unified · anthropic + openrouter + local"}
         </span>
       </div>
 
@@ -88,11 +94,11 @@ function PerModelTable({ byModel, pricing, refModel }) {
         }}
       >
         <span>model</span>
+        <span>provider</span>
         <span style={{ textAlign: "right" }}>runs</span>
         <span style={{ textAlign: "right" }}>tokens</span>
-        <span style={{ textAlign: "right" }}>ttft</span>
-        <span style={{ textAlign: "right" }}>tok/s</span>
-        <span style={{ textAlign: "right" }}>avoided</span>
+        <span style={{ textAlign: "right" }}>cost</span>
+        <span />
       </div>
 
       {shown.length === 0 ? (
@@ -101,48 +107,110 @@ function PerModelTable({ byModel, pricing, refModel }) {
         </div>
       ) : (
         shown.map((row, i) => {
-          const tokens = rowTokens(row);
-          const avoided = rate ? (tokens / 1_000_000) * ((rate.input_per_mtok + rate.output_per_mtok) / 2) : null;
-          const embedding = isEmbeddingModel(row.key);
+          const key = rowKey(row, i);
+          const isOpen = !!expanded[key];
+          const byRepo = Array.isArray(row.by_repo) ? row.by_repo : [];
+          const repoShown = byRepo.slice(0, REPO_CAP);
+          const repoExtra = byRepo.length - repoShown.length;
+          const color = providerColor(row.provider);
           return (
-            <div
-              key={row.key || i}
-              style={{
-                display: "grid",
-                gridTemplateColumns: cols,
-                alignItems: "center",
-                padding: "9px 16px",
-                borderBottom: "1px solid color-mix(in srgb, var(--cc-fg) 4.5%, transparent)",
-                fontSize: 11.5,
-              }}
-              className="tabular-nums"
-            >
-              <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-                <span style={{ width: 7, height: 7, borderRadius: 999, background: seriesColor(row.key, i), flexShrink: 0 }} />
-                <span style={{ minWidth: 0 }}>
-                  <div
-                    style={{
-                      fontSize: 11.5,
-                      fontWeight: 600,
-                      color: "var(--cc-fg)",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {row.key || "(untagged)"}
-                  </div>
+            <div key={key} style={{ borderBottom: "1px solid color-mix(in srgb, var(--cc-fg) 4.5%, transparent)" }}>
+              <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={isOpen}
+                onClick={() => toggle(key)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggle(key);
+                  }
+                }}
+                className="hover-bg-surface"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: cols,
+                  alignItems: "center",
+                  padding: "9px 16px",
+                  fontSize: 11.5,
+                  cursor: "pointer",
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: 999, background: color, flexShrink: 0 }} />
+                  <span style={{ minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        color: "var(--cc-fg)",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {row.model || "(untagged)"}
+                    </div>
+                    <div style={{ fontSize: 9.5, color: "var(--cc-muted)" }}>{row.family || "Other"}</div>
+                  </span>
                 </span>
-              </span>
-              <span style={{ textAlign: "right", color: "var(--cc-dim)" }}>{fmtInt(row.runs_total)}</span>
-              <span style={{ textAlign: "right", color: "var(--cc-dim)" }}>{fmtTokens(tokens)}</span>
-              <span style={{ textAlign: "right", color: "var(--cc-dim)" }}>{fmtMs(row.ttft_ms?.p50)}</span>
-              <span style={{ textAlign: "right", fontWeight: 600, color: embedding ? "var(--cc-dim)" : "var(--cc-fg)" }}>
-                {embedding ? "—" : row.decode_tokens_per_sec?.avg != null ? row.decode_tokens_per_sec.avg.toFixed(1) : "—"}
-              </span>
-              <span style={{ textAlign: "right", fontWeight: 700, color: "var(--cc-ok)" }}>
-                {avoided != null ? `$${avoided.toFixed(2)}` : "—"}
-              </span>
+                <span
+                  className="tabular-nums"
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: ".04em",
+                    textTransform: "uppercase",
+                    color,
+                    justifySelf: "start",
+                    padding: "1px 6px",
+                    borderRadius: 3,
+                    background: "var(--cc-elev)",
+                    border: "1px solid var(--cc-border)",
+                  }}
+                >
+                  {row.provider || "unknown"}
+                </span>
+                <span className="tabular-nums" style={{ textAlign: "right", color: "var(--cc-dim)" }}>{fmtInt(row.runs)}</span>
+                <span className="tabular-nums" style={{ textAlign: "right", color: "var(--cc-dim)" }}>{fmtTokensReport(row.tokens)}</span>
+                <span className="tabular-nums" style={{ textAlign: "right", fontWeight: 700, color: "var(--cc-fg)" }}>
+                  {fmtCostReport(row.cost_usd)}
+                </span>
+                <span style={{ textAlign: "right", color: "var(--cc-muted)", fontSize: 10 }}>{isOpen ? "▾" : "▸"}</span>
+              </div>
+
+              {isOpen && (
+                <div style={{ padding: "0 16px 10px 33px" }}>
+                  {repoShown.length === 0 ? (
+                    <div style={{ fontSize: 10.5, color: "var(--cc-muted)", padding: "4px 0" }}>No per-repo attribution.</div>
+                  ) : (
+                    repoShown.map((r, ri) => (
+                      <div
+                        key={r.repo || ri}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          fontSize: 10.5,
+                          padding: "3px 0",
+                          color: "var(--cc-dim)",
+                        }}
+                        className="tabular-nums"
+                      >
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                          {r.repo || "(unknown repo)"}
+                        </span>
+                        <span style={{ flexShrink: 0, marginLeft: 10 }}>
+                          {fmtInt(r.runs)} runs · {fmtTokensReport(r.tokens)}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                  {repoExtra > 0 && (
+                    <div style={{ fontSize: 10, color: "var(--cc-muted)", padding: "3px 0" }}>+{repoExtra} more repos</div>
+                  )}
+                </div>
+              )}
             </div>
           );
         })
@@ -153,6 +221,21 @@ function PerModelTable({ byModel, pricing, refModel }) {
       )}
     </div>
   );
+}
+
+const SEAT_META = {
+  "context window": { color: "var(--cc-thinking)" },
+  "agent loop": { color: "var(--cc-type)" },
+  batch: { color: "var(--cc-waiting)" },
+  embedding: { color: "var(--cc-macro)" },
+};
+
+function deriveSeat(row) {
+  if (row.seat) return row.seat;
+  if (row.class === "batch" || row.lane_class === "batch") return "batch";
+  if (typeof row.endpoint === "string" && row.endpoint.toLowerCase().includes("embed")) return "embedding";
+  if (row.trace_parent) return "agent loop";
+  return "context window";
 }
 
 function BackendMixBar({ mix }) {
@@ -271,15 +354,14 @@ function PerAgentTable({ byAgent }) {
   );
 }
 
-export default function PerModelAgent({ data, view }) {
-  const byModel = data?.metrics?.by_model;
+export default function PerModelAgent({ data, view: _view }) {
   const byAgent = data?.metrics?.by_agent;
   return (
     <div
       className="per-model-agent-grid"
       style={{ display: "grid", gridTemplateColumns: "minmax(0,1.15fr) minmax(0,1fr)", gap: 14 }}
     >
-      <PerModelTable byModel={byModel} pricing={data?.pricing} refModel={view?.refModel} />
+      <UnifiedModelTable report={data?.modelsReport} />
       <PerAgentTable byAgent={byAgent} />
     </div>
   );

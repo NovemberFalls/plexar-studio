@@ -15,6 +15,8 @@
  *   selectedProvider — the picked provider ({ id, capabilities, ... }) or null
  *   onSpillChange — (cls, seconds|null) => void
  *   onToast — (message, kind) => void
+ *   onModelsRefresh — (modelsResponse) => void, called after the models-folder
+ *     path is saved so the parent's localModels state picks up new entries
  *   onClose — () => void
  *   children — extra provider panels (picker / models / traces) from App
  */
@@ -57,7 +59,112 @@ function Card({ title, children, style }) {
   );
 }
 
-function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider, localModels, onToast }) {
+/** Config card for `model-discovery` providers (vLLM): shows the current
+ *  models-folder path from GET /api/local/{id}/models-dir, an editable text
+ *  input, and a Save button that PUTs it. On success, refreshes the models
+ *  list (via onModelsRefresh) so newly-discovered models appear right away. */
+function ModelsFolderCard({ provider, onToast, onModelsRefresh }) {
+  const [current, setCurrent] = useState(null); // { path, exists, writable_config } | null (unfetched)
+  const [input, setInput] = useState("");
+  const [saving, setSaving] = useState(false);
+  const providerId = provider?.id;
+
+  useEffect(() => {
+    if (!providerId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models-dir`);
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok) {
+          setCurrent(data);
+          setInput(data.path || "");
+        }
+      } catch {
+        /* best-effort */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [providerId]);
+
+  const handleSave = async () => {
+    const path = (input || "").trim();
+    if (!path || !providerId) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models-dir`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        onToast?.(data?.error || "Could not update models folder", "error");
+        return;
+      }
+      setCurrent(data);
+      setInput(data.path || path);
+      onToast?.("Models folder saved", "success");
+      try {
+        const mres = await fetch(`/api/local/${encodeURIComponent(providerId)}/models`);
+        if (mres.ok) onModelsRefresh?.(await mres.json());
+      } catch {
+        /* best-effort refresh */
+      }
+    } catch {
+      onToast?.("Could not update models folder", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 12, borderTop: "1px solid var(--border-color)", paddingTop: 10 }}>
+      <div className="text-[10px] uppercase tracking-wider" style={{ color: "var(--text-muted)", marginBottom: 6 }}>
+        Models Folder
+      </div>
+      {current && (
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8, lineHeight: 1.5 }}>
+          {current.path || "not set"}
+          {current.path && (
+            <span style={{ color: current.exists ? "var(--green, #46a758)" : "var(--red, #e5484d)" }}>
+              {" "}· {current.exists ? "exists" : "not found"}
+            </span>
+          )}
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          disabled={saving}
+          placeholder="C:\models"
+          className="hover-border-accent"
+          style={{
+            flex: 1, minWidth: 0, fontSize: 12, padding: "5px 8px", borderRadius: 6,
+            border: "1px solid var(--cc-border, var(--border-color))",
+            background: "var(--bg-surface)", color: "var(--text-primary)",
+            opacity: saving ? 0.6 : 1,
+          }}
+        />
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="text-[11px] px-3 py-1 rounded-full transition-colors hover-bg-surface"
+          style={{
+            flexShrink: 0, color: "var(--accent)", border: "1px solid var(--accent)",
+            background: "var(--bg-surface)", opacity: saving ? 0.6 : 1,
+          }}
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider, localModels, onToast, onModelsRefresh }) {
   const reachable = localModels?.reachable === true;
   const label = provider?.label || "Provider";
   const hint = provider?.endpoint_hint || null;
@@ -292,6 +399,10 @@ function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider,
             )}
           </div>
         )}
+
+        {localEnabled && provider?.capabilities?.includes("model-discovery") && (
+          <ModelsFolderCard provider={provider} onToast={onToast} onModelsRefresh={onModelsRefresh} />
+        )}
       </div>
     </Card>
   );
@@ -377,6 +488,7 @@ export default function LocalBrokerView({
   localModels,
   onSpillChange,
   onToast,
+  onModelsRefresh,
   onClose,
   children, // extra provider panels (picker / models / traces) from App
 }) {
@@ -395,6 +507,7 @@ export default function LocalBrokerView({
           provider={selectedProvider}
           localModels={localModels}
           onToast={onToast}
+          onModelsRefresh={onModelsRefresh}
         />
       ) : (
         <ConnectionCard

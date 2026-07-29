@@ -11,24 +11,165 @@ import {
   buildLocalGroups,
   FALLBACK_MODEL_GROUPS,
   OPENROUTER_GROUP,
+  DEPRECATED_MODEL_IDS,
+  isDeprecatedModel,
   getModelProvider,
   parseLocalModelId,
 } from "../modelCatalog.js";
 
-describe("buildModelGroups (unchanged fallback contract)", () => {
+describe("buildModelGroups — family grouping + fallback contract", () => {
   it("falls back to FALLBACK_MODEL_GROUPS for empty/invalid input", () => {
     expect(buildModelGroups([])).toBe(FALLBACK_MODEL_GROUPS);
     expect(buildModelGroups(null)).toBe(FALLBACK_MODEL_GROUPS);
     expect(buildModelGroups(undefined)).toBe(FALLBACK_MODEL_GROUPS);
   });
 
-  it("groups live models by generation and appends OPENROUTER_GROUP", () => {
+  it("groups live models by family and appends OPENROUTER_GROUP", () => {
     const groups = buildModelGroups([
       { id: "claude-opus-5-x", display_name: "Claude Opus 5" },
       { id: "claude-sonnet-5-x", display_name: "Claude Sonnet 5" },
     ]);
-    expect(groups[0].label).toBe("Claude 5");
+    expect(groups[0].label).toBe("Opus");
     expect(groups.at(-1)).toBe(OPENROUTER_GROUP);
+  });
+
+  it("emits groups in fixed family order (Opus, Sonnet, Haiku, Fable) regardless of input order", () => {
+    const groups = buildModelGroups([
+      { id: "claude-fable-5", display_name: "Claude Fable 5" },
+      { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
+      { id: "claude-sonnet-5", display_name: "Claude Sonnet 5" },
+      { id: "claude-opus-5", display_name: "Claude Opus 5" },
+    ]);
+    const labels = groups.map((g) => g.label);
+    // OPENROUTER_GROUP is always last; family groups precede it in fixed order.
+    expect(labels).toEqual(["Opus", "Sonnet", "Haiku", "Fable", "OpenRouter"]);
+  });
+
+  it("only emits family groups that have at least one entry", () => {
+    const groups = buildModelGroups([{ id: "claude-opus-5", display_name: "Claude Opus 5" }]);
+    const labels = groups.map((g) => g.label);
+    expect(labels).toEqual(["Opus", "OpenRouter"]);
+  });
+
+  it("unrecognized families land in a trailing 'Other' group instead of being dropped", () => {
+    const groups = buildModelGroups([
+      { id: "claude-opus-5", display_name: "Claude Opus 5" },
+      { id: "claude-mystery-1", display_name: "Claude Mystery 1" },
+    ]);
+    const otherGroup = groups.find((g) => g.label === "Other");
+    expect(otherGroup).toBeDefined();
+    expect(otherGroup.models).toEqual([{ id: "claude-mystery-1", label: "Mystery 1" }]);
+    // Other precedes OpenRouter but follows the recognized families.
+    const labels = groups.map((g) => g.label);
+    expect(labels.indexOf("Other")).toBeLessThan(labels.indexOf("OpenRouter"));
+  });
+
+  it("recognizes the Mythos family", () => {
+    const groups = buildModelGroups([{ id: "claude-mythos-1", display_name: "Claude Mythos 1" }]);
+    expect(groups[0].label).toBe("Mythos");
+  });
+
+  it("preserves API order within a family (does not re-sort by parsed version)", () => {
+    const groups = buildModelGroups([
+      { id: "claude-opus-5", display_name: "Claude Opus 5" },
+      { id: "claude-opus-4-8", display_name: "Claude Opus 4.8" },
+      { id: "claude-opus-4-10", display_name: "Claude Opus 4.10" },
+    ]);
+    const opusGroup = groups.find((g) => g.label === "Opus");
+    const ids = opusGroup.models.map((m) => m.id);
+    // Opus 5 gets a (1M) variant inserted right after it; 4.8/4.10 order is
+    // preserved exactly as given (API order), not numerically re-sorted.
+    expect(ids).toEqual([
+      "claude-opus-5",
+      "claude-opus-5[1m]",
+      "claude-opus-4-8",
+      "claude-opus-4-8[1m]",
+      "claude-opus-4-10",
+      "claude-opus-4-10[1m]",
+    ]);
+  });
+
+  it("inserts the synthesized (1M) variant immediately after its base entry", () => {
+    const groups = buildModelGroups([{ id: "claude-sonnet-5", display_name: "Claude Sonnet 5" }]);
+    const sonnetGroup = groups.find((g) => g.label === "Sonnet");
+    expect(sonnetGroup.models).toEqual([
+      { id: "claude-sonnet-5", label: "Sonnet 5" },
+      { id: "claude-sonnet-5[1m]", label: "Sonnet 5 (1M)" },
+    ]);
+  });
+
+  it("does not synthesize a (1M) variant for Haiku/Fable families", () => {
+    const groups = buildModelGroups([
+      { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
+      { id: "claude-fable-5", display_name: "Claude Fable 5" },
+    ]);
+    const haikuGroup = groups.find((g) => g.label === "Haiku");
+    const fableGroup = groups.find((g) => g.label === "Fable");
+    expect(haikuGroup.models).toEqual([{ id: "claude-haiku-4-5", label: "Haiku 4.5" }]);
+    expect(fableGroup.models).toEqual([{ id: "claude-fable-5", label: "Fable 5" }]);
+  });
+
+  it("filters out deprecated/retired models before grouping, and never resurrects them via (1M)", () => {
+    const groups = buildModelGroups([
+      { id: "claude-opus-5", display_name: "Claude Opus 5" },
+      { id: "claude-opus-4-1", display_name: "Claude Opus 4.1" },
+      { id: "claude-opus-4-1-20250805", display_name: "Claude Opus 4.1" },
+      { id: "claude-3-5-sonnet-20241022", display_name: "Claude Sonnet 3.5" },
+    ]);
+    const allIds = groups.flatMap((g) => g.models.map((m) => m.id));
+    expect(allIds).not.toContain("claude-opus-4-1");
+    expect(allIds).not.toContain("claude-opus-4-1-20250805");
+    expect(allIds).not.toContain("claude-opus-4-1[1m]");
+    expect(allIds).not.toContain("claude-3-5-sonnet-20241022");
+    expect(allIds).not.toContain("claude-3-5-sonnet-20241022[1m]");
+    expect(allIds).toContain("claude-opus-5");
+  });
+
+  it("falls back when every live model is filtered out as deprecated", () => {
+    const groups = buildModelGroups([{ id: "claude-opus-4-0", display_name: "Claude Opus 4.0" }]);
+    expect(groups).toBe(FALLBACK_MODEL_GROUPS);
+  });
+});
+
+describe("isDeprecatedModel", () => {
+  it("matches every id in DEPRECATED_MODEL_IDS exactly", () => {
+    for (const id of DEPRECATED_MODEL_IDS) {
+      expect(isDeprecatedModel(id)).toBe(true);
+    }
+  });
+
+  it("matches dated variants via prefix", () => {
+    expect(isDeprecatedModel("claude-opus-4-1-20250805")).toBe(true);
+    expect(isDeprecatedModel("claude-3-5-sonnet-20241022")).toBe(true);
+  });
+
+  it("does not match unrelated ids, including ids that share a prefix substring without a hyphen boundary", () => {
+    expect(isDeprecatedModel("claude-opus-5")).toBe(false);
+    // "claude-opus-4-10" is NOT a dated variant of "claude-opus-4-1" — the
+    // hyphen-boundary check (`id.startsWith(deprecatedId + "-")`) correctly
+    // rejects it since the next char after "4-1" is "0", not "-".
+    expect(isDeprecatedModel("claude-opus-4-10")).toBe(false);
+    expect(isDeprecatedModel("claude-sonnet-5")).toBe(false);
+  });
+
+  it("returns false for non-string/empty input", () => {
+    expect(isDeprecatedModel(null)).toBe(false);
+    expect(isDeprecatedModel(undefined)).toBe(false);
+    expect(isDeprecatedModel("")).toBe(false);
+  });
+});
+
+describe("FALLBACK_MODEL_GROUPS shape", () => {
+  it("is grouped by family in fixed order, ending with OPENROUTER_GROUP", () => {
+    const labels = FALLBACK_MODEL_GROUPS.map((g) => g.label);
+    expect(labels).toEqual(["Opus", "Sonnet", "Haiku", "Fable", "OpenRouter"]);
+  });
+
+  it("contains no deprecated model ids", () => {
+    const allIds = FALLBACK_MODEL_GROUPS.flatMap((g) => g.models.map((m) => m.id));
+    for (const id of allIds) {
+      expect(isDeprecatedModel(id)).toBe(false);
+    }
   });
 });
 

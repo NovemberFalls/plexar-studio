@@ -272,5 +272,15 @@ export default function useReportingData(providerId, { enabled = false, window =
     enabled,
   );
 
-  return { metrics, timeseries, queue, spillConfig, spills, models, apiUsage, pricing };
+  // Unified per-model usage across every provider actually used (Anthropic,
+  // OpenRouter, local) with per-repo attribution — global (not provider-keyed),
+  // window vocabulary matches this view's window state exactly
+  // (lifetime|24h|7d|session), so it's passed straight through, no mapping.
+  const modelsReport = usePolledEndpoint(
+    enabled ? `/api/reporting/models?window=${win}` : null,
+    10000,
+    enabled,
+  );
+
+  return { metrics, timeseries, queue, spillConfig, spills, models, apiUsage, pricing, modelsReport };
 }

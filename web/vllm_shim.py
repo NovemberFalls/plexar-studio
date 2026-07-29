@@ -377,7 +377,9 @@ def _message_start_event(state: _StreamState) -> str:
     )
 
 
-async def _translate_openai_stream(upstream: AsyncIterator[bytes], *, model: str) -> AsyncIterator[str]:
+async def _translate_openai_stream(
+    upstream: AsyncIterator[bytes], *, model: str, usage_holder: dict | None = None
+) -> AsyncIterator[str]:
     state = _StreamState(message_id=f"msg_{uuid.uuid4().hex[:24]}", model=model)
 
     async for raw_line in _iter_sse_lines(upstream):
@@ -467,6 +469,9 @@ async def _translate_openai_stream(upstream: AsyncIterator[bytes], *, model: str
         usage = chunk.get("usage")
         if usage:
             state.usage = usage
+            if usage_holder is not None:
+                usage_holder["prompt_tokens"] = usage.get("prompt_tokens")
+                usage_holder["completion_tokens"] = usage.get("completion_tokens")
 
     # An upstream stream that never carried a data chunk (empty, or only
     # [DONE]) must still produce a well-formed Anthropic sequence -- the
@@ -545,6 +550,15 @@ def _anthropic_error(message: str, *, status_code: int = 502, err_type: str = "a
 
 @router.post("/v1/messages")
 async def messages(request: Request):
+    return await _handle_messages(request, session_id=None)
+
+
+@router.post("/s/{session_id}/v1/messages")
+async def messages_scoped(request: Request, session_id: str):
+    return await _handle_messages(request, session_id=session_id)
+
+
+async def _handle_messages(request: Request, *, session_id: str | None):
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -562,11 +576,51 @@ async def messages(request: Request):
     upstream_url = f"{_vllm_base_url()}/v1/chat/completions"
 
     if stream:
-        return await _proxy_stream(upstream_url, openai_body, model=model)
-    return await _proxy_non_stream(upstream_url, openai_body, model=model)
+        return await _proxy_stream(upstream_url, openai_body, model=model, session_id=session_id)
+    return await _proxy_non_stream(upstream_url, openai_body, model=model, session_id=session_id)
 
 
-async def _proxy_non_stream(upstream_url: str, openai_body: dict, *, model: str) -> JSONResponse:
+def _resolve_workdir(session_id: str | None) -> str | None:
+    """Look up the session's workdir via pty_manager by terminal id --
+    denormalized at write time (into local_runs.workdir) so the row survives
+    the session later being closed. Best-effort: returns None if the session
+    can't be resolved (never guesses).
+    """
+    if not session_id:
+        return None
+    try:
+        import pty_manager as pty_manager_module
+
+        session = pty_manager_module.pty_manager.sessions.get(session_id)
+        if session is not None:
+            return session.working_dir or None
+    except Exception:
+        logger.debug("vllm_shim: failed resolving workdir for session %s", session_id, exc_info=True)
+    return None
+
+
+def _record_local_run(*, session_id: str | None, model: str, input_tokens, output_tokens, wall_ms: float) -> None:
+    """Best-effort local-run recording -- never raises into the request path."""
+    try:
+        import usage_tracker as usage_tracker_module
+
+        usage_tracker_module.usage_tracker.record_local_run(
+            terminal_id=session_id,
+            provider_id="vllm-local",
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            wall_ms=wall_ms,
+            workdir=_resolve_workdir(session_id),
+        )
+    except Exception:
+        logger.error("vllm_shim: failed to record local run", exc_info=True)
+
+
+async def _proxy_non_stream(
+    upstream_url: str, openai_body: dict, *, model: str, session_id: str | None = None
+) -> JSONResponse:
+    start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(upstream_url, json=openai_body)
@@ -590,17 +644,33 @@ async def _proxy_non_stream(upstream_url: str, openai_body: dict, *, model: str)
         logger.error("vllm_shim: failed to translate OpenAI response to Anthropic shape", exc_info=True)
         return _anthropic_error("Failed to translate upstream response", status_code=502)
 
+    wall_ms = (time.monotonic() - start) * 1000
+    usage = oa_resp.get("usage") or {}
+    _record_local_run(
+        session_id=session_id,
+        model=model,
+        input_tokens=usage.get("prompt_tokens"),
+        output_tokens=usage.get("completion_tokens"),
+        wall_ms=wall_ms,
+    )
+
     return JSONResponse(content=anthropic_resp)
 
 
-async def _proxy_stream(upstream_url: str, openai_body: dict, *, model: str) -> StreamingResponse:
+async def _proxy_stream(
+    upstream_url: str, openai_body: dict, *, model: str, session_id: str | None = None
+) -> StreamingResponse:
     client = httpx.AsyncClient(timeout=_TIMEOUT)
+    start = time.monotonic()
 
     async def event_gen() -> AsyncIterator[str]:
+        usage_holder: dict = {}
         try:
             async with client.stream("POST", upstream_url, json=openai_body) as resp:
                 resp.raise_for_status()
-                async for event in _translate_openai_stream(resp.aiter_lines(), model=model):
+                async for event in _translate_openai_stream(
+                    resp.aiter_lines(), model=model, usage_holder=usage_holder
+                ):
                     yield event
         except httpx.HTTPStatusError as exc:
             logger.error("vllm_shim: upstream vLLM returned an error status during streaming", exc_info=True)
@@ -624,6 +694,14 @@ async def _proxy_stream(upstream_url: str, openai_body: dict, *, model: str) -> 
                 },
             )
         finally:
+            wall_ms = (time.monotonic() - start) * 1000
+            _record_local_run(
+                session_id=session_id,
+                model=model,
+                input_tokens=usage_holder.get("prompt_tokens"),
+                output_tokens=usage_holder.get("completion_tokens"),
+                wall_ms=wall_ms,
+            )
             await client.aclose()
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
@@ -631,6 +709,15 @@ async def _proxy_stream(upstream_url: str, openai_body: dict, *, model: str) -> 
 
 @router.post("/v1/messages/count_tokens")
 async def count_tokens(request: Request):
+    return await _handle_count_tokens(request)
+
+
+@router.post("/s/{session_id}/v1/messages/count_tokens")
+async def count_tokens_scoped(request: Request, session_id: str):
+    return await _handle_count_tokens(request)
+
+
+async def _handle_count_tokens(request: Request):
     """Best-effort, non-proxying token estimate (chars/4 heuristic) -- claude
     may call this before a request; vLLM has no equivalent endpoint, and an
     approximate answer is fine here (this is explicitly documented as an

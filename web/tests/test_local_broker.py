@@ -304,7 +304,7 @@ async def test_providers_list_shape_no_urls(client):
             "label": "vLLM (local)",
             "kind": "vllm",
             "scope": "local",
-            "capabilities": ["models", "health", "metrics", "model-control"],
+            "capabilities": ["models", "health", "metrics", "model-discovery", "model-control"],
             "endpoint_hint": "127.0.0.1:8001",
         },
     ]
@@ -381,6 +381,7 @@ async def test_provider_models_normalization(client, monkeypatch):
     assert body["models"][1] == {
         "id": "sparse-model", "type": None, "arch": None, "quantization": None,
         "state": None, "max_context_length": None, "loaded_context_length": None,
+        "name": None, "host_path": None,
     }
 
 

@@ -106,7 +106,8 @@ async def lifespan(app: FastAPI):
                         if not jsonl_path:
                             continue
                         await loop.run_in_executor(
-                            None, usage_tracker.ingest_jsonl, session.id, jsonl_path
+                            None, usage_tracker.ingest_jsonl, session.id, jsonl_path,
+                            session.working_dir,
                         )
                     except Exception:
                         logger.error(
@@ -131,6 +132,11 @@ async def lifespan(app: FastAPI):
         apply_persisted_endpoints()
     except Exception:
         logger.error("Applying persisted provider endpoints failed", exc_info=True)
+
+    try:
+        apply_persisted_vllm_models_dir()
+    except Exception:
+        logger.error("Applying persisted vLLM models dir failed", exc_info=True)
 
     try:
         await start_managed_broker()
@@ -235,6 +241,15 @@ app.add_middleware(
 import vllm_shim  # noqa: E402 -- grouped with other post-app-creation setup
 
 app.include_router(vllm_shim.router)
+
+# LM Studio tagging proxy, mounted at /shim/lmstudio -- same session-scoped
+# base URL strategy as /shim/vllm above, but a byte-verbatim passthrough
+# (the broker already speaks Anthropic /v1/messages) that ADDS
+# X-Lane-Class/X-Client-Id/X-Agent-Id headers for broker-side attribution.
+# See web/lmstudio_proxy.py.
+import lmstudio_proxy  # noqa: E402 -- grouped with other post-app-creation setup
+
+app.include_router(lmstudio_proxy.router)
 
 # Detect PyInstaller bundle for static file path
 if getattr(sys, "_MEIPASS", None):
@@ -2082,6 +2097,14 @@ COCKPIT_VLLM_SERVED_NAME = os.getenv("COCKPIT_VLLM_SERVED_NAME", "qwen3-coder-30
 COCKPIT_VLLM_IMAGE = os.getenv("COCKPIT_VLLM_IMAGE", "vllm/vllm-openai:latest")
 COCKPIT_VLLM_GPU_UUID = os.getenv("COCKPIT_VLLM_GPU_UUID", "")
 COCKPIT_VLLM_MODELS_DIR = os.getenv("COCKPIT_VLLM_MODELS_DIR", "")
+# Runtime-settable mirror of COCKPIT_VLLM_MODELS_DIR — seeded from the env var
+# above, but overridable at runtime via PUT /api/local/{id}/models-dir and
+# persisted to survive restart (see _load_vllm_models_dir/_save_vllm_models_dir
+# below). This is the HOST path Cockpit scans on disk. The vLLM container only
+# ever sees it bind-mounted at /models (see _vllm_docker_argv), so any model id
+# reported for restart purposes must be expressed as "/models/<name>" — the
+# CONTAINER path — while the host path stays around for display only.
+_vllm_models_dir = COCKPIT_VLLM_MODELS_DIR
 COCKPIT_VLLM_MAX_MODEL_LEN = os.getenv("COCKPIT_VLLM_MAX_MODEL_LEN", "49152")
 COCKPIT_VLLM_MAX_NUM_SEQS = os.getenv("COCKPIT_VLLM_MAX_NUM_SEQS", "2")
 COCKPIT_VLLM_GPU_UTIL = os.getenv("COCKPIT_VLLM_GPU_UTIL", "0.90")
@@ -2110,7 +2133,7 @@ _PROVIDERS = {
         # vLLM does not serve the broker's queue/spill/traces shapes, but it
         # DOES export a Prometheus /metrics endpoint that _vllm_metrics reshapes
         # into the broker metrics contract (cumulative-since-start; see adapter).
-        "capabilities": ["models", "health", "metrics"],
+        "capabilities": ["models", "health", "metrics", "model-discovery"],
     },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
@@ -2256,6 +2279,151 @@ def _save_provider_endpoints(mapping: dict) -> None:
             _PROVIDER_ENDPOINTS_FILE,
             exc_info=True,
         )
+
+
+# ── Configurable vLLM models directory (persisted) ────────
+#
+# Operator-facing config, same trust level as COCKPIT_PROVIDERS_FILE, but the
+# HTTP setter still validates every path from the browser (see
+# set_vllm_models_dir) since it drives a filesystem scan. Persisted beside the
+# provider-endpoints file above.
+_VLLM_MODELS_DIR_FILE = os.path.join(
+    os.path.expanduser("~"), ".claude-cockpit", "vllm-models-dir.json"
+)
+_VLLM_MODELS_DIR_MAX_LEN = 4096
+
+
+def _load_vllm_models_dir() -> str:
+    """Read the persisted host models-dir path. Returns "" on missing/parse error."""
+    try:
+        with open(_VLLM_MODELS_DIR_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        path = data.get("path") if isinstance(data, dict) else None
+        return path if isinstance(path, str) else ""
+    except FileNotFoundError:
+        logger.debug("No vllm-models-dir.json at %s", _VLLM_MODELS_DIR_FILE)
+        return ""
+    except Exception:
+        logger.warning(
+            "Failed to read %s; ignoring persisted models dir",
+            _VLLM_MODELS_DIR_FILE,
+            exc_info=True,
+        )
+        return ""
+
+
+def _save_vllm_models_dir(path: str) -> None:
+    """Best-effort write of the models-dir path. Never raises."""
+    try:
+        os.makedirs(os.path.dirname(_VLLM_MODELS_DIR_FILE), exist_ok=True)
+        with open(_VLLM_MODELS_DIR_FILE, "w", encoding="utf-8") as f:
+            json.dump({"path": path}, f, indent=2)
+    except Exception:
+        logger.error(
+            "Failed to persist vLLM models dir to %s",
+            _VLLM_MODELS_DIR_FILE,
+            exc_info=True,
+        )
+
+
+def apply_persisted_vllm_models_dir() -> None:
+    """Override _vllm_models_dir from the persisted config at startup.
+
+    Re-validates the persisted path the same way the PUT route does — a bad or
+    stale config file must never block startup, and a path that has since
+    disappeared/changed type on disk must not be silently trusted.
+    """
+    global _vllm_models_dir
+
+    persisted = _load_vllm_models_dir()
+    if not persisted:
+        return
+    ok, _error, resolved = _validate_models_dir(persisted)
+    if not ok:
+        logger.warning("ignoring unsafe/stale persisted vLLM models dir: %s", persisted)
+        return
+    _vllm_models_dir = resolved
+    logger.info("Applied persisted vLLM models dir: %s", resolved)
+
+
+_QUANT_HINTS = ("awq", "gptq", "int4", "int8", "fp8", "q4", "q8")
+
+
+def _sniff_quantization(name: str) -> str | None:
+    """Best-effort quantization guess from a model directory name. None if unknown."""
+    lowered = name.lower()
+    for hint in _QUANT_HINTS:
+        if hint in lowered:
+            return hint
+    return None
+
+
+def _validate_models_dir(raw_path: str) -> tuple[bool, str | None, str | None]:
+    """Validate a browser-supplied filesystem path for the vLLM models dir.
+
+    Returns (ok, error_message, resolved_path). This is a filesystem path
+    coming straight from the browser, so it is validated defensively even
+    though it is operator-facing config:
+      - must be a non-empty string, under _VLLM_MODELS_DIR_MAX_LEN chars
+      - must not contain a NUL byte
+      - must be an ABSOLUTE path
+      - resolved (Path.resolve()) and re-checked as an existing directory --
+        closes off traversal games where the pre-resolve string looks fine but
+        resolves somewhere else entirely.
+    """
+    if not isinstance(raw_path, str) or not raw_path:
+        return False, "path must be a non-empty string", None
+    if len(raw_path) > _VLLM_MODELS_DIR_MAX_LEN:
+        return False, f"path must be at most {_VLLM_MODELS_DIR_MAX_LEN} characters", None
+    if "\x00" in raw_path:
+        return False, "path must not contain a NUL byte", None
+    p = Path(raw_path)
+    if not p.is_absolute():
+        return False, "path must be absolute", None
+    try:
+        resolved = p.resolve(strict=False)
+    except Exception:
+        logger.debug("Failed to resolve models dir %r", raw_path, exc_info=True)
+        return False, "path could not be resolved", None
+    if not resolved.is_dir():
+        return False, "path does not exist or is not a directory", None
+    return True, None, str(resolved)
+
+
+def _scan_vllm_models_dir() -> list[dict]:
+    """Best-effort scan of _vllm_models_dir's immediate subdirectories.
+
+    Each entry that looks like a model directory (contains config.json, or --
+    failing that -- is simply any subdirectory) becomes a disk-only catalog
+    entry. Never raises; an unreadable/unset dir yields [].
+
+    The "id" is the CONTAINER path ("/models/<name>") since that's what a
+    vLLM --model restart arg needs (see _vllm_docker_argv's bind mount); the
+    "host_path" is the real path on disk, kept around for display only.
+    """
+    if not _vllm_models_dir:
+        return []
+    try:
+        base = Path(_vllm_models_dir)
+        if not base.is_dir():
+            return []
+        entries = []
+        for child in sorted(base.iterdir()):
+            if not child.is_dir():
+                continue
+            entries.append({
+                "id": f"/models/{child.name}",
+                "name": child.name,
+                "host_path": str(child),
+                "state": "available",
+                "quantization": _sniff_quantization(child.name),
+                "arch": None,
+                "max_context_length": None,
+            })
+        return entries
+    except Exception:
+        logger.debug("Failed to scan vLLM models dir %s", _vllm_models_dir, exc_info=True)
+        return []
 
 
 def apply_persisted_endpoints() -> None:
@@ -3171,7 +3339,7 @@ def _vllm_docker_argv(action: str = "run") -> list[str]:
         docker_argv = ["docker", "rm", "-f", _MANAGED_VLLM["container"]]
     else:
         gpus = f'--gpus "device={COCKPIT_VLLM_GPU_UUID}"' if COCKPIT_VLLM_GPU_UUID else "--gpus all"
-        mount = f"-v {COCKPIT_VLLM_MODELS_DIR}:/models" if COCKPIT_VLLM_MODELS_DIR else ""
+        mount = f"-v {_vllm_models_dir}:/models" if _vllm_models_dir else ""
         gpu_pin = (
             f"-e CUDA_DEVICE_ORDER=PCI_BUS_ID -e CUDA_VISIBLE_DEVICES={COCKPIT_VLLM_GPU_UUID}"
             if COCKPIT_VLLM_GPU_UUID else ""
@@ -3283,22 +3451,46 @@ def _require_provider(provider_id: str):
 # ANTHROPIC_BASE_URL should point at. Only scope=="local" providers are
 # eligible — a "remote" scoped provider (someone's hosted LM Studio/vLLM) is
 # never eligible to become a session's live Anthropic endpoint via this path.
-def resolve_local_base_url(provider_id: str) -> str | None:
+_TERMINAL_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
+def resolve_local_base_url(provider_id: str, terminal_id: str | None = None) -> str | None:
     """Return the ANTHROPIC_BASE_URL for a local provider id, or None if the
     id is unknown or not local-scoped.
 
-    - "lmstudio-local": the broker already speaks the Anthropic-compatible
-      /v1/messages shape, so its broker_url is used directly.
+    - "lmstudio-local": previously resolved directly to the broker's
+      broker_url (the broker already speaks the Anthropic-compatible
+      /v1/messages shape). It now resolves to cockpit's own
+      /shim/lmstudio tagging proxy instead -- a byte-verbatim passthrough
+      that just ADDS X-Lane-Class/X-Client-Id/X-Agent-Id headers on the way
+      out. This indirection exists purely for ATTRIBUTION: the `claude` CLI
+      cannot be told to send custom headers, and the broker's by_agent/
+      by_session breakdowns are keyed off those headers -- so cockpit tags
+      the traffic itself rather than relying on the CLI to.
     - "vllm-local": vLLM is OpenAI-only and would 404 a raw Anthropic call,
       so this points at cockpit's own /shim/vllm translation route instead
       of vLLM's port directly.
+
+    When ``terminal_id`` is given (and passes a strict allowlist regex), the
+    returned URL is SESSION-SCOPED via a ``/s/{terminal_id}`` path segment so
+    the receiving shim can attribute the call to a specific Cockpit session
+    without needing any custom header support from the CLI. An invalid
+    terminal_id is never interpolated into the URL -- falls back to the
+    un-scoped form instead (same behavior as terminal_id=None).
     """
     provider = _PROVIDERS.get(provider_id)
     if provider is None or provider.get("scope") != "local":
         return None
+
+    scoped_segment = ""
+    if terminal_id and _TERMINAL_ID_RE.match(terminal_id):
+        scoped_segment = f"/s/{terminal_id}"
+
+    port = int(os.getenv("PORT", "8420"))
     if provider_id == "vllm-local":
-        port = int(os.getenv("PORT", "8420"))
-        return f"http://127.0.0.1:{port}/shim/vllm"
+        return f"http://127.0.0.1:{port}/shim/vllm{scoped_segment}"
+    if provider_id == "lmstudio-local":
+        return f"http://127.0.0.1:{port}/shim/lmstudio{scoped_segment}"
     return provider.get("broker_url")
 
 
@@ -3484,6 +3676,54 @@ async def set_provider_endpoint(provider_id: str, request: Request):
     return JSONResponse({"ok": True, "endpoint_hint": f"{host}:{port}"})
 
 
+@app.get("/api/local/{provider_id}/models-dir")
+async def get_vllm_models_dir(provider_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if provider["scope"] != "local" or provider["kind"] != "vllm":
+        return JSONResponse({"error": "models-dir config is vLLM-local-only"}, status_code=404)
+    exists = bool(_vllm_models_dir) and Path(_vllm_models_dir).is_dir()
+    return JSONResponse({"path": _vllm_models_dir or "", "exists": exists, "writable_config": True})
+
+
+@app.put("/api/local/{provider_id}/models-dir")
+async def set_vllm_models_dir(provider_id: str, request: Request):
+    """Reconfigure the HOST directory Cockpit scans for on-disk vLLM models.
+
+    SECURITY: this is a filesystem path supplied by the browser, so it is
+    validated defensively (see _validate_models_dir) even though it is
+    operator-facing config at the same trust level as COCKPIT_PROVIDERS_FILE:
+    must be absolute, resolve to an existing directory, no NUL bytes, capped
+    length. Only vLLM-local supports this (LM Studio's catalog is already
+    complete via /api/v0/models).
+    """
+    global _vllm_models_dir
+
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if provider["scope"] != "local" or provider["kind"] != "vllm":
+        return JSONResponse({"error": "models-dir config is vLLM-local-only"}, status_code=409)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+
+    raw_path = body.get("path")
+    ok, error, resolved = _validate_models_dir(raw_path)
+    if not ok:
+        return JSONResponse({"error": error}, status_code=400)
+
+    _vllm_models_dir = resolved
+    _save_vllm_models_dir(resolved)
+    logger.info("Provider %s models dir set to %s", provider_id, resolved)
+    return JSONResponse({"path": resolved, "exists": True, "writable_config": True})
+
+
 @app.get("/api/local/{provider_id}/models")
 async def get_provider_models(provider_id: str):
     provider = _require_provider(provider_id)
@@ -3491,18 +3731,49 @@ async def get_provider_models(provider_id: str):
         return JSONResponse({"error": "unknown provider"}, status_code=404)
     if "models" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
+
+    disk_models: list[dict] = []
+    if provider.get("kind") == "vllm":
+        disk_models = await asyncio.to_thread(_scan_vllm_models_dir)
+
     try:
         data = await asyncio.to_thread(_mgmt_get, provider, _models_path(provider))
     except Exception:
         logger.debug("Provider %s /models unreachable", provider_id, exc_info=True)
+        if disk_models:
+            # vLLM offline but its models dir is configured/scannable: still
+            # useful to the UI ("load this one"), so this is 200 not 503 --
+            # a deliberate shape change from the plain-unreachable case below.
+            return JSONResponse({"reachable": False, "models": disk_models})
         return JSONResponse({"reachable": False}, status_code=503)
+
     raw_models = data.get("data") if isinstance(data, dict) else None
     if raw_models is None:
         raw_models = []
     models = [
-        {field: m.get(field) if isinstance(m, dict) else None for field in _MODEL_FIELDS}
+        {
+            **{field: m.get(field) if isinstance(m, dict) else None for field in _MODEL_FIELDS},
+            "name": m.get("name") if isinstance(m, dict) else None,
+            "host_path": m.get("host_path") if isinstance(m, dict) else None,
+        }
         for m in raw_models
     ]
+
+    if disk_models:
+        # De-dup by id -- but a served model's id is typically the plain
+        # --served-model-name (e.g. "qwen3-coder-30b-awq"), NOT the container
+        # path our disk scan reports ("/models/qwen3-coder-30b-awq"), so also
+        # match on the bare directory name to catch that common case.
+        served_ids = {m["id"] for m in models}
+        for entry in disk_models:
+            if entry["id"] in served_ids or entry["name"] in served_ids:
+                continue
+            models.append({
+                **{field: entry.get(field) for field in _MODEL_FIELDS},
+                "name": entry.get("name"),
+                "host_path": entry.get("host_path"),
+            })
+
     return JSONResponse({"reachable": True, "models": models})
 
 
@@ -3788,6 +4059,31 @@ async def get_usage_summary(window: str = "lifetime"):
         data = usage_tracker.summary(window)
     except Exception:
         logger.debug("usage_tracker.summary(%s) failed", window, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
+@app.get("/api/reporting/models")
+async def get_reporting_models(window: str = "lifetime"):
+    """Merged per-model usage report across every pipeline Cockpit observes:
+    Anthropic + OpenRouter (usage_events, from Claude Code JSONL) and local
+    providers (local_runs, from the vLLM/LM Studio tagging shims), with
+    per-repo attribution. This is the merge point -- see usage_tracker.model_report.
+    """
+    if window not in _USAGE_SUMMARY_WINDOWS:
+        return JSONResponse(
+            {"error": f"window must be one of {list(_USAGE_SUMMARY_WINDOWS)}"},
+            status_code=400,
+        )
+    try:
+        data = usage_tracker.model_report(window)
+    except ValueError:
+        return JSONResponse(
+            {"error": f"window must be one of {list(_USAGE_SUMMARY_WINDOWS)}"},
+            status_code=400,
+        )
+    except Exception:
+        logger.error("usage_tracker.model_report(%s) failed", window, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
     return JSONResponse(data)
 

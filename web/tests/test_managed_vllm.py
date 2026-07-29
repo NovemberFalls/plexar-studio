@@ -56,7 +56,7 @@ def test_vllm_local_provider_shape():
     provider = server_module._PROVIDERS["vllm-local"]
     assert provider["kind"] == "vllm"
     assert provider["scope"] == "local"
-    assert set(provider["capabilities"]) == {"models", "health", "metrics", "model-control"}
+    assert set(provider["capabilities"]) == {"models", "health", "metrics", "model-discovery", "model-control"}
     for key in server_module._PROVIDER_REQUIRED_KEYS:
         assert key in provider
 

@@ -42,26 +42,32 @@ export const OPENROUTER_GROUP = {
 
 // Complete static list — served when the live fetch is unavailable, and the
 // default catalog for components rendered without a provider (tests).
+// Grouped BY FAMILY (Opus / Sonnet / Haiku / Fable), newest-first within
+// each family, mirroring the shape buildModelGroups() produces from live data.
 export const FALLBACK_MODEL_GROUPS = [
   {
-    label: "Claude 5",
+    label: "Opus",
     models: [
       { id: "claude-opus-5", label: "Opus 5" },
       { id: "claude-opus-5[1m]", label: "Opus 5 (1M)" },
-      { id: "claude-sonnet-5", label: "Sonnet 5" },
-      { id: "claude-fable-5", label: "Fable 5" },
-    ],
-  },
-  {
-    label: "Claude 4.8",
-    models: [
       { id: "claude-opus-4-8", label: "Opus 4.8" },
       { id: "claude-opus-4-8[1m]", label: "Opus 4.8 (1M)" },
     ],
   },
   {
-    label: "Claude 4.5",
+    label: "Sonnet",
+    models: [
+      { id: "claude-sonnet-5", label: "Sonnet 5" },
+      { id: "claude-sonnet-5[1m]", label: "Sonnet 5 (1M)" },
+    ],
+  },
+  {
+    label: "Haiku",
     models: [{ id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" }],
+  },
+  {
+    label: "Fable",
+    models: [{ id: "claude-fable-5", label: "Fable 5" }],
   },
   OPENROUTER_GROUP,
 ];
@@ -138,44 +144,89 @@ function supports1M(model) {
   return /opus|sonnet/i.test(model.display_name || model.id);
 }
 
-// Generation group label from the display name: "Claude Opus 5" -> "Claude 5",
-// "Claude Opus 4.8" -> "Claude 4.8". No trailing version -> "Claude".
-function genLabel(model) {
-  const m = /(\d+(?:\.\d+)?)\s*$/.exec(model.display_name || "");
-  return m ? `Claude ${m[1]}` : "Claude";
-}
-
 // Short entry label: "Claude Opus 5" -> "Opus 5".
 function shortLabel(model) {
   return (model.display_name || model.id).replace(/^Claude\s+/i, "");
 }
 
+// Model ids/aliases that are retired (API 404s) or deprecated and retiring
+// imminently. Verified against the Anthropic model catalog on 2026-07-29 —
+// re-verify before trusting this list stale. Matched by exact id AND by
+// prefix (see isDeprecatedModel) since the live list may return either the
+// bare alias (e.g. "claude-opus-4-1") or a fully dated id
+// (e.g. "claude-opus-4-1-20250805").
+export const DEPRECATED_MODEL_IDS = new Set([
+  // Retired — API returns 404
+  "claude-3-7-sonnet-20250219",
+  "claude-3-5-haiku-20241022",
+  "claude-3-opus-20240229",
+  "claude-3-5-sonnet-20241022",
+  "claude-3-5-sonnet-20240620",
+  "claude-3-sonnet-20240229",
+  "claude-2.1",
+  "claude-2.0",
+  "claude-3-haiku-20240307",
+  // Deprecated, retiring imminently
+  "claude-opus-4-1",
+  "claude-opus-4-0",
+  "claude-sonnet-4-0",
+]);
+
+/** True when `id` exactly matches, or is a dated variant of (id + "-"), a
+ *  known deprecated/retired model id. Exported for tests. */
+export function isDeprecatedModel(id) {
+  if (typeof id !== "string" || !id) return false;
+  for (const deprecatedId of DEPRECATED_MODEL_IDS) {
+    if (id === deprecatedId || id.startsWith(`${deprecatedId}-`)) return true;
+  }
+  return false;
+}
+
+// Fixed family display order — everything else lands in "Other" rather than
+// being silently dropped (an unrecognized family is likely a model newer
+// than these regexes, and hiding it would be exactly the drift bug this
+// catalog exists to avoid).
+const FAMILY_ORDER = ["Opus", "Sonnet", "Haiku", "Fable", "Mythos", "Other"];
+
+// Model family from the display name / id: matches the first family regex
+// that hits, falling back to "Other" for anything unrecognized.
+function familyLabel(model) {
+  const text = `${model.display_name || ""} ${model.id || ""}`;
+  if (/opus/i.test(text)) return "Opus";
+  if (/sonnet/i.test(text)) return "Sonnet";
+  if (/haiku/i.test(text)) return "Haiku";
+  if (/fable/i.test(text)) return "Fable";
+  if (/mythos/i.test(text)) return "Mythos";
+  return "Other";
+}
+
 /** Build the grouped picker shape from Anthropic's live [{id, display_name}]
- *  list: group by generation (API order preserved, newest first), synthesize
- *  (1M) variants, then append the static OpenRouter group. Empty/invalid input
- *  falls back to FALLBACK_MODEL_GROUPS. */
+ *  list: filter deprecated/retired models, group by FAMILY (Opus, Sonnet,
+ *  Haiku, Fable, Mythos, Other — fixed order, API order preserved within
+ *  each family), synthesize (1M) variants, then append the static OpenRouter
+ *  group. Empty/invalid input falls back to FALLBACK_MODEL_GROUPS. */
 export function buildModelGroups(liveModels) {
   if (!Array.isArray(liveModels) || liveModels.length === 0) {
     return FALLBACK_MODEL_GROUPS;
   }
-  const order = [];
-  const byGen = new Map();
+  const byFamily = new Map();
   for (const model of liveModels) {
     if (!model || typeof model.id !== "string") continue;
-    const gen = genLabel(model);
-    if (!byGen.has(gen)) {
-      byGen.set(gen, []);
-      order.push(gen);
-    }
-    const entries = byGen.get(gen);
+    if (isDeprecatedModel(model.id)) continue;
+    const family = familyLabel(model);
+    if (!byFamily.has(family)) byFamily.set(family, []);
+    const entries = byFamily.get(family);
     const short = shortLabel(model);
     entries.push({ id: model.id, label: short });
     if (supports1M(model)) {
       entries.push({ id: `${model.id}[1m]`, label: `${short} (1M)` });
     }
   }
-  if (order.length === 0) return FALLBACK_MODEL_GROUPS;
-  const groups = order.map((gen) => ({ label: gen, models: byGen.get(gen) }));
+  if (byFamily.size === 0) return FALLBACK_MODEL_GROUPS;
+  const groups = FAMILY_ORDER.filter((family) => byFamily.has(family)).map((family) => ({
+    label: family,
+    models: byFamily.get(family),
+  }));
   groups.push(OPENROUTER_GROUP);
   return groups;
 }

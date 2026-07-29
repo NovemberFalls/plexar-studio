@@ -29,7 +29,12 @@ export default function LocalModelsPanel({
   onLoad,
   onUnload,
 }) {
-  const offline = !models || models.reachable === false;
+  const list = Array.isArray(models?.models) ? models.models : [];
+  // vLLM can return HTTP 200 with reachable:false when the server is down but
+  // its models folder scanned fine — those disk-only entries are still worth
+  // showing so the user can start one. Only treat this as a true "no data"
+  // offline state when there's nothing to list either.
+  const offline = (!models || models.reachable === false) && list.length === 0;
 
   if (offline) {
     return (
@@ -44,13 +49,18 @@ export default function LocalModelsPanel({
     );
   }
 
-  const list = Array.isArray(models.models) ? models.models : [];
+  const unreachableWithModels = models?.reachable === false && list.length > 0;
 
   return (
     <div style={{ padding: "10px 12px" }}>
       <div className="text-[10px] uppercase tracking-wider" style={{ color: "var(--text-muted)", marginBottom: 6 }}>
         Models
       </div>
+      {unreachableWithModels && (
+        <div className="text-xs" style={{ color: "var(--text-muted)", marginBottom: 6, fontStyle: "italic" }}>
+          Provider offline — models found on disk.
+        </div>
+      )}
       {list.length === 0 ? (
         <div className="text-xs" style={{ color: "var(--text-muted)" }}>no models reported</div>
       ) : (

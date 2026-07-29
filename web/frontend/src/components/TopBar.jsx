@@ -98,6 +98,12 @@ export default function TopBar({
   // Tier 1: local model groups render in the picker but are not yet
   // launchable — flip this on in the tier that wires up local launch.
   localLaunchEnabled = false,
+  // (providerId, modelId) => void — loads/restarts a not-loaded local model
+  // straight from the picker row, without selecting/launching it.
+  onLoadLocalModel,
+  // id of the local model currently loading/restarting, or null — drives the
+  // inline "loading…" state on the matching picker row.
+  localBusyModelId = null,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
@@ -461,25 +467,60 @@ export default function TopBar({
                       )}
                       {group.models.map((m) => {
                         const disabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localLaunchEnabled);
+                        const showLoad = isLocalGroup && localLaunchEnabled && m.loaded === false && onLoadLocalModel;
+                        const loading = showLoad && localBusyModelId === m.localModelId;
                         return (
-                          <button
+                          <div
                             key={m.id}
-                            role="option"
-                            aria-selected={m.id === model}
-                            aria-disabled={disabled || undefined}
-                            disabled={disabled}
-                            onClick={() => { if (disabled) return; setModel(m.id); setModelOpen(false); }}
-                            className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
-                            style={{
-                              color: disabled ? "var(--text-muted)" : m.id === model ? "var(--accent)" : "var(--text-secondary)",
-                              fontWeight: m.id === model ? 600 : 400,
-                              opacity: disabled ? 0.45 : 1,
-                              cursor: disabled ? "not-allowed" : "pointer",
-                            }}
-                            title={groupHint || undefined}
+                            className="flex items-center hover-bg-surface"
+                            style={{ opacity: disabled ? 0.45 : 1 }}
                           >
-                            {m.label}
-                          </button>
+                            <button
+                              role="option"
+                              aria-selected={m.id === model}
+                              aria-disabled={disabled || undefined}
+                              disabled={disabled}
+                              onClick={() => { if (disabled) return; setModel(m.id); setModelOpen(false); }}
+                              className="block flex-1 min-w-0 text-left text-xs px-3 py-1.5 transition-colors"
+                              style={{
+                                color: disabled ? "var(--text-muted)" : m.id === model ? "var(--accent)" : "var(--text-secondary)",
+                                fontWeight: m.id === model ? 600 : 400,
+                                cursor: disabled ? "not-allowed" : "pointer",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                              }}
+                              title={groupHint || undefined}
+                            >
+                              {m.label}
+                            </button>
+                            {showLoad && (
+                              <button
+                                type="button"
+                                disabled={loading}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onLoadLocalModel(m.localProviderId, m.localModelId);
+                                }}
+                                className="text-[10px] transition-colors hover-bg-elevated"
+                                style={{
+                                  flexShrink: 0,
+                                  marginRight: 6,
+                                  padding: "2px 7px",
+                                  borderRadius: 4,
+                                  border: "1px solid var(--border-color)",
+                                  color: "var(--accent)",
+                                  background: "var(--bg-surface)",
+                                  cursor: loading ? "default" : "pointer",
+                                  opacity: loading ? 0.6 : 1,
+                                }}
+                                aria-label={`Load ${m.localModelId}`}
+                                title={loading ? "Loading…" : "Load this model"}
+                              >
+                                {loading ? "…" : "Load"}
+                              </button>
+                            )}
+                          </div>
                         );
                       })}
                     </div>

@@ -1069,6 +1069,43 @@ export default function App() {
     }
   }, [toast, selectedProvider]);
 
+  // Load a local model from the TopBar picker, where the target provider may
+  // differ from the LocalBrokerView's currently `selectedProvider`. Dispatches
+  // by API behavior rather than needing a fetched provider-capability lookup:
+  // LM Studio's /load endpoint succeeds directly; vLLM's /load 409s (it can
+  // only serve one model per container), so a 409 falls through to /restart.
+  const loadOrRestartLocalModel = useCallback(async (providerId, modelId) => {
+    if (!providerId || !modelId) return;
+    setLocalBusyModelId(modelId);
+    try {
+      const res = await fetch(
+        `/api/local/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/load`,
+        { method: "POST" },
+      );
+      if (res.ok) return;
+      if (res.status === 409) {
+        const rres = await fetch(`/api/local/${encodeURIComponent(providerId)}/restart`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: modelId }),
+        });
+        const rdata = await rres.json().catch(() => ({}));
+        if (!rres.ok || !rdata?.ok) {
+          toast(rdata?.error || "Could not start model", "error");
+        } else {
+          toast(`Restarting with ${modelId}…`, "info");
+        }
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      toast(data.error || "This provider doesn't support loading models", "error");
+    } catch (_) {
+      toast("Provider unreachable — model not loaded", "error");
+    } finally {
+      setLocalBusyModelId(null);
+    }
+  }, [toast]);
+
   const unloadLocalModel = useCallback(async (modelId) => {
     if (!selectedProvider) return;
     setLocalBusyModelId(modelId);
@@ -1604,6 +1641,8 @@ export default function App() {
             localMetrics={localMetrics}
             localStatus={localStatus}
             onOpenLocalBroker={() => { setShowLocalBroker(true); setShowFleetView(false); }}
+            onLoadLocalModel={loadOrRestartLocalModel}
+            localBusyModelId={localBusyModelId}
           />
 
           <div className="flex flex-1 min-h-0">
@@ -1687,6 +1726,7 @@ export default function App() {
                 localModels={localModels}
                 onSpillChange={commitSpill}
                 onToast={toast}
+                onModelsRefresh={setLocalModels}
                 onClose={() => setShowLocalBroker(false)}
               >
                 {/* Provider panels render inside the view's Provider card —
