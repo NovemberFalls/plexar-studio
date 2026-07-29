@@ -168,6 +168,11 @@ async function setupTerminalMock() {
 
 async function renderPopout() {
   const { default: PopoutTerminal } = await import("../components/PopoutTerminal.jsx");
+  // Pre-resolve and cache the platform-info fetch BEFORE mounting — see the
+  // matching comment in TerminalPane.resize.test.jsx's renderPane().
+  const { getPlatformInfo } = await import("../utils/platformInfo");
+  await getPlatformInfo();
+
   let result;
   await act(async () => {
     result = render(
@@ -272,6 +277,36 @@ describe("PopoutTerminal — resize dedupe (parity with TerminalPane)", () => {
       await vi.advanceTimersByTimeAsync(150);
     });
     expect(sentResizes()).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("re-sends unchanged dims on the next fit after a resize_failed message", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await renderPopout();
+
+    // Establish a known baseline send (mirrors the dedupe test above, which
+    // doesn't rely on PopoutTerminal's mount-time send mechanics either).
+    await act(async () => {
+      capturedResizeCallback();
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(sentResizes()).toEqual([{ type: "resize", cols: 136, rows: 26 }]);
+
+    await act(async () => {
+      wsInstance.onmessage?.({ data: '{"type":"resize_failed"}' });
+    });
+
+    await act(async () => {
+      capturedResizeCallback();
+      await vi.advanceTimersByTimeAsync(150);
+    });
+
+    // Without the cache-clear, the second tick (same dims) would be
+    // suppressed by dedupe. The fix must still re-send.
+    expect(sentResizes()).toEqual([
+      { type: "resize", cols: 136, rows: 26 },
+      { type: "resize", cols: 136, rows: 26 },
+    ]);
     vi.useRealTimers();
   });
 });

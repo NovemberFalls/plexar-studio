@@ -50,6 +50,7 @@ globalThis.ResizeObserver = class ResizeObserver {
   disconnect() {}
 };
 
+
 // Synchronous rAF shim: the zoom effect's double-rAF resolves in the same
 // tick, so tests don't need to juggle two async microtask hops on top of
 // fake timers for the 120ms fallback.
@@ -215,6 +216,13 @@ function overrideElementClientSize(container, { width, height }) {
 async function renderPane(extraProps = {}) {
   await setupTerminalMock();
   const { default: TerminalPane } = await import("../components/TerminalPane.jsx");
+  // Pre-resolve and cache the platform-info fetch BEFORE mounting, so
+  // TerminalPane's own `await getPlatformInfo()` inside its init effect
+  // unwraps an already-settled promise (one microtask tick) instead of
+  // chaining through fresh fetch()/res.json() hops that outlive act()'s
+  // single-tick flush of the render callback.
+  const { getPlatformInfo } = await import("../utils/platformInfo");
+  await getPlatformInfo();
 
   let result;
   await act(async () => {
@@ -490,5 +498,35 @@ describe("TerminalPane — terminalId change resets the dedupe cache", () => {
     expect(resizesAfterReconnect[resizesAfterReconnect.length - 1]).toEqual({
       type: "resize", cols: 136, rows: 26,
     });
+  });
+});
+
+// ===========================================================================
+// resize_failed — backend couldn't apply the last resize; must clear the
+// dedupe cache so the NEXT safeFit() re-sends instead of assuming the
+// backend already has the current dims (silent permanent divergence bug).
+// ===========================================================================
+
+describe("TerminalPane — resize_failed clears the dedupe cache", () => {
+  it("re-sends unchanged dims on the next fit after a resize_failed message", async () => {
+    await renderPane();
+    // Mount already sent {136, 26}.
+    expect(sentResizes()).toEqual([{ type: "resize", cols: 136, rows: 26 }]);
+
+    await act(async () => {
+      wsInstance.onmessage?.({ data: '{"type":"resize_failed"}' });
+    });
+
+    // Without the cache-clear, a same-dims tick would be suppressed by
+    // dedupe. cols/rows haven't changed, but the fix must still re-send.
+    await act(async () => {
+      capturedResizeCallback();
+      await vi.advanceTimersByTimeAsync(150);
+    });
+
+    expect(sentResizes()).toEqual([
+      { type: "resize", cols: 136, rows: 26 },
+      { type: "resize", cols: 136, rows: 26 },
+    ]);
   });
 });

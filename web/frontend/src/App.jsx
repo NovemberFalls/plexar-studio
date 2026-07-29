@@ -15,7 +15,7 @@ import ProviderPicker from "./components/ProviderPicker";
 import LocalModelsPanel from "./components/LocalModelsPanel";
 import TracesPanel from "./components/TracesPanel";
 import LocalBrokerView from "./components/LocalBrokerView.jsx";
-import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM } from "./utils/terminalFit";
+import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
 import { computeEndEvents, formatEndEventToast, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 
 const LOCATIONS_KEY = "cockpit-locations";
@@ -411,8 +411,11 @@ export default function App() {
         name: sessionName,
         model: useModel,
         workdir: dir,
-        cols: 120,
-        rows: 30,
+        // No mounted pane to measure yet at this point (see DEFAULT_SPAWN_COLS
+        // doc comment in terminalFit.js) — TerminalPane's first safeFit()
+        // corrects this immediately after mount.
+        cols: DEFAULT_SPAWN_COLS,
+        rows: DEFAULT_SPAWN_ROWS,
         permissionMode,
         effort,
         fast: isOpus && fast,

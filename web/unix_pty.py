@@ -6,6 +6,7 @@ This is the non-Windows counterpart to conpty.py.
 
 from __future__ import annotations
 
+import codecs
 import logging
 import os
 import select
@@ -26,6 +27,12 @@ class UnixPtyProcess(PtyProcess):
 
     def __init__(self):
         self._pty: _PtyProcess | None = None
+        # Incremental UTF-8 decoder: reads can split a multi-byte character
+        # (box-drawing, emoji) across the chunk boundary. A per-chunk
+        # decode(errors="replace") would mangle the split byte(s) into
+        # U+FFFD; this decoder buffers incomplete trailing bytes across
+        # read() calls until the sequence completes.
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     @classmethod
     def spawn(
@@ -101,7 +108,12 @@ class UnixPtyProcess(PtyProcess):
         if not data:
             raise EOFError("Process exited")
 
-        return data.decode("utf-8", errors="replace")
+        # Instances constructed via __new__() (bypassing __init__, as some
+        # tests do) may not have _decoder set — fall back to a fresh one.
+        decoder = getattr(self, "_decoder", None)
+        if decoder is None:
+            decoder = self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        return decoder.decode(data)
 
     def write(self, data: str) -> None:
         """Write data to the PTY stdin.
@@ -124,6 +136,12 @@ class UnixPtyProcess(PtyProcess):
             force: If True, send SIGKILL instead of SIGHUP.
         """
         self._pty.terminate(force=force)
+        # Flush/reset the incremental decoder so any buffered partial
+        # sequence is dropped rather than leaking into a future PTY reuse.
+        try:
+            self._decoder.reset()
+        except Exception:
+            pass
 
     @property
     def pid(self) -> int | None:

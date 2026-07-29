@@ -66,6 +66,25 @@ export const DEFAULT_ZOOM = 13;
 export const MIN_ZOOM = 8;
 export const MAX_ZOOM = 28;
 
+// ---------------------------------------------------------------------------
+// PTY spawn-time fallback dimensions
+// ---------------------------------------------------------------------------
+
+/**
+ * Pre-mount default cols/rows sent to POST /api/terminals when creating a
+ * brand-new session. At createSession() time in App.jsx, the new session's
+ * pane hasn't rendered yet (it's added to `sessions`/`activeIds` React state
+ * in the same tick as the fetch, before the DOM commits), so there is no
+ * mounted TerminalPane/termRef to measure a real size from — this is NOT an
+ * arbitrary magic number, it is the necessary placeholder until the pane
+ * mounts. TerminalPane's post-mount `safeFit()` (double-rAF after `term.open()`)
+ * immediately measures the ACTUAL pane box and sends a corrective "resize" over
+ * the WebSocket, so this value only matters for the few frames between spawn
+ * and first paint.
+ */
+export const DEFAULT_SPAWN_COLS = 120;
+export const DEFAULT_SPAWN_ROWS = 30;
+
 /**
  * Read the persisted terminal zoom level (xterm font size in px) from
  * localStorage, clamped to [MIN_ZOOM, MAX_ZOOM]. Falls back to DEFAULT_ZOOM

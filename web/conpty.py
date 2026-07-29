@@ -8,6 +8,7 @@ with NtCreateNamedPipeFile for pipe creation (matching winpty-rs internals).
 
 from __future__ import annotations
 
+import codecs
 import ctypes
 import ctypes.wintypes as wt
 import os
@@ -442,6 +443,13 @@ class PtyProcess:
         self._job = None  # Job Object handle for process tree management
         self._alive = False
         self.exitstatus = None
+        # Incremental UTF-8 decoder: ConPTY output is chunked in up-to-64KB
+        # reads, and multi-byte sequences (box-drawing chars, emoji) can
+        # straddle a chunk boundary. A per-chunk decode() with errors="replace"
+        # would mangle the split byte(s) into U+FFFD. This decoder buffers
+        # incomplete trailing bytes across read() calls until the sequence
+        # completes.
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     @classmethod
     def spawn(cls, argv, cwd=None, env=None, dimensions=(24, 80), backend=None):
@@ -665,7 +673,7 @@ class PtyProcess:
             if not self.isalive():
                 raise EOFError("Process exited")
             return ""
-        return buf.raw[: n.value].decode("utf-8", errors="replace")
+        return self._decoder.decode(buf.raw[: n.value])
 
     def write(self, data: str) -> None:
         """Write to the pseudo-console input.
@@ -740,6 +748,12 @@ class PtyProcess:
         become None *before* the handle is closed, preventing use-after-close.
         """
         self._alive = False
+        # Flush and reset the incremental decoder so any buffered partial
+        # sequence is dropped rather than leaking into a future PTY reuse.
+        try:
+            self._decoder.reset()
+        except Exception:
+            pass
         if self._hpc:
             kernel32.ClosePseudoConsole(self._hpc)
             self._hpc = ctypes.c_void_p()

@@ -934,6 +934,62 @@ async def system_stats():
     })
 
 
+def _detect_pty_backend_name() -> str | None:
+    """Report which PtyProcess implementation pty_backend.get_backend()
+    actually selects on this host, without instantiating it.
+
+    Mirrors the selection logic in pty_backend.get_backend() rather than
+    calling it directly, since get_backend() imports (and on Windows dev
+    mode, requires) the winpty package as a side effect — we only want to
+    know which name it would pick. Returns None if undetermined rather
+    than guessing.
+    """
+    try:
+        if sys.platform in ("linux", "darwin"):
+            return "unix"
+        if sys.platform == "win32":
+            return "conpty" if getattr(sys, "_MEIPASS", None) else "winpty"
+    except Exception:
+        logger.debug("PTY backend detection failed", exc_info=True)
+    return None
+
+
+def _detect_windows_build_number() -> int | None:
+    """Return the Windows build number (e.g. 19045) or None off-Windows /
+    on failure. Never raises. Uses sys.getwindowsversion() only — no
+    shelling out to ver/wmic.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        return sys.getwindowsversion().build
+    except Exception:
+        logger.debug("Windows build number detection failed", exc_info=True)
+        return None
+
+
+# Computed once at import time — these are OS/process facts that cannot
+# change for the lifetime of the process, so there is no need to recompute
+# per-request.
+_PLATFORM_INFO = {
+    "platform": sys.platform,
+    "pty_backend": _detect_pty_backend_name(),
+    "build_number": _detect_windows_build_number(),
+}
+
+
+@app.get("/api/platform")
+async def get_platform():
+    """Expose OS/PTY-backend facts the frontend needs to correctly configure
+    xterm.js's windowsPty option (backend + buildNumber). Without this,
+    xterm re-reflows lines ConPTY has already reflowed, producing
+    duplicated/stale row fragments (e.g. a duplicated final markdown-table
+    row). Contains no sensitive data — no paths, no software versions
+    beyond the OS build. No auth required.
+    """
+    return JSONResponse(_PLATFORM_INFO)
+
+
 @app.post("/api/terminals/{terminal_id}/resize")
 async def resize_terminal(terminal_id: str, request: Request):
     """Resize a terminal's PTY."""
@@ -1041,11 +1097,30 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                     try:
                         ctrl = json.loads(text)
                         if ctrl.get("type") == "resize":
-                            pty_manager.resize_terminal(
+                            resized = pty_manager.resize_terminal(
                                 terminal_id,
                                 ctrl.get("cols", 120),
                                 ctrl.get("rows", 30),
                             )
+                            if not resized:
+                                # Contract: on a failed resize the client has
+                                # already optimistically cached the requested
+                                # dims, so PTY size and xterm size would
+                                # silently diverge forever. Tell the client
+                                # to drop its cached dims and retry on the
+                                # next resize event. Non-fatal — do not
+                                # close the socket.
+                                logger.debug(
+                                    "Resize failed for terminal %s (cols=%s rows=%s)",
+                                    terminal_id, ctrl.get("cols"), ctrl.get("rows"),
+                                )
+                                try:
+                                    await websocket.send_text('{"type":"resize_failed"}')
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to send resize_failed notice for terminal %s",
+                                        terminal_id, exc_info=True,
+                                    )
                             continue
                         if ctrl.get("type") == "pong":
                             continue

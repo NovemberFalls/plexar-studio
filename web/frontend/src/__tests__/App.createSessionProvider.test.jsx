@@ -23,6 +23,7 @@ import { render, screen, fireEvent, act, waitFor } from "@testing-library/react"
 import "@testing-library/jest-dom";
 import { getModelProvider } from "../components/TopBar.jsx";
 import { parseLocalModelId } from "../modelCatalog.js";
+import { DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "../utils/terminalFit.js";
 
 const { useState, useCallback } = React;
 
@@ -57,8 +58,8 @@ function CreateSessionHarness({ toast }) {
         name: sessionName,
         model: useModel,
         workdir: dir,
-        cols: 120,
-        rows: 30,
+        cols: DEFAULT_SPAWN_COLS,
+        rows: DEFAULT_SPAWN_ROWS,
         permissionMode,
         effort,
         fast: isOpus && fast,
@@ -177,6 +178,9 @@ describe("App.jsx createSession contract — OpenRouter provider fields", () => 
     expect(body.provider).toBeUndefined();
     expect(body.providerModel).toBeUndefined();
     expect(body.model).toBe("sonnet");
+    // createSession must always send integer cols/rows to the backend.
+    expect(Number.isInteger(body.cols)).toBe(true);
+    expect(Number.isInteger(body.rows)).toBe(true);
   });
 
   it("POSTs provider + providerModel (double-colon joined) for a local selection, and keeps model as the picker id", async () => {
