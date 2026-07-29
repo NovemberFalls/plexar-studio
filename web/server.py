@@ -229,6 +229,13 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+# Anthropic -> OpenAI translation shim, mounted at /shim/vllm so the `claude`
+# CLI can drive a local vLLM server via ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/shim/vllm.
+# In-process (no extra sidecar process); see web/vllm_shim.py.
+import vllm_shim  # noqa: E402 -- grouped with other post-app-creation setup
+
+app.include_router(vllm_shim.router)
+
 # Detect PyInstaller bundle for static file path
 if getattr(sys, "_MEIPASS", None):
     FRONTEND_DIST = Path(sys._MEIPASS) / "frontend_dist"
@@ -2108,6 +2115,16 @@ _PROVIDERS = {
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
 
+# Model load/unload for LM Studio is driven through its `lms` CLI. If the CLI
+# is not on PATH (common in a packaged sidecar), the provider simply does NOT
+# advertise "model-control", so the UI hides the load/unload buttons rather
+# than offering a control that would always fail. vLLM's control is a container
+# restart (no CLI needed), so it advertises "model-control" unconditionally.
+_LMS_CLI = shutil.which("lms")
+if _LMS_CLI:
+    _PROVIDERS["lmstudio-local"]["capabilities"].append("model-control")
+_PROVIDERS["vllm-local"]["capabilities"].append("model-control")
+
 _PROVIDER_REQUIRED_KEYS = ("id", "label", "kind", "scope", "broker_url", "capabilities")
 
 
@@ -3130,6 +3147,18 @@ async def stop_managed_broker() -> None:
 # never blocking startup/shutdown.
 _MANAGED_VLLM = {"proc": None, "container": "cockpit-vllm"}
 
+# The vLLM container bakes its model in as a launch arg (no hot-swap), so the
+# active model is a runtime-mutable value seeded from the env default. The
+# restart route (POST /api/local/vllm-local/restart) rewrites this after
+# validating the incoming string, then stop→start cycles the container.
+_vllm_runtime_model = COCKPIT_VLLM_MODEL
+
+# A vLLM --model value becomes a discrete docker arg AND (on Windows) is joined
+# into a `bash -lc "<string>"` shell command, so it is the sharp edge. Only
+# model-path/tag characters are permitted — no spaces, no shell metacharacters —
+# which makes the win32 shell-join inherently injection-safe.
+_VLLM_MODEL_RE = re.compile(r"^[A-Za-z0-9._:/\-]{1,256}$")
+
 
 def _vllm_docker_argv(action: str = "run") -> list[str]:
     """Build the docker argv (or WSL-wrapped shell string) for run/rm.
@@ -3151,7 +3180,7 @@ def _vllm_docker_argv(action: str = "run") -> list[str]:
             "docker", "run", "-d", "--rm", "--name", _MANAGED_VLLM["container"], "--ipc=host",
             "-p", f"{COCKPIT_VLLM_PORT}:8001", gpus, gpu_pin, mount,
             COCKPIT_VLLM_IMAGE,
-            "--model", COCKPIT_VLLM_MODEL,
+            "--model", _vllm_runtime_model,
             "--served-model-name", COCKPIT_VLLM_SERVED_NAME,
             "--quantization", "awq_marlin", "--dtype", "half",
             "--enable-auto-tool-choice", "--tool-call-parser", COCKPIT_VLLM_TOOL_PARSER,
@@ -3194,7 +3223,7 @@ async def start_managed_vllm() -> bool:
         _MANAGED_VLLM["proc"] = proc
         logger.info(
             "Managed vLLM starting: container=%s image=%s model=%s port=%s",
-            _MANAGED_VLLM["container"], COCKPIT_VLLM_IMAGE, COCKPIT_VLLM_MODEL, COCKPIT_VLLM_PORT,
+            _MANAGED_VLLM["container"], COCKPIT_VLLM_IMAGE, _vllm_runtime_model, COCKPIT_VLLM_PORT,
         )
         return True
     except Exception:
@@ -3241,6 +3270,36 @@ _MODEL_FIELDS = ("id", "type", "arch", "quantization", "state",
 def _require_provider(provider_id: str):
     """Look up a provider by id, or None if unknown."""
     return _PROVIDERS.get(provider_id)
+
+
+# ── Tier 2: local-provider ANTHROPIC_BASE_URL resolution ──
+#
+# Seam for pty_manager's provider="local" launch path. The browser only ever
+# sends a provider id + model name (never a URL) — same SSRF stance as the
+# rest of this registry. pty_manager.create_terminal() lazy-imports this
+# module (server.py already imports pty_manager, so importing server from
+# pty_manager at module scope would be circular) and calls this function to
+# turn a local provider id into the base URL the spawned `claude` CLI's
+# ANTHROPIC_BASE_URL should point at. Only scope=="local" providers are
+# eligible — a "remote" scoped provider (someone's hosted LM Studio/vLLM) is
+# never eligible to become a session's live Anthropic endpoint via this path.
+def resolve_local_base_url(provider_id: str) -> str | None:
+    """Return the ANTHROPIC_BASE_URL for a local provider id, or None if the
+    id is unknown or not local-scoped.
+
+    - "lmstudio-local": the broker already speaks the Anthropic-compatible
+      /v1/messages shape, so its broker_url is used directly.
+    - "vllm-local": vLLM is OpenAI-only and would 404 a raw Anthropic call,
+      so this points at cockpit's own /shim/vllm translation route instead
+      of vLLM's port directly.
+    """
+    provider = _PROVIDERS.get(provider_id)
+    if provider is None or provider.get("scope") != "local":
+        return None
+    if provider_id == "vllm-local":
+        port = int(os.getenv("PORT", "8420"))
+        return f"http://127.0.0.1:{port}/shim/vllm"
+    return provider.get("broker_url")
 
 
 @app.get("/api/local/{provider_id}/queue")
@@ -3484,6 +3543,122 @@ async def get_provider_health(provider_id: str):
         "provider": {"reachable": provider_reachable, "models_loaded": models_loaded},
         "ok": bool(broker_reachable and provider_reachable),
     })
+
+
+# ── Model control (load / unload / restart) ───────────────
+#
+# The only WRITE path on local model state. LM Studio hot-loads/unloads via its
+# `lms` CLI; vLLM cannot hot-swap, so its "control" is a validated restart of
+# the managed container with a new --model. Progress is not reported by either
+# backend, so the UI infers it by polling /models (state=="loaded") and /health.
+_LOCAL_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\-]{0,255}$")
+
+
+async def _lms_load_bg(model_id: str) -> None:
+    """Fire-and-forget `lms load`; the UI polls /models for state=="loaded".
+
+    Runs as a background task so the HTTP request returns immediately (a load
+    can take tens of seconds). Failures are logged, not surfaced synchronously.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _LMS_CLI, "load", model_id, "--gpu", "max",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _out, err = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error("lms load %s failed rc=%s: %s", model_id, proc.returncode,
+                         (err or b"").decode(errors="replace"))
+    except Exception:
+        logger.error("lms load %s crashed", model_id, exc_info=True)
+
+
+@app.post("/api/local/{provider_id}/models/{model_id:path}/load")
+async def load_provider_model(provider_id: str, model_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "model-control" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if provider.get("scope") != "local":
+        return JSONResponse({"error": "control not available for remote providers"}, status_code=403)
+    if provider.get("kind") == "vllm":
+        return JSONResponse(
+            {"error": "vLLM cannot hot-load a model — use POST /restart with a model"},
+            status_code=409,
+        )
+    if not _LMS_CLI:
+        return JSONResponse({"error": "lms CLI not available"}, status_code=503)
+    if not _LOCAL_MODEL_ID_RE.match(model_id):
+        return JSONResponse({"error": "invalid model id"}, status_code=400)
+    asyncio.create_task(_lms_load_bg(model_id))
+    return JSONResponse({"ok": True, "status": "loading", "model": model_id})
+
+
+@app.post("/api/local/{provider_id}/models/{model_id:path}/unload")
+async def unload_provider_model(provider_id: str, model_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "model-control" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if provider.get("scope") != "local":
+        return JSONResponse({"error": "control not available for remote providers"}, status_code=403)
+    if provider.get("kind") == "vllm":
+        return JSONResponse(
+            {"error": "vLLM cannot unload a single model — it serves one model per container"},
+            status_code=409,
+        )
+    if not _LMS_CLI:
+        return JSONResponse({"error": "lms CLI not available"}, status_code=503)
+    if not _LOCAL_MODEL_ID_RE.match(model_id):
+        return JSONResponse({"error": "invalid model id"}, status_code=400)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _LMS_CLI, "unload", model_id,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _out, err = await proc.communicate()
+    except Exception:
+        logger.error("lms unload %s crashed", model_id, exc_info=True)
+        return JSONResponse({"error": "unload failed"}, status_code=502)
+    if proc.returncode != 0:
+        logger.error("lms unload %s failed rc=%s: %s", model_id, proc.returncode,
+                     (err or b"").decode(errors="replace"))
+        return JSONResponse({"error": "unload failed"}, status_code=502)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/local/{provider_id}/restart")
+async def restart_provider_model(provider_id: str, request: Request):
+    """Restart the managed vLLM container with a new model (vLLM has no hot-swap).
+
+    Only valid for the managed vLLM provider; an EXTERNAL vLLM (something else
+    is answering on the port) is not Cockpit's to restart → 409.
+    """
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "model-control" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if provider.get("scope") != "local" or provider.get("kind") != "vllm":
+        return JSONResponse({"error": "restart is only supported for the local vLLM provider"}, status_code=409)
+    if COCKPIT_MANAGED_VLLM != "1":
+        return JSONResponse({"error": "vLLM is external — Cockpit can't restart it"}, status_code=409)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    model = (body.get("model") or "").strip() if isinstance(body, dict) else ""
+    # Hard validation BEFORE any stop/start — the model becomes a docker --model
+    # arg (WSL-shell-joined on Windows); reject anything but model-path chars.
+    if not _VLLM_MODEL_RE.match(model):
+        return JSONResponse({"error": "invalid model — allowed: letters, digits, . _ : / -"}, status_code=400)
+    global _vllm_runtime_model
+    _vllm_runtime_model = model
+    await stop_managed_vllm()
+    await start_managed_vllm()
+    return JSONResponse({"ok": True, "status": "restarting", "model": model})
 
 
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")

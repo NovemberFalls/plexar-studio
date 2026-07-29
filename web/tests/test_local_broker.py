@@ -285,13 +285,18 @@ async def test_providers_list_shape_no_urls(client):
     res = await client.get("/api/local/providers")
     assert res.status_code == 200
     body = res.json()
+    # LM Studio's "model-control" capability is present only when the `lms` CLI
+    # is on PATH (graceful degrade); vLLM's is always present (restart-based).
+    lms_caps = ["queue", "metrics", "spill", "models", "traces", "health"]
+    if server_module._LMS_CLI:
+        lms_caps.append("model-control")
     assert body["providers"] == [
         {
             "id": "lmstudio-local",
             "label": "LM Studio (local)",
             "kind": "lmstudio",
             "scope": "local",
-            "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
+            "capabilities": lms_caps,
             "endpoint_hint": "127.0.0.1:1234",
         },
         {
@@ -299,7 +304,7 @@ async def test_providers_list_shape_no_urls(client):
             "label": "vLLM (local)",
             "kind": "vllm",
             "scope": "local",
-            "capabilities": ["models", "health", "metrics"],
+            "capabilities": ["models", "health", "metrics", "model-control"],
             "endpoint_hint": "127.0.0.1:8001",
         },
     ]

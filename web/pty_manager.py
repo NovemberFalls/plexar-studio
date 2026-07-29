@@ -314,10 +314,11 @@ _ALLOWED_EFFORT_LEVELS = {"", "low", "medium", "high", "xhigh", "max"}
 # Claude session ID format: hex or UUID-style
 _SESSION_ID_RE = re.compile(r"^[a-f0-9\-]{8,64}$", re.IGNORECASE)
 
-# Allowed providers — "anthropic" (default, official Claude API/subscription)
-# or "openrouter" (reroutes the session through OpenRouter's Anthropic-compatible
-# endpoint via env vars; see create_terminal()).
-_ALLOWED_PROVIDERS = {"anthropic", "openrouter"}
+# Allowed providers — "anthropic" (default, official Claude API/subscription),
+# "openrouter" (reroutes the session through OpenRouter's Anthropic-compatible
+# endpoint via env vars; see create_terminal()), or "local" (reroutes onto a
+# local inference server — LM Studio or vLLM — via ANTHROPIC_BASE_URL).
+_ALLOWED_PROVIDERS = {"anthropic", "openrouter", "local"}
 
 # OpenRouter model slug format: "<vendor>/<model>", e.g. "qwen/qwen3-coder-next"
 # or "anthropic/claude-3.7-sonnet:beta". Vendor segment must start with an
@@ -326,6 +327,13 @@ _ALLOWED_PROVIDERS = {"anthropic", "openrouter"}
 # The slug is only ever placed into env vars (ANTHROPIC_MODEL), never the cmd
 # string, but it is validated anyway as defense in depth.
 _OPENROUTER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-\.]*\/[a-z0-9][a-z0-9\-\.:]*$")
+
+# Local model id format: LM Studio/vLLM model ids can contain path-ish
+# segments ("/"), dots, colons, and dashes (e.g. "qwen3-coder-30b-a3b-awq" or
+# "/models/Qwen3-Coder-30B-A3B-AWQ"). First char must be alnum to block a
+# "--flag"-style injection landing in ANTHROPIC_MODEL. Only ever placed into
+# env vars, never the cmd string, but validated anyway as defense in depth.
+_LOCAL_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-\/]{0,127}$")
 
 
 class PtyManager:
@@ -553,6 +561,8 @@ class PtyManager:
             raise ValueError(f"Invalid provider: {provider!r}")
 
         openrouter_key: Optional[str] = None
+        local_base_url: Optional[str] = None
+        local_model_id: Optional[str] = None
         if provider == "openrouter":
             if not provider_model:
                 raise ValueError("provider_model is required when provider='openrouter'")
@@ -567,6 +577,32 @@ class PtyManager:
                     "OpenRouter key not configured — add one via the key icon "
                     "in the top bar or set OPENROUTER_API_KEY"
                 )
+        elif provider == "local":
+            if not provider_model:
+                raise ValueError("provider_model is required when provider='local'")
+            # Contract: providerModel = "<local_provider_id>::<model_id>",
+            # e.g. "lmstudio-local::qwen3-coder-30b" — split on the FIRST "::"
+            # so a model id that itself contains "::" (unlikely, but the regex
+            # below wouldn't allow it anyway) doesn't get mis-parsed.
+            if "::" not in provider_model:
+                raise ValueError(
+                    f"Invalid provider_model for provider='local' (expected "
+                    f"'<local_provider_id>::<model_id>'): {provider_model!r}"
+                )
+            local_provider_id, local_model_id = provider_model.split("::", 1)
+            if not _LOCAL_MODEL_ID_RE.match(local_model_id):
+                raise ValueError(f"Invalid local model id: {local_model_id!r}")
+            # URL resolution is server-side only (SSRF stance) — the browser
+            # never supplies a URL, only the provider id. server.py owns the
+            # provider registry, so we lazy-import it here (server.py already
+            # imports pty_manager at module scope, so importing server from
+            # here at module scope would be circular; a call-time import is
+            # safe since server.py is fully loaded by the time a session is
+            # created).
+            import server as _server
+            local_base_url = _server.resolve_local_base_url(local_provider_id)
+            if not local_base_url:
+                raise ValueError(f"Unknown or non-local provider id: {local_provider_id!r}")
         else:
             # Validate model to prevent command injection (e.g. "sonnet --dangerously-skip-permissions").
             # Skipped for provider="openrouter": model selection there rides
@@ -596,13 +632,14 @@ class PtyManager:
         # 1. Remove Claude Code markers (avoids "inside another session" error)
         # 2. Remove PyInstaller artifacts (avoids DLL conflicts)
         blocked_keys = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
-        if provider != "openrouter":
-            # A machine-global OpenRouter config (e.g. exported in the user's
-            # shell profile for other tools, or left behind by a previous
-            # openrouter-provider session's parent shell) must never leak into
-            # an anthropic-provider pane and silently reroute a paid Claude
-            # subscription session onto OpenRouter's endpoint. openrouter-
-            # provider sessions set these two vars explicitly below instead.
+        if provider not in ("openrouter", "local"):
+            # A machine-global OpenRouter/local config (e.g. exported in the
+            # user's shell profile for other tools, or left behind by a
+            # previous openrouter/local-provider session's parent shell) must
+            # never leak into an anthropic-provider pane and silently reroute
+            # a paid Claude subscription session onto a foreign endpoint.
+            # openrouter/local-provider sessions set these two vars explicitly
+            # below instead.
             blocked_keys |= {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}
         pyi_prefixes = ("_PYI", "_MEI")
         env = {}
@@ -700,6 +737,35 @@ class PtyManager:
                 ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
                  "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"],
             )
+        elif provider == "local":
+            # Reroute this session's `claude` CLI onto a local inference
+            # server (LM Studio via the broker, or vLLM via cockpit's own
+            # /shim/vllm route) — base URL resolved server-side above.
+            # ANTHROPIC_AUTH_TOKEN is a dummy value: local servers don't
+            # authenticate, but the CLI requires the var to be non-empty.
+            # ANTHROPIC_API_KEY is explicitly cleared for the same reason as
+            # the openrouter branch — no fallback to a real Anthropic key.
+            env["ANTHROPIC_BASE_URL"] = local_base_url
+            env["ANTHROPIC_AUTH_TOKEN"] = "local"
+            env["ANTHROPIC_API_KEY"] = ""
+            env["ANTHROPIC_MODEL"] = local_model_id
+            # Without this, the CLI's default small/fast model (a
+            # claude-3-5-haiku-ish id, used for background tasks like title
+            # generation) still gets sent to the LOCAL base URL and 404s —
+            # the local server doesn't know that model id. Point it at the
+            # same local model, mirroring the openrouter branch.
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = local_model_id
+            # Local-lane fix: the 49152-token vLLM context window minus the
+            # CLI's default ~32k output-token reservation otherwise 500s past
+            # ~17k input tokens. Caps the CLI's own output reservation so it
+            # fits comfortably inside a local server's smaller context.
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "8000"
+            # NEVER log the URL here to avoid noise; var names only.
+            logger.info(
+                "Local provider: set env vars %s",
+                ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+                 "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+            )
 
         # Build the command
 
@@ -713,10 +779,11 @@ class PtyManager:
         if os.path.isdir(jsonl_dir):
             pre_spawn_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
 
-        if provider == "openrouter":
-            # OpenRouter model slugs (e.g. "qwen/qwen3-coder-next") are not
-            # valid --model values for the claude CLI — model selection rides
-            # ANTHROPIC_MODEL (set above) instead. --model is omitted entirely.
+        if provider in ("openrouter", "local"):
+            # OpenRouter slugs and local model ids (e.g. "qwen/qwen3-coder-next"
+            # or "/models/Qwen3-Coder-30B-A3B-AWQ") are not valid --model values
+            # for the claude CLI — model selection rides ANTHROPIC_MODEL (set
+            # above) instead. --model is omitted entirely.
             cmd = "claude"
         else:
             cmd = f"claude --model {model}"
@@ -737,9 +804,9 @@ class PtyManager:
             cmd += f" --permission-mode {permission_mode}"
 
         # Effort level: empty string means "use model default" (no flag appended).
-        # Skipped entirely for openrouter — foreign models don't support --effort.
-        if effort and provider == "openrouter":
-            logger.info("Effort level %r requested but skipped — not supported for provider=openrouter", effort)
+        # Skipped entirely for openrouter/local — foreign/local models don't support --effort.
+        if effort and provider in ("openrouter", "local"):
+            logger.info("Effort level %r requested but skipped — not supported for provider=%s", effort, provider)
         elif effort:
             # Value is allowlist-validated above — safe to interpolate.
             cmd += f" --effort {effort}"
@@ -751,10 +818,10 @@ class PtyManager:
         # ConPTY/winpty where inline braces/quotes are mangled by the shell.
         # Gate: fast mode is only available for Opus models. The /fast toggle in the TUI
         # silently no-ops on non-Opus models, so we skip the flag entirely for non-Opus.
-        # Also skipped entirely for openrouter — foreign models don't support fast mode.
+        # Also skipped entirely for openrouter/local — foreign/local models don't support fast mode.
         _fast_settings_path: Optional[str] = None
-        if fast and provider == "openrouter":
-            logger.info("Fast mode requested but skipped — not supported for provider=openrouter")
+        if fast and provider in ("openrouter", "local"):
+            logger.info("Fast mode requested but skipped — not supported for provider=%s", provider)
         elif fast and "opus" in model.lower():
             import json as _json
             import tempfile as _tempfile
@@ -831,10 +898,16 @@ class PtyManager:
         # Post-spawn health check is deferred to the async caller (server.py)
         # so it can use asyncio.sleep() without blocking the event loop.
 
-        # Display model: for openrouter, `model` is ignored entirely (never
-        # allowlist-validated, never passed as --model) — the session's
-        # effective/displayed model is the OpenRouter slug instead.
-        display_model = provider_model if provider == "openrouter" else model
+        # Display model: for openrouter/local, `model` is ignored entirely
+        # (never allowlist-validated, never passed as --model) — the
+        # session's effective/displayed model is the OpenRouter slug or the
+        # parsed local model id instead.
+        if provider == "openrouter":
+            display_model = provider_model
+        elif provider == "local":
+            display_model = local_model_id
+        else:
+            display_model = model
 
         session = TerminalSession(
             id=terminal_id,
