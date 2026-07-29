@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Loader, ExternalLink } from "lucide-react";
 import TopBar, { getModelProvider } from "./components/TopBar";
+import { parseLocalModelId } from "./modelCatalog";
 import Sidebar from "./components/Sidebar";
 import ActivityRail from "./components/ActivityRail";
 import TerminalPane from "./components/TerminalPane";
@@ -215,6 +216,7 @@ export default function App() {
   const [selectedProvider, setSelectedProvider] = useState(null); // {id,label,kind,scope,capabilities} | null
   const [localModels, setLocalModels] = useState(null); // GET /api/local/{id}/models
   const [localTraces, setLocalTraces] = useState(null); // GET /api/local/{id}/traces
+  const [localBusyModelId, setLocalBusyModelId] = useState(null); // model id loading/unloading, or null
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -416,6 +418,14 @@ export default function App() {
         fast: isOpus && fast,
         ...(getModelProvider(useModel) === "openrouter"
           ? { provider: "openrouter", providerModel: useModel }
+          : {}),
+        ...(getModelProvider(useModel) === "local"
+          ? (() => {
+              const parsed = parseLocalModelId(useModel);
+              return parsed
+                ? { provider: "local", providerModel: `${parsed.providerId}::${parsed.modelId}` }
+                : {};
+            })()
           : {}),
         ...(options.continueSession ? { continue: true } : {}),
         ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
@@ -1019,12 +1029,64 @@ export default function App() {
     };
 
     fetchModelsAndTraces();
-    const id = setInterval(fetchModelsAndTraces, 10000);
+    // Poll fast (2s) while a load/unload is in flight so the progress bar
+    // resolves promptly once the model's state flips; back to 10s when idle.
+    const id = setInterval(fetchModelsAndTraces, localBusyModelId ? 2000 : 10000);
     return () => {
       clearInterval(id);
       controller.abort();
     };
-  }, [backendReady, localEnabled, selectedProvider]);
+  }, [backendReady, localEnabled, selectedProvider, localBusyModelId]);
+
+  // Clear the busy marker once the /models poll shows the target model has
+  // settled (LM Studio reports no progress %, so state transition IS the signal).
+  useEffect(() => {
+    if (!localBusyModelId) return;
+    const list = Array.isArray(localModels?.models) ? localModels.models : [];
+    const m = list.find((x) => x.id === localBusyModelId);
+    // Busy clears when the model appears loaded (a load completed) or is gone /
+    // not-loaded after an unload — either way its steady state is reached.
+    if (m && m.state === "loaded") setLocalBusyModelId(null);
+  }, [localModels, localBusyModelId]);
+
+  // Load / unload a local model (LM Studio hot-swap via the model-control API).
+  const loadLocalModel = useCallback(async (modelId) => {
+    if (!selectedProvider) return;
+    setLocalBusyModelId(modelId);
+    try {
+      const res = await fetch(
+        `/api/local/${encodeURIComponent(selectedProvider.id)}/models/${encodeURIComponent(modelId)}/load`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast(data.error || "Could not load model", "error");
+        setLocalBusyModelId(null);
+      }
+    } catch (_) {
+      toast("Provider unreachable — model not loaded", "error");
+      setLocalBusyModelId(null);
+    }
+  }, [toast, selectedProvider]);
+
+  const unloadLocalModel = useCallback(async (modelId) => {
+    if (!selectedProvider) return;
+    setLocalBusyModelId(modelId);
+    try {
+      const res = await fetch(
+        `/api/local/${encodeURIComponent(selectedProvider.id)}/models/${encodeURIComponent(modelId)}/unload`,
+        { method: "POST" },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) toast(data.error || "Could not unload model", "error");
+    } catch (_) {
+      toast("Provider unreachable — model not unloaded", "error");
+    } finally {
+      // An unload has no "loaded" target for the effect above to key on, so
+      // clear the marker here once the request settles; the next poll refreshes state.
+      setLocalBusyModelId(null);
+    }
+  }, [toast, selectedProvider]);
 
   // Commit a single lane-class spill threshold (seconds, or null to disable),
   // scoped to the selected provider. PUTs the partial map and applies the
@@ -1537,6 +1599,7 @@ export default function App() {
             setShowFleetView={setShowFleetView}
             localEnabled={localEnabled}
             setLocalEnabled={setLocalEnabled}
+            localLaunchEnabled={localEnabled}
             localQueue={localQueue}
             localMetrics={localMetrics}
             localStatus={localStatus}
@@ -1630,7 +1693,13 @@ export default function App() {
                     each renders nothing when its capability is absent. */}
                 <ProviderPicker enabled={localEnabled} onSelect={setSelectedProvider} />
                 {selectedProvider?.capabilities?.includes("models") && (
-                  <LocalModelsPanel models={localModels} />
+                  <LocalModelsPanel
+                    models={localModels}
+                    controlEnabled={selectedProvider?.capabilities?.includes("model-control")}
+                    busyModelId={localBusyModelId}
+                    onLoad={loadLocalModel}
+                    onUnload={unloadLocalModel}
+                  />
                 )}
                 {selectedProvider?.capabilities?.includes("traces") && (
                   <TracesPanel traces={localTraces} providerId={selectedProvider.id} />

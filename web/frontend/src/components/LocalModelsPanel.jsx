@@ -8,6 +8,12 @@
  *
  * Props:
  *   models — object from GET /api/local/{provider}/models, or null when offline/loading
+ *   controlEnabled — when true, render per-row Load/Unload buttons (provider has
+ *     the "model-control" capability). Progress is INFERRED: while busyModelId
+ *     matches a row an indeterminate bar shows until the /models poll flips its
+ *     state (LM Studio reports no load percentage).
+ *   busyModelId — id of the model currently loading/unloading, or null
+ *   onLoad(modelId) / onUnload(modelId) — control handlers
  */
 
 function fmtCtx(n) {
@@ -16,7 +22,13 @@ function fmtCtx(n) {
   return String(n);
 }
 
-export default function LocalModelsPanel({ models }) {
+export default function LocalModelsPanel({
+  models,
+  controlEnabled = false,
+  busyModelId = null,
+  onLoad,
+  onUnload,
+}) {
   const offline = !models || models.reachable === false;
 
   if (offline) {
@@ -44,46 +56,82 @@ export default function LocalModelsPanel({ models }) {
       ) : (
         list.map((m, i) => {
           const loaded = m.state === "loaded";
+          const busy = controlEnabled && busyModelId != null && busyModelId === m.id;
           return (
-            <div
-              key={m.id || i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "4px 0",
-                opacity: loaded ? 1 : 0.7,
-              }}
-            >
-              <span
+            <div key={m.id || i} style={{ padding: "4px 0" }}>
+              <div
                 style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: 999,
-                  flexShrink: 0,
-                  background: loaded ? "var(--accent)" : "var(--text-muted)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  opacity: loaded ? 1 : 0.7,
                 }}
-              />
-              <span
-                style={{
-                  fontSize: 12,
-                  fontWeight: loaded ? 600 : 400,
-                  color: "var(--text-primary)",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  maxWidth: 150,
-                }}
-                title={m.id || ""}
               >
-                {m.id || "—"}
-              </span>
-              <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: "auto", flexShrink: 0, textAlign: "right" }}>
-                {[m.arch, m.quantization].filter(Boolean).join(" · ") || "—"}
-              </span>
-              <span style={{ fontSize: 10, color: "var(--text-secondary)", flexShrink: 0, minWidth: 60, textAlign: "right" }}>
-                {fmtCtx(m.loaded_context_length)} / {fmtCtx(m.max_context_length)}
-              </span>
+                <span
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: 999,
+                    flexShrink: 0,
+                    background: loaded ? "var(--accent)" : "var(--text-muted)",
+                  }}
+                />
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: loaded ? 600 : 400,
+                    color: "var(--text-primary)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    maxWidth: controlEnabled ? 120 : 150,
+                  }}
+                  title={m.id || ""}
+                >
+                  {m.id || "—"}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: "auto", flexShrink: 0, textAlign: "right" }}>
+                  {[m.arch, m.quantization].filter(Boolean).join(" · ") || "—"}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--text-secondary)", flexShrink: 0, minWidth: 60, textAlign: "right" }}>
+                  {fmtCtx(m.loaded_context_length)} / {fmtCtx(m.max_context_length)}
+                </span>
+                {controlEnabled && (
+                  <button
+                    type="button"
+                    disabled={busy || !m.id}
+                    onClick={() => (loaded ? onUnload?.(m.id) : onLoad?.(m.id))}
+                    className="hover-bg-surface"
+                    style={{
+                      fontSize: 10,
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                      flexShrink: 0,
+                      border: "1px solid var(--border)",
+                      color: "var(--text-secondary)",
+                      background: "transparent",
+                      cursor: busy ? "default" : "pointer",
+                      opacity: busy ? 0.5 : 1,
+                    }}
+                    title={loaded ? "Unload this model" : "Load this model"}
+                  >
+                    {busy ? "…" : loaded ? "Unload" : "Load"}
+                  </button>
+                )}
+              </div>
+              {busy && (
+                <div
+                  style={{
+                    height: 2,
+                    marginTop: 4,
+                    borderRadius: 999,
+                    overflow: "hidden",
+                    background: "var(--border)",
+                  }}
+                >
+                  <div className="local-progress-indeterminate" />
+                </div>
+              )}
             </div>
           );
         })

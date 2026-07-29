@@ -218,6 +218,19 @@ body {
   50% { opacity: 1; transform: scale(1.2); }
 }
 
+/* Indeterminate progress bar (local model load/unload/restart — no % reported) */
+@keyframes local-progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+.local-progress-indeterminate {
+  height: 100%;
+  width: 33%;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: local-progress-slide 1.1s ease-in-out infinite;
+}
+
 /* Drag-and-drop overlay pulse */
 @keyframes drop-target-pulse {
   0%, 100% { box-shadow: 0 0 15px rgba(122, 162, 247, 0.2), inset 0 0 15px rgba(122, 162, 247, 0.03); }

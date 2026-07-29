@@ -22,6 +22,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { getModelProvider } from "../components/TopBar.jsx";
+import { parseLocalModelId } from "../modelCatalog.js";
 
 const { useState, useCallback } = React;
 
@@ -64,6 +65,14 @@ function CreateSessionHarness({ toast }) {
         ...(getModelProvider(useModel) === "openrouter"
           ? { provider: "openrouter", providerModel: useModel }
           : {}),
+        ...(getModelProvider(useModel) === "local"
+          ? (() => {
+              const parsed = parseLocalModelId(useModel);
+              return parsed
+                ? { provider: "local", providerModel: `${parsed.providerId}::${parsed.modelId}` }
+                : {};
+            })()
+          : {}),
       };
 
       try {
@@ -100,6 +109,13 @@ function CreateSessionHarness({ toast }) {
       </button>
       <button onClick={() => createSession("Bravo", "C:\\proj", "sonnet")}>
         create-anthropic
+      </button>
+      <button
+        onClick={() =>
+          createSession("Charlie", "C:\\proj", "local:lmstudio-local:qwen3-coder-30b-awq")
+        }
+      >
+        create-local
       </button>
     </div>
   );
@@ -161,5 +177,30 @@ describe("App.jsx createSession contract — OpenRouter provider fields", () => 
     expect(body.provider).toBeUndefined();
     expect(body.providerModel).toBeUndefined();
     expect(body.model).toBe("sonnet");
+  });
+
+  it("POSTs provider + providerModel (double-colon joined) for a local selection, and keeps model as the picker id", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      json: vi.fn().mockResolvedValue({ id: "term-3" }),
+    });
+    const toast = vi.fn();
+    render(<CreateSessionHarness toast={toast} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("create-local"));
+    });
+
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "/api/terminals",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+
+    const [, options] = globalThis.fetch.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.provider).toBe("local");
+    expect(body.providerModel).toBe("lmstudio-local::qwen3-coder-30b-awq");
+    expect(body.model).toBe("local:lmstudio-local:qwen3-coder-30b-awq");
   });
 });

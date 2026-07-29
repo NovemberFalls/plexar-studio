@@ -64,6 +64,65 @@ function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider,
   const [endpointInput, setEndpointInput] = useState(hint || "");
   const [savedHint, setSavedHint] = useState(hint || null);
   const [saving, setSaving] = useState(false);
+  const controlEnabled = provider?.capabilities?.includes("model-control");
+  const loadedModelId =
+    (Array.isArray(localModels?.models) ? localModels.models : []).find((m) => m.state === "loaded")?.id || "";
+  const [restartModel, setRestartModel] = useState(loadedModelId);
+  const [restarting, setRestarting] = useState(false);
+
+  useEffect(() => {
+    // Keep the restart input seeded with whatever is currently loaded, until
+    // the user edits it (only overwrite while it's empty to avoid clobbering typing).
+    setRestartModel((cur) => (cur ? cur : loadedModelId));
+  }, [loadedModelId]);
+
+  const handleRestart = async () => {
+    const model = (restartModel || "").trim();
+    if (!model) {
+      onToast?.("Enter a model path to restart with", "error");
+      return;
+    }
+    if (!provider?.id) return;
+    setRestarting(true);
+    try {
+      const res = await fetch(`/api/local/${provider.id}/restart`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        onToast?.(data?.error || "Restart failed", "error");
+        setRestarting(false);
+        return;
+      }
+      onToast?.(`vLLM restarting with ${model}…`, "info");
+      // Poll /health until the container answers again (no progress %, so this
+      // is a bounded wait, not a percentage). Give up after ~90s.
+      const deadline = Date.now() + 90000;
+      const poll = async () => {
+        try {
+          const h = await fetch(`/api/local/${provider.id}/health`);
+          const hd = await h.json().catch(() => ({}));
+          if (hd?.ok) {
+            setRestarting(false);
+            onToast?.(`vLLM ready with ${model}`, "success");
+            return;
+          }
+        } catch { /* keep waiting */ }
+        if (Date.now() > deadline) {
+          setRestarting(false);
+          onToast?.("vLLM restart is taking a while — check the provider", "error");
+          return;
+        }
+        setTimeout(poll, 3000);
+      };
+      setTimeout(poll, 3000);
+    } catch {
+      onToast?.("Restart request failed", "error");
+      setRestarting(false);
+    }
+  };
 
   useEffect(() => {
     setEndpointInput(hint || "");
@@ -188,6 +247,49 @@ function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider,
             >
               {saving ? "Saving…" : "Save"}
             </button>
+          </div>
+        )}
+
+        {localEnabled && controlEnabled && (
+          <div style={{ marginTop: 12, borderTop: "1px solid var(--border-color)", paddingTop: 10 }}>
+            <div className="text-[10px] uppercase tracking-wider" style={{ color: "var(--text-muted)", marginBottom: 6 }}>
+              Model
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8, lineHeight: 1.5 }}>
+              vLLM serves one model per container — switching restarts it.
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="text"
+                value={restartModel}
+                onChange={(e) => setRestartModel(e.target.value)}
+                disabled={restarting}
+                placeholder="/models/Qwen3-Coder-30B-A3B-AWQ"
+                className="hover-border-accent"
+                style={{
+                  flex: 1, minWidth: 0, fontSize: 12, padding: "5px 8px", borderRadius: 6,
+                  border: "1px solid var(--cc-border, var(--border-color))",
+                  background: "var(--bg-surface)", color: "var(--text-primary)",
+                  opacity: restarting ? 0.6 : 1,
+                }}
+              />
+              <button
+                onClick={handleRestart}
+                disabled={restarting}
+                className="text-[11px] px-3 py-1 rounded-full transition-colors hover-bg-surface"
+                style={{
+                  flexShrink: 0, color: "var(--accent)", border: "1px solid var(--accent)",
+                  background: "var(--bg-surface)", opacity: restarting ? 0.6 : 1,
+                }}
+              >
+                {restarting ? "Restarting…" : "Restart with model"}
+              </button>
+            </div>
+            {restarting && (
+              <div style={{ height: 2, marginTop: 8, borderRadius: 999, overflow: "hidden", background: "var(--border-color)" }}>
+                <div className="local-progress-indeterminate" />
+              </div>
+            )}
           </div>
         )}
       </div>

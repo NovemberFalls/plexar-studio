@@ -15,6 +15,19 @@
 import { createContext, createElement, useContext, useEffect, useState } from "react";
 
 const POLL_MS = 10 * 60 * 1000; // models change on the order of weeks; 10 min is plenty
+const LOCAL_POLL_MS = 20 * 1000; // local models load/unload far more often than the Anthropic catalog changes
+
+// Same localStorage flag App.jsx uses to gate all local-broker polling
+// (see App.jsx "cockpit-local-enabled") — read directly rather than via
+// props so this provider can sit above App without a prop-drilling dance.
+const LOCAL_ENABLED_KEY = "cockpit-local-enabled";
+function readLocalEnabled() {
+  try {
+    return localStorage.getItem(LOCAL_ENABLED_KEY) === "true";
+  } catch (_) {
+    return false;
+  }
+}
 
 // OpenRouter models are a different provider and never appear in Anthropic's
 // /v1/models — this group is ALWAYS static and appended after the live groups.
@@ -54,11 +67,61 @@ export const FALLBACK_MODEL_GROUPS = [
 ];
 
 const OPENROUTER_IDS = new Set(OPENROUTER_GROUP.models.map((m) => m.id));
+const LOCAL_ID_PREFIX = "local:";
 
-/** Returns "openrouter" for OpenRouter-group ids, "anthropic" otherwise
- *  (unrecognized ids are treated as anthropic, per convention). */
+/** Returns "local" for namespaced local-provider ids, "openrouter" for
+ *  OpenRouter-group ids, "anthropic" otherwise (unrecognized ids are treated
+ *  as anthropic, per convention). */
 export function getModelProvider(modelId) {
+  if (typeof modelId === "string" && modelId.startsWith(LOCAL_ID_PREFIX)) return "local";
   return OPENROUTER_IDS.has(modelId) ? "openrouter" : "anthropic";
+}
+
+/** Decodes a namespaced local model picker id ("local:<providerId>:<modelId>")
+ *  into { providerId, modelId }, or null when the id isn't a local id. The
+ *  model id itself may contain ":" (e.g. quantization tags), so only the
+ *  first two segments are split off. */
+export function parseLocalModelId(id) {
+  if (typeof id !== "string" || !id.startsWith(LOCAL_ID_PREFIX)) return null;
+  const rest = id.slice(LOCAL_ID_PREFIX.length);
+  const sep = rest.indexOf(":");
+  if (sep === -1) return null;
+  const providerId = rest.slice(0, sep);
+  const modelId = rest.slice(sep + 1);
+  if (!providerId || !modelId) return null;
+  return { providerId, modelId };
+}
+
+/** Builds one picker group per reachable local provider that has >=1 model,
+ *  from GET /api/local/providers + per-provider GET /api/local/{id}/models
+ *  responses. Ids are namespaced "local:<providerId>:<modelId>" so they can
+ *  never collide with Anthropic/OpenRouter ids or each other. Providers that
+ *  are unreachable or have no models are simply omitted — the group list is
+ *  expected to change shape as models load/unload. */
+export function buildLocalGroups(providers, modelsByProviderId) {
+  if (!Array.isArray(providers)) return [];
+  const groups = [];
+  for (const provider of providers) {
+    if (!provider || typeof provider.id !== "string") continue;
+    const resp = modelsByProviderId?.[provider.id];
+    if (!resp || resp.reachable === false || !Array.isArray(resp.models) || resp.models.length === 0) continue;
+    const models = resp.models
+      .filter((m) => m && typeof m.id === "string")
+      .map((m) => {
+        const loaded = m.state === "loaded";
+        return {
+          id: `${LOCAL_ID_PREFIX}${provider.id}:${m.id}`,
+          label: loaded ? m.id : `${m.id} · not loaded`,
+          provider: "local",
+          localProviderId: provider.id,
+          localModelId: m.id,
+          loaded,
+        };
+      });
+    if (models.length === 0) continue;
+    groups.push({ label: provider.label || provider.id, provider: "local", models });
+  }
+  return groups;
 }
 
 /** True when the id is an Opus model (fast-toggle eligible). Matches the alias
@@ -125,7 +188,11 @@ const DEFAULT_CATALOG = {
   source: "fallback",
 };
 
-const ModelCatalogContext = createContext(DEFAULT_CATALOG);
+// Exported (in addition to the useModelCatalog hook) so tests can wrap a
+// component tree in ModelCatalogContext.Provider with a custom catalog value
+// (e.g. one that includes a local-provider group) without needing to mock
+// the /api/models + /api/local/* fetch chain.
+export const ModelCatalogContext = createContext(DEFAULT_CATALOG);
 
 /** Returns { groups, models, source }. Without a provider, returns the static
  *  fallback catalog (so components render standalone in tests). */
@@ -133,10 +200,18 @@ export function useModelCatalog() {
   return useContext(ModelCatalogContext);
 }
 
-/** Fetches /api/models on mount + every 10 min, builds the live catalog, and
- *  provides it. Keeps the fallback catalog on any error. */
+/** Fetches /api/models on mount + every 10 min, builds the live Anthropic
+ *  catalog, and — when local broker access is enabled (see
+ *  LOCAL_ENABLED_KEY) — separately polls /api/local/providers +
+ *  /api/local/{id}/models every 20s to append per-provider local groups
+ *  after the OpenRouter group. The two fetches are independent so a local
+ *  broker outage never affects the Anthropic/OpenRouter fallback behavior
+ *  tests depend on. Keeps the fallback catalog on any error. */
 export function ModelCatalogProvider({ children }) {
-  const [catalog, setCatalog] = useState(DEFAULT_CATALOG);
+  const [baseGroups, setBaseGroups] = useState(FALLBACK_MODEL_GROUPS);
+  const [source, setSource] = useState("fallback");
+  const [localGroups, setLocalGroups] = useState([]);
+
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -145,8 +220,8 @@ export function ModelCatalogProvider({ children }) {
         if (!res.ok) return;
         const data = await res.json();
         if (cancelled || !Array.isArray(data.models) || data.models.length === 0) return;
-        const groups = buildModelGroups(data.models);
-        setCatalog({ groups, models: flatten(groups), source: data.source || "live" });
+        setBaseGroups(buildModelGroups(data.models));
+        setSource(data.source || "live");
       } catch {
         /* keep fallback — best-effort, the picker still works offline */
       }
@@ -158,5 +233,51 @@ export function ModelCatalogProvider({ children }) {
       clearInterval(iv);
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Re-checked on every poll tick (not just mount) so toggling the local
+    // broker off from LocalBrokerView clears the groups without a remount.
+    async function load() {
+      if (!readLocalEnabled()) {
+        if (!cancelled) setLocalGroups([]);
+        return;
+      }
+      try {
+        const provRes = await fetch("/api/local/providers");
+        if (!provRes.ok) return;
+        const provData = await provRes.json();
+        const providers = Array.isArray(provData.providers) ? provData.providers : [];
+        if (providers.length === 0) {
+          if (!cancelled) setLocalGroups([]);
+          return;
+        }
+        const entries = await Promise.all(
+          providers.map(async (p) => {
+            try {
+              const res = await fetch(`/api/local/${encodeURIComponent(p.id)}/models`);
+              return [p.id, res.ok ? await res.json() : { reachable: false }];
+            } catch {
+              return [p.id, { reachable: false }];
+            }
+          })
+        );
+        if (cancelled) return;
+        const modelsByProviderId = Object.fromEntries(entries);
+        setLocalGroups(buildLocalGroups(providers, modelsByProviderId));
+      } catch {
+        /* keep whatever local groups we had — best-effort */
+      }
+    }
+    load();
+    const iv = setInterval(load, LOCAL_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, []);
+
+  const groups = localGroups.length > 0 ? [...baseGroups, ...localGroups] : baseGroups;
+  const catalog = { groups, models: flatten(groups), source };
   return createElement(ModelCatalogContext.Provider, { value: catalog }, children);
 }

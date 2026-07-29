@@ -95,6 +95,9 @@ export default function TopBar({
   localMetrics,
   localStatus,
   onOpenLocalBroker,
+  // Tier 1: local model groups render in the picker but are not yet
+  // launchable — flip this on in the tier that wires up local launch.
+  localLaunchEnabled = false,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
@@ -430,7 +433,13 @@ export default function TopBar({
               >
                 {modelGroups.map((group, gi) => {
                   const isOpenRouterGroup = group.provider === "openrouter";
-                  const groupDisabled = isOpenRouterGroup && !openRouterConfigured;
+                  const isLocalGroup = group.provider === "local";
+                  const groupDisabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localLaunchEnabled);
+                  const groupHint = isLocalGroup && !localLaunchEnabled
+                    ? "Enable the local broker to launch local models"
+                    : groupDisabled
+                      ? "Add a key via the key icon to enable"
+                      : null;
                   return (
                     <div key={group.label}>
                       {gi > 0 && (
@@ -442,16 +451,16 @@ export default function TopBar({
                       >
                         {group.label}
                       </div>
-                      {groupDisabled && (
+                      {groupHint && (
                         <div
                           className="text-[10px] px-3 pb-1"
                           style={{ color: "var(--text-muted)", fontStyle: "italic" }}
                         >
-                          Add a key via the key icon to enable
+                          {groupHint}
                         </div>
                       )}
                       {group.models.map((m) => {
-                        const disabled = isOpenRouterGroup && !openRouterConfigured;
+                        const disabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localLaunchEnabled);
                         return (
                           <button
                             key={m.id}
@@ -467,7 +476,7 @@ export default function TopBar({
                               opacity: disabled ? 0.45 : 1,
                               cursor: disabled ? "not-allowed" : "pointer",
                             }}
-                            title={disabled ? "Add a key via the key icon to enable" : undefined}
+                            title={groupHint || undefined}
                           >
                             {m.label}
                           </button>
