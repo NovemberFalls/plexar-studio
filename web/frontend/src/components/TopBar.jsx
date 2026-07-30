@@ -11,46 +11,11 @@ import {
   isOpusModel,
   getModelProvider,
 } from "../modelCatalog";
-
-/** Queue depth = in-flight (0/1) + queued length. Field names pinned from
- * broker source (broker.py::_queue_state): in_flight (object|null), queued []. */
-function queueDepth(q) {
-  if (!q || q.reachable === false) return null;
-  return (q.in_flight ? 1 : 0) + (Array.isArray(q.queued) ? q.queued.length : 0);
-}
-
-/** Short human duration: 45 -> "45s", 130 -> "2m", 3900 -> "1h5m". */
-function fmtEta(sec) {
-  if (typeof sec !== "number" || !isFinite(sec) || sec <= 0) return null;
-  if (sec < 60) return `${Math.round(sec)}s`;
-  const m = Math.round(sec / 60);
-  if (m < 60) return `${m}m`;
-  return `${Math.floor(m / 60)}h${m % 60}m`;
-}
-
-/** Unified live lane readout: prefers the vLLM in-engine block (running/waiting/
- * decode + wall to estimate drain) and falls back to the broker queue snapshot.
- * Returns {running, queued, tps, etaSec, total} or null when nothing is live. */
-function laneLive(localQueue, localMetrics) {
-  const m = localMetrics && localMetrics.reachable !== false ? localMetrics : null;
-  const eng = m?.engine;
-  if (eng && (typeof eng.running === "number" || typeof eng.waiting === "number")) {
-    const running = eng.running || 0;
-    const queued = eng.waiting || 0;
-    const tps = m.decode_tokens_per_sec?.avg ?? m.tokens_per_sec?.avg ?? null;
-    // 1-deep continuous-batching lane: drain ≈ (in-flight + waiting) × median wall.
-    const wallMs = m.run_time_ms?.p50;
-    const etaSec = typeof wallMs === "number" && (running + queued) > 0 ? ((running + queued) * wallMs) / 1000 : null;
-    return { running, queued, tps, etaSec, total: running + queued };
-  }
-  const d = queueDepth(localQueue);
-  if (d == null) return null;
-  const running = localQueue?.in_flight ? 1 : 0;
-  const queued = Array.isArray(localQueue?.queued) ? localQueue.queued.length : 0;
-  const tps = m?.tokens_per_sec?.current ?? null;
-  const etaSec = typeof localQueue?.estimated_clear_seconds === "number" ? localQueue.estimated_clear_seconds : null;
-  return { running, queued, tps, etaSec, total: d };
-}
+// Lane math lives in utils/laneMath.js so the Workspace lane pressure meter,
+// this quick-glance pill, Engine > Live and the spill-policy control all read
+// the same arithmetic (see the handoff: "Conversions to implement once and
+// share"). Do not re-derive these locally.
+import { fmtEta, laneLive } from "../utils/laneMath";
 
 // Re-exported for back-compat: PaneActionsMenu and the test suite import the
 // static model list from here. The LIVE, account-accurate catalog flows through

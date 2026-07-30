@@ -102,6 +102,17 @@ const TerminalPane = forwardRef(function TerminalPane({
   // Expose focus() to parent via ref
   useImperativeHandle(ref, () => ({
     focus: () => xtermRef.current?.focus(),
+    /** Send ESC to the PTY — what the Inspector's "Interrupt" button and the
+     *  Esc shortcut both do. Goes over the SAME wsRef the keyboard uses, so it
+     *  is serialized by the backend's per-session write lock like any keystroke.
+     *  No-ops when the socket is not open rather than throwing. */
+    interrupt: () => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send("\x1b");
+        return true;
+      }
+      return false;
+    },
   }));
 
   const searchNext = useCallback(() => {

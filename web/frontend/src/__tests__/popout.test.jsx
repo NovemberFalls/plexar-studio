@@ -207,7 +207,6 @@ vi.mock("../components/StateIcon", () => ({
 // "claude-sonnet-4-6" that intentionally aren't in the real MODELS list).
 vi.mock("../components/TopBar", () => ({ default: () => null, MODELS: [] }));
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
-vi.mock("../components/StatusBar", () => ({ default: () => null }));
 vi.mock("../components/NewSessionDialog", () => ({ default: () => null }));
 vi.mock("../components/OnboardingModal", () => ({ default: () => null }));
 vi.mock("../components/BridgeModal", () => ({ default: () => null }));

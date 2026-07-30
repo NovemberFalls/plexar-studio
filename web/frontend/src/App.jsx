@@ -1,11 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Loader, ExternalLink } from "lucide-react";
-import TopBar, { getModelProvider } from "./components/TopBar";
+import TopBar, { getModelProvider, MODELS } from "./components/TopBar";
 import { parseLocalModelId } from "./modelCatalog";
 import Sidebar from "./components/Sidebar";
-import ActivityRail from "./components/ActivityRail";
 import TerminalPane from "./components/TerminalPane";
-import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
@@ -17,6 +15,13 @@ import TracesPanel from "./components/TracesPanel";
 import LocalBrokerView from "./components/LocalBrokerView.jsx";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
 import { computeEndEvents, formatEndEventToast, buildBusyTerminalIds, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
+// Redesigned shell chrome (design handoff "Workspace — the approved shell").
+import Rail from "./components/shell/Rail";
+import CommandBar from "./components/shell/CommandBar";
+import LaneStrip from "./components/shell/LaneStrip";
+import Inspector from "./components/shell/Inspector";
+import StatusStrip from "./components/shell/StatusStrip";
+import { laneLive, predictedWaitSeconds, pressureFraction } from "./utils/laneMath";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -29,6 +34,36 @@ const EFFORT_KEY = "cockpit-effort";
 const FAST_KEY = "cockpit-fast";
 const LAYOUT_KEY = "cockpit-layout";
 const FLIP_KEY = "cockpit-flip";
+
+/** Canonical key for a working directory in path-keyed maps (`gitStatuses`).
+ *  Backslash-normalized with any trailing separator stripped. Both the writer
+ *  and every reader MUST go through this — indexing such a map with a raw
+ *  `workdir` silently misses whenever the path uses forward slashes or ends in a
+ *  separator, which is how the Inspector lost its git row while the sidebar kept
+ *  showing one for the same folder. */
+function normalizeWorkdir(dir) {
+  if (typeof dir !== "string" || !dir) return "";
+  return dir.replace(/\//g, "\\").replace(/\\$/, "");
+}
+
+/** Command-bar title per rail destination. "projects" is absent by design — it
+ *  opens the drawer over Workspace rather than replacing the content area. */
+const SECTION_TITLES = {
+  work: "Workspace",
+  fleet: "Fleet",
+  engine: "Engine",
+  reports: "Reports",
+  settings: "Settings",
+};
+
+/** Shown in the status strip. Sourced from the Vite-injected package version so
+ *  it cannot drift from the installer the user actually ran. */
+const APP_VERSION = import.meta.env?.VITE_APP_VERSION || null;
+
+/** Spill threshold for the interactive class, in SECONDS of predicted wait (not
+ *  queue depth — see utils/laneMath.js). Mirrors the broker's own
+ *  `--spill-interactive 30.0` default, used until /config/spill reports back. */
+const DEFAULT_INTERACTIVE_SPILL_SECONDS = 30;
 
 /**
  * Adaptive layout engine (README "Adaptive Layout Engine" table).
@@ -194,11 +229,29 @@ export default function App() {
   const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
   const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
   const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
-  const [poppedOutIds, setPoppedOutIds] = useState(new Set()); // session IDs whose terminals are in a separate window
+  // Set of TERMINAL IDs (backend strings), NOT local session ids. The comment
+  // here used to say "session IDs", which is how a consumer came to call
+  // .has(session.id) — always false, since session.id is a local number. Every
+  // read must use session.terminalId.
+  const [poppedOutIds, setPoppedOutIds] = useState(new Set());
   const [workflowsByTerminal, setWorkflowsByTerminal] = useState({}); // { [terminalId]: { count, inProgressCount, items } }
   const [usageByTerminal, setUsageByTerminal] = useState({}); // { [terminalId]: { ...session_summary, effort, tokensPerSec } }
   const [dailyUsage, setDailyUsage] = useState(null); // usage_tracker.daily_summary() shape
-  const [showFleetView, setShowFleetView] = useState(false);
+  // ── Shell navigation ──────────────────────────────────────────────────────
+  // ONE source of truth for which destination is showing. The legacy
+  // showFleetView / showLocalBroker booleans are DERIVED from it below, so
+  // every existing call site keeps working while the rail gains Projects /
+  // Reports / Settings. Two independent booleans is what previously allowed
+  // Fleet and Broker to both be "open" at once, each clearing the other by
+  // hand at every call site.
+  const [activeSection, setActiveSection] = useState("work"); // work|projects|fleet|engine|reports|settings
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // Last pane slot each session occupied, so activating a session from
+  // Projects/Fleet/palette focuses its own pane instead of reshuffling the grid.
+  const [paneSlotBySession, setPaneSlotBySession] = useState(() => new Map());
+  const showFleetView = activeSection === "fleet";
+  const showLocalBroker = activeSection === "engine";
+  const [defaultsOpen, setDefaultsOpen] = useState(false);
   // Local model broker (machine-global): queue + metrics. Polling is gated on
   // localEnabled so a disabled feature does zero background work.
   const [localEnabled, setLocalEnabled] = useState(() => {
@@ -206,9 +259,11 @@ export default function App() {
   });
   const [localQueue, setLocalQueue] = useState(null);   // GET /api/local/queue, or null/offline
   const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
-  const [, setLocalSpill] = useState(null);   // GET /api/local/spill (per-class thresholds + counters)
+  // GET /api/local/spill (per-class thresholds + counters). The VALUE is now
+  // read (the lane strip's trigger and toggle come from it) — it used to be
+  // write-only, which is why the meter had no real threshold to measure against.
+  const [localSpill, setLocalSpill] = useState(null);
   const [localStatus, setLocalStatus] = useState(null); // GET /api/local/status — what's actually connected
-  const [showLocalBroker, setShowLocalBroker] = useState(false); // full-page Local Broker section (rail-opened)
   const [metricsWindow] = useState("lifetime"); // lifetime | 24h | session (legacy TopBar quick-glance poller)
   // Provider registry (ProviderPicker owns the fetch + localStorage selection;
   // this mirrors the full selected provider object back up so App can gate
@@ -241,16 +296,26 @@ export default function App() {
   // Auto-update check (Tauri desktop only)
   useEffect(() => {
     let cancelled = false;
+    // Held outside the promise so cleanup can actually STOP the poll. Previously
+    // only the `cancelled` flag was set on unmount, which gated the async
+    // continuation but left this interval running for up to 2s — and its callback
+    // touches `window`, so an unmount mid-poll threw "window is not defined"
+    // after teardown. Harmless in the browser, but it makes tests flaky and
+    // would leak a timer on any future remount.
+    let tauriPoll = null;
 
     // Poll for Tauri IPC bridge (may not be injected immediately on remote URLs)
     const waitForTauri = () => new Promise((resolve) => {
-      const isTauri = () => !!(window.__TAURI_INTERNALS__ || window.__TAURI__);
+      const isTauri = () => !!(
+        typeof window !== "undefined" && (window.__TAURI_INTERNALS__ || window.__TAURI__)
+      );
       if (isTauri()) return resolve(true);
       let attempts = 0;
-      const interval = setInterval(() => {
+      tauriPoll = setInterval(() => {
         attempts++;
-        if (isTauri()) { clearInterval(interval); resolve(true); }
-        else if (attempts >= 20) { clearInterval(interval); resolve(false); } // 2s max
+        if (cancelled) { clearInterval(tauriPoll); resolve(false); return; }
+        if (isTauri()) { clearInterval(tauriPoll); resolve(true); }
+        else if (attempts >= 20) { clearInterval(tauriPoll); resolve(false); } // 2s max
       }, 100);
     });
 
@@ -291,7 +356,7 @@ export default function App() {
         console.error("[updater] check failed:", err);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (tauriPoll) clearInterval(tauriPoll); };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toast is stable (useCallback with empty deps); adding it would not cause re-runs but the rule can't verify stability across files
   }, []);
 
@@ -727,8 +792,7 @@ export default function App() {
           const res = await fetch(url);
           if (res.ok) {
             const data = await res.json();
-            const normPath = dir.replace(/\//g, "\\").replace(/\\$/, "");
-            results[normPath] = data;
+            results[normalizeWorkdir(dir)] = data;
           }
         } catch (_) { /* skip */ }
       });
@@ -1465,15 +1529,33 @@ export default function App() {
 
   const zoomReset = useCallback(() => applyZoom(DEFAULT_ZOOM), [applyZoom]);
 
+  /** Ctrl+K command palette. The palette itself is a later phase; for now this
+   *  focuses the Projects filter, which is the searchable surface that exists. */
+  const openPalette = useCallback(() => {
+    setSidebarOpen(true);
+    requestAnimationFrame(() => {
+      const el = document.querySelector("[data-sidebar-filter]");
+      if (el) el.focus();
+    });
+  }, []);
+
   useEffect(() => {
     const handler = (e) => {
       if (e.ctrlKey && e.shiftKey && e.key === "N") {
         e.preventDefault();
         setShowNewDialog(true);
       }
-      if (e.ctrlKey && e.shiftKey && e.key === "B") {
+      // Ctrl+Shift+B (legacy) and Ctrl+Shift+E (redesign) both toggle the
+      // Projects drawer — the spec renames the shortcut but the old one is
+      // muscle memory, so both are kept rather than breaking it.
+      if (e.ctrlKey && e.shiftKey && (e.key === "B" || e.key === "E")) {
         e.preventDefault();
         setSidebarOpen((p) => !p);
+      }
+      // Ctrl+K opens the command palette.
+      if (e.ctrlKey && !e.shiftKey && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        openPalette();
       }
       if (e.ctrlKey && e.shiftKey && e.key === "!") {
         e.preventDefault();
@@ -1530,7 +1612,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [createSession, activeIds, layout, zoomIn, zoomOut, zoomReset]);
+  }, [createSession, activeIds, layout, zoomIn, zoomOut, zoomReset, openPalette]);
 
   // Ctrl+MouseWheel zoom
   useEffect(() => {
@@ -1569,6 +1651,275 @@ export default function App() {
     }
     return order;
   }, [layout, focusedIndex]);
+
+  // ── Shell derivations ─────────────────────────────────────────────────────
+  // Everything the redesigned chrome renders is DERIVED from state that already
+  // existed; the shell restructure adds no new polling and no duplicate stores.
+
+  /** Switch destination. Selecting the section you are already in returns to
+   *  Workspace, preserving the old rail's toggle feel. "projects" opens the
+   *  drawer rather than a full-area section — the tree overlays the panes. */
+  const selectSection = useCallback((section) => {
+    if (section === "projects") {
+      setSidebarOpen((v) => !v);
+      return;
+    }
+    setActiveSection((prev) => (prev === section ? "work" : section));
+  }, []);
+
+  // Spill trigger for the interactive class, in seconds of predicted wait.
+  // `null` in the broker payload means spill is DISABLED for the class — which
+  // is why the toggle reads presence, not truthiness of a number.
+  const spillThresholdSeconds = useMemo(() => {
+    const t = localSpill?.spill_thresholds_s?.interactive;
+    if (t === null) return null;
+    return typeof t === "number" ? t : DEFAULT_INTERACTIVE_SPILL_SECONDS;
+  }, [localSpill]);
+  const spillEnabled = spillThresholdSeconds != null;
+
+  /** Master spill switch for the interactive lane. Turning it off sends null
+   *  (the broker's "disabled" sentinel); turning it back on restores the
+   *  default trigger. This is the same key the Engine view and Settings write —
+   *  three surfaces, one PUT, per the handoff. */
+  const toggleSpillEnabled = useCallback((next) => {
+    commitSpill({ interactive: next ? DEFAULT_INTERACTIVE_SPILL_SECONDS : null });
+  }, [commitSpill]);
+
+  /** Per-session override. Phase 1 writes the WORKSPACE default (the existing
+   *  behaviour) — true per-session overrides need a backend hop to re-spawn or
+   *  re-key a live session, which is Phase 3. Keeping it honest here rather
+   *  than silently no-oping the control. */
+  const applySessionOverride = useCallback((key, value) => {
+    if (key === "model") setModel(value);
+    else if (key === "permissionMode") setPermissionMode(value);
+    else if (key === "effort") setEffort(value);
+    else if (key === "fast") setFast(value);
+  }, []);
+
+  const inspectorModelOptions = useMemo(
+    () => MODELS.map((m) => ({ value: m.id, label: m.label })),
+    [],
+  );
+
+  const activeWorkspaceName = useMemo(() => {
+    const active = workspacePresets.find((w) => w?.active);
+    return active?.name || null;
+  }, [workspacePresets]);
+
+
+  const focusedSessionId = focusedIndex >= 0 && focusedIndex < activeIds.length ? activeIds[focusedIndex] : null;
+  const focusedSession = focusedSessionId != null ? sessions.find((s) => s.id === focusedSessionId) || null : null;
+
+  // Track which slot each session last occupied so activating it from
+  // Projects/Fleet/palette focuses ITS pane instead of reshuffling the grid.
+  // RECONCILES, not just inserts: a session evicted from its slot must LOSE its
+  // badge, otherwise its chip keeps advertising a pane that now belongs to
+  // someone else (and the map grows unbounded over a long uptime). Returning
+  // `prev` unchanged when nothing moved avoids a pointless extra App re-render on
+  // every activation.
+  useEffect(() => {
+    setPaneSlotBySession((prev) => {
+      const next = new Map();
+      activeIds.forEach((id, idx) => { if (id != null) next.set(id, idx + 1); });
+      if (next.size === prev.size && [...next].every(([id, slot]) => prev.get(id) === slot)) {
+        return prev;
+      }
+      return next;
+    });
+  }, [activeIds]);
+
+  // Lane pressure, from the shared math (utils/laneMath.js) so the strip, the
+  // TopBar pill and Engine > Live cannot disagree.
+  const laneStripData = useMemo(() => {
+    const live = laneLive(localQueue, localMetrics);
+    if (!live) return null;
+    return {
+      inFlight: live.running,
+      queued: live.queued,
+      predictedWaitSeconds: predictedWaitSeconds(live.running, live.queued, live.p50WallSeconds),
+      thresholdSeconds: spillThresholdSeconds,
+      estimatedClearSeconds: live.etaSec,
+    };
+  }, [localQueue, localMetrics, spillThresholdSeconds]);
+
+  /** Engine rail dot: down when something is configured but unreachable,
+   *  pressure when the lane is backed up past its trigger, else serving.
+   *  null (no dot) when the local engine is switched off entirely. */
+  const engineStatus = useMemo(() => {
+    if (!localEnabled) return null;
+    // Field names pinned to GET /api/local/status, which returns
+    // {reachable, compatible, service, detail, url, managed} — there is NO `ok`
+    // key here (that belongs to /api/local/{id}/health). Reading `ok` made the
+    // "down" branch dead code, so killing LM Studio still painted a green
+    // "serving" dot — the one thing this indicator exists to rule out.
+    // `compatible: false` is also down for our purposes: something is answering,
+    // but not the broker contract, so it cannot serve us.
+    if (localStatus && (localStatus.reachable === false || localStatus.compatible === false)) return "down";
+    const frac = pressureFraction(laneStripData?.predictedWaitSeconds, laneStripData?.thresholdSeconds);
+    if (frac != null && frac >= 1) return "pressure";
+    return "serving";
+  }, [localEnabled, localStatus, laneStripData]);
+
+  const bridgeCount = useMemo(
+    () => activeBridges.filter((b) => b?.state === "active").length
+      + channels.filter((c) => c?.state === "active").length,
+    [activeBridges, channels],
+  );
+
+  /** The focused session's bridge/channel role, for the Inspector card. */
+  const inspectorBridge = useMemo(() => {
+    if (!focusedSession) return null;
+    const tid = focusedSession.terminalId;
+    const b = activeBridges.find((x) => x?.state === "active" && (x.from_id === tid || x.to_id === tid));
+    if (b) {
+      const isSender = b.from_id === tid;
+      return {
+        role: isSender ? "sender" : "receiver",
+        kind: "bridge",
+        peerName: isSender ? b.to_name : b.from_name,
+        turn: b.turns_used,
+        maxTurns: b.max_turns,
+        id: b.bridge_id,
+      };
+    }
+    const ch = channels.find(
+      (x) => x?.state === "active" && (x.lead_id === tid || (Array.isArray(x.worker_ids) && x.worker_ids.includes(tid))),
+    );
+    if (ch) {
+      const isLead = ch.lead_id === tid;
+      return {
+        role: isLead ? "lead" : "worker",
+        kind: "channel",
+        peerName: isLead ? `${(ch.worker_ids || []).length} workers` : ch.lead_name,
+        turn: ch.turns_used,
+        maxTurns: ch.max_turns,
+        id: ch.channel_id,
+      };
+    }
+    return null;
+  }, [focusedSession, activeBridges, channels]);
+
+  const endFocusedBridge = useCallback(() => {
+    if (!inspectorBridge?.id) return;
+    if (inspectorBridge.kind === "channel") handleEndChannel(inspectorBridge.id);
+    else handleEndBridge(inspectorBridge.id);
+  }, [inspectorBridge, handleEndChannel, handleEndBridge]);
+
+  /** Today's total tokens for the status strip. Keys pinned to
+   *  usage_tracker.daily_summary(): input_tokens / output_tokens /
+   *  cache_read_tokens / cache_creation_tokens and est_cost_usd — there is no
+   *  `total_tokens` field, so the total is summed here. Stays null (rendered
+   *  "—") when no rollup has arrived, rather than reporting a fabricated 0. */
+  const todayTokens = useMemo(() => {
+    if (!dailyUsage) return null;
+    const parts = [
+      dailyUsage.input_tokens,
+      dailyUsage.output_tokens,
+      dailyUsage.cache_read_tokens,
+      dailyUsage.cache_creation_tokens,
+    ].filter((n) => typeof n === "number" && isFinite(n));
+    return parts.length ? parts.reduce((a, b) => a + b, 0) : null;
+  }, [dailyUsage]);
+
+  /**
+   * Adapt the git payload for the Inspector, and normalize the LOOKUP KEY.
+   *
+   * `gitStatuses` is keyed by a normalized path (forward slashes converted to
+   * backslashes, trailing separator stripped — see where setGitStatuses builds
+   * `normPath`), and Sidebar goes through the same normalization. Indexing with a
+   * raw `workdir` silently missed for any session whose path carried forward
+   * slashes or a trailing separator, so the Inspector showed no git row while the
+   * sidebar showed one for the very same folder.
+   *
+   * The endpoint returns `files_changed`; the component's contract is
+   * `changedCount`, so translate rather than teaching the component the API name.
+   */
+  const inspectorGit = useMemo(() => {
+    const wd = focusedSession?.workdir;
+    if (!wd) return null;
+    const g = gitStatuses[normalizeWorkdir(wd)];
+    if (!g) return null;
+    return { branch: g.branch, dirty: g.dirty, changedCount: g.files_changed };
+  }, [focusedSession, gitStatuses]);
+
+  /**
+   * Adapt GET /api/system to the StatusStrip contract. The endpoint speaks
+   * snake_case (cpu_percent / ram_used_gb / ram_total_gb / gpu_percent); the old
+   * StatusBar read those correctly, so passing the raw object to a camelCase
+   * component was a live regression that read "CPU — RAM — GPU —" on a healthy
+   * machine. VRAM is deliberately absent: no endpoint reports it, so there is
+   * nothing honest to show.
+   */
+  const stripSystemStats = useMemo(() => {
+    if (!systemStats) return null;
+    return {
+      cpu: systemStats.cpu_percent,
+      ramUsed: systemStats.ram_used_gb,
+      ramTotal: systemStats.ram_total_gb,
+      gpu: systemStats.gpu_percent,
+    };
+  }, [systemStats]);
+
+  /**
+   * Adapt the backend's usage payload to the Inspector's prop contract.
+   *
+   * The API speaks snake_case (usage_tracker.session_summary(): input_tokens,
+   * output_tokens, cache_creation_tokens, cache_read_tokens, est_cost_usd) while
+   * the presentational component takes camelCase. Translating HERE, at the
+   * integration boundary, keeps the component free of backend field names and
+   * means there is exactly one place to look when the payload changes.
+   *
+   * Context is NOT in that payload at all — it rides on the session object as
+   * `context_percent`, so the ring is fed a percentage directly rather than the
+   * used/max pair the payload never had.
+   *
+   * Missing values stay undefined and render "n/a": a 0 here would claim "no
+   * tokens used", which is a different and false statement.
+   */
+  const inspectorUsage = useMemo(() => {
+    if (!focusedSession) return null;
+    const u = usageByTerminal[focusedSession.terminalId];
+    const pct = focusedSession.context_percent;
+    const haveCtx = typeof pct === "number" && isFinite(pct);
+    if (!u && !haveCtx) return null;
+    return {
+      contextUsed: haveCtx ? pct : undefined,
+      contextMax: haveCtx ? 100 : undefined,
+      inputTokens: u?.input_tokens,
+      outputTokens: u?.output_tokens,
+      cacheRead: u?.cache_read_tokens,
+      cacheWrite: u?.cache_creation_tokens,
+      costUsd: u?.est_cost_usd,
+    };
+  }, [focusedSession, usageByTerminal]);
+  const inspectorWorkflows = focusedSession
+    ? workflowsByTerminal[focusedSession.terminalId]?.items || []
+    : [];
+
+  /** Interrupt = ESC to the focused pane's PTY, via the pane's imperative
+   *  handle so it travels the same WebSocket as a keystroke. */
+  const interruptSession = useCallback((sessionId) => {
+    const idx = activeIds.indexOf(sessionId);
+    if (idx < 0) return;
+    const pane = paneRefs.current[idx];
+    // Three outcomes, and they must be distinguished: no pane mounted (the
+    // session is popped out, so its TerminalPane lives in the other window),
+    // socket closed (returns false), or sent (true). Treating only `false` as
+    // failure made Interrupt a completely silent no-op on a popped-out pane —
+    // no ESC, no toast, no clue.
+    if (!pane?.interrupt) {
+      toast("This session is popped out — interrupt it from its own window", "info");
+      return;
+    }
+    if (pane.interrupt() === false) {
+      toast("Session is not connected — nothing to interrupt", "error");
+    }
+  }, [activeIds, toast]);
+
+  const popOutSession = useCallback((sessionId) => {
+    const s = sessions.find((x) => x.id === sessionId);
+    if (s) handlePopout(s);
+  }, [sessions, handlePopout]);
 
   // Splash screen while waiting for backend
   if (!backendReady) {
@@ -1613,51 +1964,87 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden relative" style={{ background: "var(--cc-bg)" }}>
-        <div className="relative z-10 flex flex-col h-full">
-          <TopBar
-            model={model}
-            setModel={setModel}
-            permissionMode={permissionMode}
-            setPermissionMode={setPermissionMode}
-            effort={effort}
-            setEffort={setEffort}
-            fast={fast}
-            setFast={setFast}
-            sidebarOpen={sidebarOpen}
-            setSidebarOpen={setSidebarOpen}
+        {/* The rail is now FULL HEIGHT and the command bar / status strip live
+            inside the content column to its right — the redesigned shell. */}
+        <div className="relative z-10 flex h-full min-h-0">
+          <Rail
+            activeSection={activeSection}
+            onSelectSection={selectSection}
+            engineStatus={engineStatus}
             user={user}
-            onToast={toast}
-            showFleetView={showFleetView}
-            setShowFleetView={setShowFleetView}
-            localEnabled={localEnabled}
-            setLocalEnabled={setLocalEnabled}
-            localLaunchEnabled={localEnabled}
-            localQueue={localQueue}
-            localMetrics={localMetrics}
-            localStatus={localStatus}
-            onOpenLocalBroker={() => { setShowLocalBroker(true); setShowFleetView(false); }}
-            onLoadLocalModel={loadOrRestartLocalModel}
-            localBusyModelId={localBusyModelId}
+            projectsDrawerOpen={sidebarOpen}
           />
 
-          <div className="flex flex-1 min-h-0">
-            <ActivityRail
-              onNew={() => setShowNewDialog(true)}
-              sidebarOpen={sidebarOpen}
-              onToggleSidebar={() => setSidebarOpen((p) => !p)}
-              showFleetView={showFleetView}
-              onToggleFleet={() => { setShowFleetView((v) => !v); setShowLocalBroker(false); }}
-              onSearch={() => {
-                setSidebarOpen(true);
-                // Focus the sidebar filter input if the Sidebar exposes one.
-                requestAnimationFrame(() => {
-                  const el = document.querySelector("[data-sidebar-filter]");
-                  if (el) el.focus();
-                });
-              }}
-              showLocalBroker={showLocalBroker}
-              onToggleLocalBroker={() => { setShowLocalBroker((v) => !v); setShowFleetView(false); }}
+          {/* Content column: command bar 44 -> lane strip 40 -> panes+inspector -> status strip 24 */}
+          <div className="flex flex-col flex-1 min-w-0 min-h-0">
+            <CommandBar
+              title={SECTION_TITLES[activeSection] || "Workspace"}
+              workspaceName={activeWorkspaceName}
+              onOpenPalette={openPalette}
+              model={model}
+              permissionMode={permissionMode}
+              effort={effort}
+              onOpenDefaults={() => setDefaultsOpen((v) => !v)}
             />
+
+            {/* PHASE-1 SCAFFOLD: the Defaults pill opens the existing TopBar as a
+                drop-down so every picker it owns (model, permission, effort,
+                fast, OpenRouter key, local-engine pill) keeps working unchanged.
+                Phase 4 dissolves TopBar into Settings + a purpose-built popover;
+                until then this is how those controls stay reachable rather than
+                being dropped on the floor by the shell restructure. */}
+            {/* ABSOLUTELY POSITIONED on purpose. As an in-flow block this row
+                changed the height available to the pane grid, so every xterm in
+                every pane refit on each open AND close — visibly reflowing
+                output in up to 8 terminals to show a picker. */}
+            {defaultsOpen && (
+              <div style={{ position: "relative", zIndex: 40 }}>
+                <div style={{ position: "absolute", top: 0, left: 0, right: 0, background: "var(--cc-bg2)", borderBottom: "1px solid var(--cc-border)", boxShadow: "0 12px 32px rgba(0,0,0,.45)" }}>
+              <TopBar
+                model={model}
+                setModel={setModel}
+                permissionMode={permissionMode}
+                setPermissionMode={setPermissionMode}
+                effort={effort}
+                setEffort={setEffort}
+                fast={fast}
+                setFast={setFast}
+                sidebarOpen={sidebarOpen}
+                setSidebarOpen={setSidebarOpen}
+                user={user}
+                onToast={toast}
+                localEnabled={localEnabled}
+                setLocalEnabled={setLocalEnabled}
+                localLaunchEnabled={localEnabled}
+                localQueue={localQueue}
+                localMetrics={localMetrics}
+                localStatus={localStatus}
+                onOpenLocalBroker={() => setActiveSection("engine")}
+                onLoadLocalModel={loadOrRestartLocalModel}
+                localBusyModelId={localBusyModelId}
+              />
+                </div>
+              </div>
+            )}
+
+            <LaneStrip
+              sessions={sessions}
+              paneSlotById={paneSlotBySession}
+              focusedSessionId={focusedSessionId}
+              poppedOutIds={poppedOutIds}
+              onSelectSession={selectSession}
+              onNew={() => setShowNewDialog(true)}
+              onChipDragStart={(e, sessionId) => {
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", `session:${sessionId}`);
+              }}
+              lane={laneStripData}
+              spillEnabled={spillEnabled}
+              onToggleSpill={toggleSpillEnabled}
+              onOpenSpillDetails={() => setActiveSection("engine")}
+            />
+
+          <div className="flex flex-1 min-h-0">
             {sidebarOpen && (
               <div
                 className="flex flex-shrink-0"
@@ -1708,7 +2095,7 @@ export default function App() {
                 usageByTerminal={usageByTerminal}
                 dailyUsage={dailyUsage}
                 workflowsByTerminal={workflowsByTerminal}
-                onClose={() => setShowFleetView(false)}
+                onClose={() => setActiveSection("work")}
               />
             )}
             {showLocalBroker && (
@@ -1722,7 +2109,7 @@ export default function App() {
                 onSpillChange={commitSpill}
                 onToast={toast}
                 onModelsRefresh={setLocalModels}
-                onClose={() => setShowLocalBroker(false)}
+                onClose={() => setActiveSection("work")}
               >
                 {/* Provider panels render inside the view's Provider card —
                     each renders nothing when its capability is absent. */}
@@ -1748,7 +2135,7 @@ export default function App() {
             <main
               className="flex-1 min-w-0"
               style={{
-                display: showFleetView || showLocalBroker ? "none" : "grid",
+                display: activeSection === "work" ? "grid" : "none",
                 gridTemplateColumns: gridLayout.cols,
                 gridTemplateRows: gridLayout.rows,
                 gap: 14,
@@ -1999,22 +2386,67 @@ export default function App() {
               })}
             </main>
 
+            {/* Inspector follows pane focus. Only in Workspace — the full-area
+                sections own the whole content width. */}
+            {(activeSection === "reports" || activeSection === "settings") && (
+              <div
+                className="flex-1 min-w-0 flex items-center justify-center"
+                style={{ background: "var(--cc-bg)", padding: 24 }}
+              >
+                <div style={{ textAlign: "center", maxWidth: 420 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: "var(--cc-fg)", marginBottom: 8 }}>
+                    {SECTION_TITLES[activeSection]} is not built yet
+                  </div>
+                  <p style={{ fontSize: 12, lineHeight: 1.6, color: "var(--cc-muted)" }}>
+                    {activeSection === "reports"
+                      ? "Token and cost accounting down to individual traces. Until this lands, per-model reporting lives in Engine."
+                      : "Every tunable value in one addressable place, including the design tokens. Until this lands, use the pickers in DEFAULTS and the Engine view."}
+                  </p>
+                </div>
+              </div>
+            )}
 
+            {inspectorOpen && activeSection === "work" && (
+              <Inspector
+                session={focusedSession}
+                git={inspectorGit}
+                usage={inspectorUsage}
+                bridge={inspectorBridge}
+                workflows={inspectorWorkflows}
+                overrides={{ model, permissionMode, effort, fast }}
+                onOverrideChange={applySessionOverride}
+                modelOptions={inspectorModelOptions}
+                onInterrupt={() => focusedSession && interruptSession(focusedSession.id)}
+                onFork={() => focusedSession && forkSession(focusedSession.id)}
+                onBridge={() => focusedSession && setBridgeModal({ open: true, fromSessionId: focusedSession.id })}
+                onPopOut={() => focusedSession && popOutSession(focusedSession.id)}
+                onEndBridge={endFocusedBridge}
+                onOpenTranscript={null}
+                onCollapse={() => setInspectorOpen(false)}
+              />
+            )}
           </div>
 
-          <StatusBar
-            layout={layout}
-            setLayout={setLayout}
-            flipLayout={flipLayout}
-            setFlipLayout={setFlipLayout}
-            sessions={sessions}
+          <StatusStrip
             connected={sessions.some((s) => s.status === "running")}
-            terminalZoom={terminalZoom}
+            brokerLabel={localStatus?.reachable ? (localStatus.service || "Broker") : "no engine"}
+            /* The Claude CLI version is not reported by any endpoint yet —
+               resolving the CLI binary + detected version is Settings > Claude
+               CLI (backlog 03, Phase 4). Passing null so the strip honestly
+               renders "—" rather than reading a field that does not exist on
+               /api/local/status. */
+            cliVersion={null}
+            appVersion={APP_VERSION}
+            systemStats={stripSystemStats}
+            bridgeCount={bridgeCount}
+            todayTokens={todayTokens}
+            todayCost={dailyUsage?.est_cost_usd ?? null}
+            zoom={terminalZoom}
             onZoomIn={zoomIn}
             onZoomOut={zoomOut}
-            onZoomReset={zoomReset}
-            systemStats={systemStats}
-            onShowOnboarding={() => setShowOnboarding(true)}
+            layout={layout}
+            onLayoutChange={setLayout}
+            onFlip={() => setFlipLayout((v) => !v)}
           />
 
           {/* Zoom toast */}
@@ -2041,6 +2473,7 @@ export default function App() {
               {zoomToast}px
             </div>
           )}
+          </div>
         </div>
 
         {showNewDialog && (
