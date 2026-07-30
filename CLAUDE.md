@@ -121,6 +121,25 @@ Two independent DnD systems share the same drop targets — be careful not to le
 - **CRITICAL build lesson:** Always copy the fresh PyInstaller exe to `src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe` BEFORE building Tauri. A stale sidecar = "Internal Server Error" on desktop launch.
 - **Tauri webview:** `dragDropEnabled: false` in tauri.conf.json so the web-native file drop handler works in the desktop app.
 
+## PTY injection — paste and submit are TWO writes
+
+Every programmatic injection (bridge V1/V2/V3, `/rename` sync, `POST /api/terminals/{id}/command`) goes through `bridge_manager._paste_and_submit`. **Never call `_wrap` and append `\r` yourself** — that is the bug this contract exists to prevent.
+
+- **The submit CR must not ride in the paste write.** Claude Code's TUI buffers stdin on `\x1b[200~` and flushes on `\x1b[201~`; a CR arriving in that same read is consumed as *pasted content* (a newline inside a paste inserts a line, it does not submit). Symptom: the message lands in the peer's composer and sits there until a human hits Enter — bridges never advance. `_wrap` therefore returns the bracketed-paste block ONLY, and `_paste_and_submit` writes the bare CR as a second write after `_SUBMIT_DELAY` (1.0s). It returns True only if BOTH writes land; a paste without its submit is a failed relay, not a delivered one.
+- **Chunk boundaries must never bisect an escape sequence.** `write_pty_async` used to slice every payload over 200 bytes at blind byte offsets, so a cut could land inside `\x1b[200~`/`\x1b[201~`. A split marker means the receiving TUI never enters paste mode, so every embedded newline submits separately and one message arrives as several mangled fragments. Now: single write up to `_SINGLE_WRITE_MAX` (64KB — every realistic paste and bridge message), and above that `_split_preserving_escapes` walks each boundary back out of any escape it landed in. ConPTY byte-drop protection (chunking + `_INTER_CHUNK_DELAY`) survives as a safety valve for genuinely huge pastes rather than being the normal path.
+- **Gotcha in the splitter:** `[` is 0x5B, *inside* the 0x40–0x7E CSI final-byte range. Searching for a terminator from `tail[1:]` makes every CSI sequence look complete the moment its `[` arrives. The terminator scan must start after the `[` introducer.
+- Tests pin all of this: `tests/test_pty_escape_chunking.py` (splitter properties) and the `pastes()` / `paste_only()` helpers in `tests/test_bridge_manager.py`, which assert one submit per paste. Bridge test modules zero `_SUBMIT_DELAY` via an autouse fixture — without it the suite pays a real second per injection.
+
+## Anthropic subscription limits (`anthropic_usage.py`)
+
+The 5-hour / weekly utilization bars from `claude /status` ▸ Usage, surfaced in the TopBar `Gauge` pill (`UsageLimitsPill.jsx`). These are **real server-reported percentages**, not an estimate derived from tracked tokens.
+
+- **Source:** `GET https://api.anthropic.com/api/oauth/usage`, Bearer token + `anthropic-beta: oauth-2025-04-20`. The token is the CLI's own, read from `~/.claude/.credentials.json` → `claudeAiOauth.accessToken` (override with `COCKPIT_CLAUDE_CREDENTIALS`). **This data is NOT in the session JSONL** — the JSONL carries token counts only, no quota information at all, so do not go looking for it there again.
+- **The token never reaches the browser** (same stance as the local-provider registry): `GET /api/anthropic/usage` returns derived percentages and reset timestamps only. Always 200 — an inline panel must not blank on an HTTP error.
+- **Never refresh the token.** The credentials file holds a refresh token belonging to the CLI; rotating it invalidates the CLI's copy and logs the user out of their own terminal. On 401 the module reports `reason: "expired"` and tells the user to run any `claude` command.
+- **`available: false` + a `reason` is the honesty guard** (`no_credentials` | `expired` | `unreachable` | `bad_response`). The UI renders the reason, **never an empty bar** — a 0% bar and "we could not read your usage" look identical and mean opposite things. Likewise a limit whose upstream `percent` is `null` is **dropped, not coerced to 0**.
+- A wrong-shaped 200 is rejected (`bad_response`), mirroring the local-broker service-identity stance. Successes cache 60s; **failures are not cached**, so a transient blip does not pin the panel to "unavailable" for a minute. `?refresh=true` bypasses the cache (the popover does this on open).
+
 ## Peer Bridge
 
 Two running cockpit sessions can exchange messages via `bridge_manager.py`:
