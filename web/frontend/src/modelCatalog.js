@@ -14,20 +14,9 @@
  */
 import { createContext, createElement, useContext, useEffect, useState } from "react";
 
-const POLL_MS = 10 * 60 * 1000; // models change on the order of weeks; 10 min is plenty
-const LOCAL_POLL_MS = 20 * 1000; // local models load/unload far more often than the Anthropic catalog changes
+import { useLocalModelsCatalog, offersModels } from "./hooks/useLocalModels.js";
 
-// Same localStorage flag App.jsx uses to gate all local-broker polling
-// (see App.jsx "cockpit-local-enabled") — read directly rather than via
-// props so this provider can sit above App without a prop-drilling dance.
-const LOCAL_ENABLED_KEY = "cockpit-local-enabled";
-function readLocalEnabled() {
-  try {
-    return localStorage.getItem(LOCAL_ENABLED_KEY) === "true";
-  } catch (_) {
-    return false;
-  }
-}
+const POLL_MS = 10 * 60 * 1000; // models change on the order of weeks; 10 min is plenty
 
 // OpenRouter models are a different provider and never appear in Anthropic's
 // /v1/models — this group is ALWAYS static and appended after the live groups.
@@ -98,17 +87,38 @@ export function parseLocalModelId(id) {
   return { providerId, modelId };
 }
 
+/** Shown instead of a model list for a provider that does not declare the
+ *  `models` capability. Deliberately NOT an offline/unreachable message: such a
+ *  provider may be perfectly healthy, it simply does not publish a list, and
+ *  Cockpit never asks it (the route would 404 and a 404 rendered as
+ *  reachable:false is a false claim about machine state). */
+export const NO_MODEL_LIST_NOTE = "Does not publish a model list";
+
 /** Builds one picker group per reachable local provider that has >=1 model,
  *  from GET /api/local/providers + per-provider GET /api/local/{id}/models
  *  responses. Ids are namespaced "local:<providerId>:<modelId>" so they can
  *  never collide with Anthropic/OpenRouter ids or each other. Providers that
  *  are unreachable or have no models are simply omitted — the group list is
- *  expected to change shape as models load/unload. */
+ *  expected to change shape as models load/unload.
+ *
+ *  A provider that does not declare the `models` capability is NOT omitted and
+ *  NOT reported as offline: it gets a group with an empty model list and
+ *  NO_MODEL_LIST_NOTE, so the user can see the backend exists and understand
+ *  why there is nothing to pick. */
 export function buildLocalGroups(providers, modelsByProviderId) {
   if (!Array.isArray(providers)) return [];
   const groups = [];
   for (const provider of providers) {
     if (!provider || typeof provider.id !== "string") continue;
+    if (!offersModels(provider)) {
+      groups.push({
+        label: provider.label || provider.id,
+        provider: "local",
+        models: [],
+        note: NO_MODEL_LIST_NOTE,
+      });
+      continue;
+    }
     const resp = modelsByProviderId?.[provider.id];
     if (!resp || resp.reachable === false || !Array.isArray(resp.models) || resp.models.length === 0) continue;
     const models = resp.models
@@ -252,16 +262,21 @@ export function useModelCatalog() {
 }
 
 /** Fetches /api/models on mount + every 10 min, builds the live Anthropic
- *  catalog, and — when local broker access is enabled (see
- *  LOCAL_ENABLED_KEY) — separately polls /api/local/providers +
- *  /api/local/{id}/models every 20s to append per-provider local groups
- *  after the OpenRouter group. The two fetches are independent so a local
- *  broker outage never affects the Anthropic/OpenRouter fallback behavior
- *  tests depend on. Keeps the fallback catalog on any error. */
+ *  catalog, and appends one group per local provider after the OpenRouter group.
+ *
+ *  The local half is NOT fetched here. It comes from useLocalModelsCatalog — the
+ *  single app-wide owner of GET /api/local/{id}/models — because this provider
+ *  used to poll every provider itself every 20s while App polled the SELECTED
+ *  provider every 10s, duplicating one of those reads. The shared store also
+ *  enforces the capability gate: a provider that does not declare `models` is
+ *  never asked, and renders with NO_MODEL_LIST_NOTE rather than as offline.
+ *
+ *  The two halves stay independent, so a local outage never affects the
+ *  Anthropic/OpenRouter fallback behavior tests depend on. */
 export function ModelCatalogProvider({ children }) {
   const [baseGroups, setBaseGroups] = useState(FALLBACK_MODEL_GROUPS);
   const [source, setSource] = useState("fallback");
-  const [localGroups, setLocalGroups] = useState([]);
+  const { providers, byProvider } = useLocalModelsCatalog();
 
   useEffect(() => {
     let cancelled = false;
@@ -285,48 +300,9 @@ export function ModelCatalogProvider({ children }) {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    // Re-checked on every poll tick (not just mount) so toggling the local
-    // broker off from LocalBrokerView clears the groups without a remount.
-    async function load() {
-      if (!readLocalEnabled()) {
-        if (!cancelled) setLocalGroups([]);
-        return;
-      }
-      try {
-        const provRes = await fetch("/api/local/providers");
-        if (!provRes.ok) return;
-        const provData = await provRes.json();
-        const providers = Array.isArray(provData.providers) ? provData.providers : [];
-        if (providers.length === 0) {
-          if (!cancelled) setLocalGroups([]);
-          return;
-        }
-        const entries = await Promise.all(
-          providers.map(async (p) => {
-            try {
-              const res = await fetch(`/api/local/${encodeURIComponent(p.id)}/models`);
-              return [p.id, res.ok ? await res.json() : { reachable: false }];
-            } catch {
-              return [p.id, { reachable: false }];
-            }
-          })
-        );
-        if (cancelled) return;
-        const modelsByProviderId = Object.fromEntries(entries);
-        setLocalGroups(buildLocalGroups(providers, modelsByProviderId));
-      } catch {
-        /* keep whatever local groups we had — best-effort */
-      }
-    }
-    load();
-    const iv = setInterval(load, LOCAL_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(iv);
-    };
-  }, []);
+  // Local groups are derived, not fetched: the shared store already holds the
+  // registry and one cached response per provider it is allowed to ask.
+  const localGroups = providers ? buildLocalGroups(providers, byProvider) : [];
 
   const groups = localGroups.length > 0 ? [...baseGroups, ...localGroups] : baseGroups;
   const catalog = { groups, models: flatten(groups), source };

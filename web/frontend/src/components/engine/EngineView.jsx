@@ -39,6 +39,7 @@ import EngineRequests from "./EngineRequests.jsx";
 import EngineApi from "./EngineApi.jsx";
 import EngineLogs from "./EngineLogs.jsx";
 import { Btn, ENGINE_TABS, DEFAULT_ENGINE_TAB, Pill, safeGet, tint } from "./ui.jsx";
+import useLocalModels from "../../hooks/useLocalModels.js";
 
 /** 60s of Live sparkline at the 3s fast-poll cadence. */
 export const SPARK_POINTS = 20;
@@ -95,15 +96,18 @@ function useEngineData(providerId, capabilities, active, fastTab) {
       }
     };
 
+    // NOTE: /models is deliberately absent. It is owned by the shared
+    // useLocalModels store (App drives the single poller) because App needed the
+    // same read for the model-load busy marker — two owners meant two identical
+    // requests every 10s whenever Engine was open.
     const slow = async () => {
-      const [models, spill, traces, health] = await Promise.all([
-        ask("models", "/models"),
+      const [spill, traces, health] = await Promise.all([
         ask("spill", "/spill"),
         ask("traces", "/traces?limit=20"),
         ask("health", "/health"),
       ]);
       if (cancelled) return;
-      setData((prev) => ({ ...prev, models, spill, traces, health }));
+      setData((prev) => ({ ...prev, spill, traces, health }));
     };
 
     fast();
@@ -198,12 +202,18 @@ export default function EngineView({
     [provider]
   );
 
-  const { data, series } = useEngineData(
+  const { data: polled, series } = useEngineData(
     provider?.id,
     provider?.capabilities,
     active && localEnabled,
     current === "live"
   );
+
+  // The models list comes from the shared store, not from this view's poll.
+  // App drives the only poller; Engine just subscribes, and the busy marker is
+  // app-wide so a load started in the TopBar picker shows its spinner here too.
+  const { models: sharedModels, busyModelId, writeModel } = useLocalModels();
+  const data = useMemo(() => ({ ...polled, models: sharedModels }), [polled, sharedModels]);
 
   // Serving state. health is authoritative when offered; otherwise fall back to
   // whether the models list or the queue snapshot actually came back.
@@ -239,6 +249,8 @@ export default function EngineView({
     onToast,
     onNavigate,
     localEnabled,
+    busyModelId,
+    onWriteModel: writeModel,
   };
 
   return (

@@ -12,6 +12,18 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import "@testing-library/jest-dom";
 
 import EngineView from "../components/engine/EngineView.jsx";
+import { useLocalModelsPoller, __resetLocalModelsStore } from "../hooks/useLocalModels.js";
+
+/**
+ * EngineView no longer polls /models — the shared useLocalModels store does, and
+ * App drives its single poller. Tests that need a models LIST therefore have to
+ * supply the shell's half of that contract, which is exactly what this harness
+ * is: App, reduced to the one hook it owns.
+ */
+function WithShell(props) {
+  useLocalModelsPoller({ enabled: true, provider: props.provider, watching: true });
+  return <EngineView {...props} />;
+}
 
 const PROVIDER = {
   id: "lmstudio-local",
@@ -69,11 +81,13 @@ const settle = () => act(async () => {});
 
 describe("EngineView frame", () => {
   beforeEach(() => {
+    __resetLocalModelsStore();
     globalThis.fetch = mockFetch();
   });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+    __resetLocalModelsStore();
   });
 
   it("renders the header, the serving pill and all five tabs", async () => {
@@ -171,7 +185,11 @@ describe("EngineView frame", () => {
     render(<EngineView provider={VLLM} onNavigate={vi.fn()} />);
     await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
     const called = paths(globalThis.fetch);
-    expect(called.some((u) => u.includes("/models"))).toBe(true);
+    // /models is NOT here on purpose: it is owned by the shared useLocalModels
+    // store (App drives the single poller) because App needs the same read for
+    // the model-load busy marker. Engine asking as well was a duplicate request
+    // every 10s. See useLocalModels.test.jsx for the dedup guard.
+    expect(called.some((u) => u.includes("/models"))).toBe(false);
     expect(called.some((u) => u.includes("/metrics"))).toBe(true);
     expect(called.some((u) => u.includes("/queue"))).toBe(false);
     expect(called.some((u) => u.includes("/spill"))).toBe(false);
@@ -235,7 +253,7 @@ describe("EngineView frame", () => {
   });
 
   it("confirm-gates Restart before touching the engine", async () => {
-    render(<EngineView provider={VLLM} onNavigate={vi.fn()} />);
+    render(<WithShell provider={VLLM} onNavigate={vi.fn()} />);
     await waitFor(() => expect(screen.getByTestId("engine-restart")).toBeEnabled());
     const before = globalThis.fetch.mock.calls.length;
 

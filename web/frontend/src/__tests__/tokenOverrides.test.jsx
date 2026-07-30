@@ -248,7 +248,7 @@ describe("ThemeProvider token override API", () => {
     const { result } = renderTheme();
     act(() => result.current.setTokenOverride("--cc-surface", "#001122"));
     settle();
-    act(() => result.current.clearTokenOverride("--cc-surface"));
+    act(() => { result.current.clearTokenOverride("--cc-surface"); });
     expect(result.current.tokenOverrides).toEqual({});
     expect(styleOf("--cc-surface")).toBe(theme.surface);
     expect(localStorage.getItem("cockpit-token-overrides")).toBeNull();
@@ -262,7 +262,7 @@ describe("ThemeProvider token override API", () => {
     });
     settle();
     expect(result.current.overrideCount).toBe(2);
-    act(() => result.current.resetTokenOverrides());
+    act(() => { result.current.resetTokenOverrides(); });
     expect(result.current.overrideCount).toBe(0);
     expect(styleOf("--cc-bg")).toBe(theme.bg);
     expect(styleOf("--cc-fg")).toBe(theme.fg);
@@ -463,7 +463,7 @@ describe("setTokenOverride coalescing", () => {
     const { result } = renderTheme();
     const writes = {
       "--cc-bg": "#111111", "--cc-fg": "#222222", "--cc-surface": "#333333",
-      "--cc-accent": "#444444", "--cc-kw": "#555555", "--cc-num": "#666666",
+      "--cc-accent": "#444444", "--cc-type": "#555555", "--cc-num": "#666666",
     };
     for (const [k, v] of Object.entries(writes)) {
       act(() => result.current.setTokenOverride(k, v));
@@ -492,7 +492,7 @@ describe("setTokenOverride coalescing", () => {
   it("clearTokenOverride cancels a pending commit for that token", () => {
     const { result } = renderTheme();
     act(() => result.current.setTokenOverride("--cc-bg", "#f0f0f0"));
-    act(() => result.current.clearTokenOverride("--cc-bg"));
+    act(() => { result.current.clearTokenOverride("--cc-bg"); });
     settle();
     expect(result.current.tokenOverrides).toEqual({});
     expect(styleOf("--cc-bg")).toBe(theme.bg);
@@ -611,5 +611,164 @@ describe("useThemeSafe", () => {
       expect(typeof ctx[fn]).toBe("function");
       expect(() => ctx[fn]("x", "y")).not.toThrow();
     }
+  });
+});
+
+// ── Persisting a clear (the "remedy that un-did itself" bug) ────────────────
+
+/**
+ * clearTokenOverride used to write React state + the localStorage mirror ONLY.
+ * ThemeProvider's mount-time /api/settings read treats a present
+ * appearance.token_overrides as authoritative, so the cleared override came
+ * BACK on the next launch and the accent picker was silently dead again.
+ * These pin the server write, the whole-map contract, and the visible failure.
+ */
+describe("clearTokenOverride / resetTokenOverrides persistence", () => {
+  /** Fetch mock that answers GET with `serverOverrides` and records PUT bodies. */
+  function mockSettings({ serverOverrides = {}, putOk = true, putError } = {}) {
+    const puts = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (init?.method === "PUT") {
+        puts.push(JSON.parse(init.body));
+        return putOk
+          ? { ok: true, json: async () => ({ settings: {} }) }
+          : { ok: false, json: async () => ({ error: putError || "nope" }) };
+      }
+      return {
+        ok: true,
+        json: async () => ({ settings: { appearance: { token_overrides: serverOverrides } } }),
+      };
+    });
+    return puts;
+  }
+
+  const seeded = {
+    "--cc-accent": "#ff0000",
+    "--cc-bg": "#111111",
+    "--cc-num": "#222222",
+  };
+
+  it("PUTs the WHOLE remaining map, keeping untouched siblings", async () => {
+    const puts = mockSettings();
+    const { result } = renderTheme();
+    act(() => result.current.adoptServerTheme({ tokenOverrides: seeded }));
+
+    let outcome;
+    await act(async () => { outcome = await result.current.clearTokenOverride("--cc-accent"); });
+
+    expect(outcome).toEqual({ ok: true });
+    const body = puts[puts.length - 1];
+    // Siblings MUST survive: this key is REPLACE-not-merge on the backend, so a
+    // narrow patch would destroy every override the user did not touch.
+    expect(body).toEqual({
+      appearance: { token_overrides: { "--cc-bg": "#111111", "--cc-num": "#222222" } },
+    });
+  });
+
+  it("PUTs an empty map for resetTokenOverrides — 'clear them all', not 'leave alone'", async () => {
+    const puts = mockSettings();
+    const { result } = renderTheme();
+    act(() => result.current.adoptServerTheme({ tokenOverrides: seeded }));
+
+    await act(async () => { await result.current.resetTokenOverrides(); });
+
+    expect(puts[puts.length - 1]).toEqual({ appearance: { token_overrides: {} } });
+  });
+
+  it("does not PUT for a token that was never overridden", async () => {
+    const puts = mockSettings();
+    const { result } = renderTheme();
+    let outcome;
+    await act(async () => { outcome = await result.current.clearTokenOverride("--cc-bg"); });
+    expect(outcome).toEqual({ ok: true, changed: false });
+    expect(puts).toHaveLength(0);
+  });
+
+  it("reports a non-ok PUT instead of claiming success", async () => {
+    mockSettings({ putOk: false, putError: "settings.json is read-only" });
+    const { result } = renderTheme();
+    act(() => result.current.adoptServerTheme({ tokenOverrides: seeded }));
+
+    let outcome;
+    await act(async () => { outcome = await result.current.clearTokenOverride("--cc-accent"); });
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toBe("settings.json is read-only");
+    // The local clear still stands, so the picker is usable in THIS window.
+    expect(result.current.tokenOverrides["--cc-accent"]).toBeUndefined();
+  });
+
+  it("reports a rejected PUT instead of claiming success", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (init?.method === "PUT") throw new Error("offline");
+      return { ok: true, json: async () => ({ settings: { appearance: {} } }) };
+    });
+    const { result } = renderTheme();
+    act(() => result.current.adoptServerTheme({ tokenOverrides: seeded }));
+
+    let outcome;
+    await act(async () => { outcome = await result.current.clearTokenOverride("--cc-accent"); });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/could not reach/i);
+  });
+
+  /** Collects cockpit:settings-changed details for the duration of a test. */
+  function captureSettingsChanged() {
+    const events = [];
+    const onEvent = (e) => events.push(e.detail);
+    window.addEventListener("cockpit:settings-changed", onEvent);
+    return {
+      events,
+      stop: () => window.removeEventListener("cockpit:settings-changed", onEvent),
+    };
+  }
+
+  it("announces cockpit:settings-changed after a successful write", async () => {
+    const spy = captureSettingsChanged();
+    try {
+      mockSettings();
+      const { result } = renderTheme();
+      act(() => result.current.adoptServerTheme({ tokenOverrides: seeded }));
+      await act(async () => { await result.current.clearTokenOverride("--cc-accent"); });
+      expect(spy.events).toEqual([{ section: "appearance" }]);
+    } finally {
+      spy.stop();
+    }
+  });
+
+  it("stays silent about a write that failed — there is nothing to refetch", async () => {
+    const spy = captureSettingsChanged();
+    try {
+      mockSettings({ putOk: false });
+      const { result } = renderTheme();
+      act(() => result.current.adoptServerTheme({ tokenOverrides: seeded }));
+      await act(async () => { await result.current.clearTokenOverride("--cc-accent"); });
+      expect(spy.events).toHaveLength(0);
+    } finally {
+      spy.stop();
+    }
+  });
+
+  it("REGRESSION: a cleared override stays gone across a fresh provider mount", async () => {
+    // First window: the server still has the override; the user clears it.
+    const puts = mockSettings({ serverOverrides: seeded });
+    const first = renderTheme();
+    await waitFor(() => expect(first.result.current.tokenOverrides).toEqual(seeded));
+    await act(async () => { await first.result.current.clearTokenOverride("--cc-accent"); });
+    expect(first.result.current.tokenOverrides["--cc-accent"]).toBeUndefined();
+    first.unmount();
+
+    // The server now reflects the clear — that is the whole point of the PUT.
+    const persisted = puts[puts.length - 1].appearance.token_overrides;
+    expect(persisted["--cc-accent"]).toBeUndefined();
+
+    // Restart: a brand new provider adopting the server's CURRENT map. Before
+    // the fix this re-adopted --cc-accent and the picker went silently dead.
+    vi.restoreAllMocks();
+    mockSettings({ serverOverrides: persisted });
+    const second = renderTheme();
+    await waitFor(() => expect(second.result.current.tokenOverrides).toEqual(persisted));
+    expect(second.result.current.tokenOverrides["--cc-accent"]).toBeUndefined();
+    expect(styleOf("--cc-accent")).toBe(theme.accent);
   });
 });

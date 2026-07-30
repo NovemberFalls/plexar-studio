@@ -11,7 +11,7 @@ export const THEMES = {
     border: "rgba(255,255,255,.08)", line: "rgba(255,255,255,.06)",
     fg: "#d7d6d3", dim: "#9a9a97", muted: "#666664",
     accent: "#4ea1e8",
-    kw: "#cc7832", fn: "#ffc66d", type: "#4ec9b0", ok: "#7fb86a", macro: "#c497d6", num: "#6897bb",
+    fn: "#ffc66d", type: "#4ec9b0", ok: "#7fb86a", macro: "#c497d6", num: "#6897bb",
     working: "#4ea1e8", thinking: "#7cc7ff", waiting: "#e0b060", idle: "#5bbf9f", error: "#e0698a",
   },
   "cockpit-blue": {
@@ -20,7 +20,7 @@ export const THEMES = {
     border: "rgba(255,255,255,.08)", line: "rgba(255,255,255,.06)",
     fg: "#d6dae1", dim: "#9aa4af", muted: "#626d78",
     accent: "#4ea1e8",
-    kw: "#4ea1e8", fn: "#d8a75f", type: "#45c4b0", ok: "#86c26b", macro: "#b98ee0", num: "#6897bb",
+    fn: "#d8a75f", type: "#45c4b0", ok: "#86c26b", macro: "#b98ee0", num: "#6897bb",
     working: "#4ea1e8", thinking: "#7cc7ff", waiting: "#d8a75f", idle: "#45c4b0", error: "#e5698a",
   },
 };
@@ -35,7 +35,7 @@ export const OVERRIDABLE_TOKENS = [
   "--cc-border", "--cc-line", "--cc-accent",
   "--cc-fg", "--cc-dim", "--cc-muted", "--cc-fn",
   "--cc-working", "--cc-thinking", "--cc-waiting", "--cc-idle", "--cc-error", "--cc-ok",
-  "--cc-kw", "--cc-type", "--cc-macro", "--cc-num",
+  "--cc-type", "--cc-macro", "--cc-num",
 ];
 
 /** UI grouping for the tokens settings page. Membership follows the design spec. */
@@ -62,7 +62,7 @@ export const TOKEN_GROUPS = [
     id: "syntax",
     label: "Syntax",
     note: "Code coloring inside terminal panes and code previews.",
-    tokens: ["--cc-kw", "--cc-type", "--cc-macro", "--cc-num"],
+    tokens: ["--cc-type", "--cc-macro", "--cc-num"],
   },
 ];
 
@@ -203,7 +203,6 @@ export function applyThemeToDOM(theme, options = {}) {
   s.setProperty("--cc-fg", theme.fg);
   s.setProperty("--cc-dim", theme.dim);
   s.setProperty("--cc-muted", theme.muted);
-  s.setProperty("--cc-kw", theme.kw);
   s.setProperty("--cc-fn", theme.fn);
   s.setProperty("--cc-type", theme.type);
   s.setProperty("--cc-ok", theme.ok);

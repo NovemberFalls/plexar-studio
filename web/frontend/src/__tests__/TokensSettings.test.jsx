@@ -29,7 +29,7 @@ const THEME = {
   bg: "#1a1a1a", bg2: "#151515", surface: "#212121", elev: "#262626", term: "#181818",
   border: "rgba(255,255,255,.08)", line: "rgba(255,255,255,.06)",
   fg: "#d7d6d3", dim: "#9a9a97", muted: "#666664", accent: "#4ea1e8",
-  kw: "#cc7832", fn: "#ffc66d", type: "#4ec9b0", ok: "#7fb86a", macro: "#c497d6", num: "#6897bb",
+  fn: "#ffc66d", type: "#4ec9b0", ok: "#7fb86a", macro: "#c497d6", num: "#6897bb",
   working: "#4ea1e8", thinking: "#7cc7ff", waiting: "#e0b060", idle: "#5bbf9f", error: "#e0698a",
 };
 
@@ -351,6 +351,20 @@ describe("TokensSettings", () => {
     expect(screen.getByTestId("swatch---cc-bg")).toHaveAttribute("data-alpha", "false");
   });
 
+  it("tells the user an --cc-accent override supersedes the rail's accent picker", () => {
+    setup({ theme: { tokenOverrides: { "--cc-accent": "#ff0000" } } });
+    fireEvent.click(screen.getByTestId("token-card---cc-accent"));
+    const note = screen.getByTestId("accent-supersedes-picker");
+    expect(note).toHaveAttribute("role", "note");
+    expect(note).toHaveTextContent(/supersedes the accent\s+picker/i);
+  });
+
+  it("omits the supersession note while --cc-accent is not overridden", () => {
+    setup();
+    fireEvent.click(screen.getByTestId("token-card---cc-accent"));
+    expect(screen.queryByTestId("accent-supersedes-picker")).toBeNull();
+  });
+
   it("the editor says the picker cannot express a translucent value", () => {
     setup();
     fireEvent.click(screen.getByTestId("token-card---cc-border"));
@@ -361,10 +375,12 @@ describe("TokensSettings", () => {
   it("the rail shows verified surfaces for a selected token, never an invented count", () => {
     setup();
     expect(screen.getByTestId("where-used")).toHaveTextContent(/Pick a token card/i);
-    fireEvent.click(screen.getByTestId("token-card---cc-kw"));
-    // --cc-kw genuinely has no component consumer — say so, do not invent one.
-    expect(screen.getByTestId("where-used")).toHaveTextContent(/not read by any component/i);
-    fireEvent.click(screen.getByTestId("token-card---cc-kw")); // deselect
+    // --cc-kw used to be the zero-consumer edge case; it was removed outright,
+    // so there is no longer a card for it at all.
+    expect(screen.queryByTestId("token-card---cc-kw")).toBeNull();
+    fireEvent.click(screen.getByTestId("token-card---cc-type"));
+    expect(screen.getByTestId("where-used")).toHaveTextContent(/component modules/i);
+    fireEvent.click(screen.getByTestId("token-card---cc-type")); // deselect
     fireEvent.click(screen.getByTestId("token-card---cc-surface"));
     expect(screen.getByTestId("where-used")).toHaveTextContent(/component modules/i);
     expect(screen.getByTestId("where-used")).toHaveTextContent("Inspector");

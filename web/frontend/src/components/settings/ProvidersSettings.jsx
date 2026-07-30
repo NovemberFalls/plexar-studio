@@ -79,7 +79,15 @@ const FIELD_GRID = {
 // The full capability vocabulary the broker contract defines. A provider that
 // does not declare one renders its chip dimmed rather than hiding it — the
 // absence is the information.
-const ALL_CAPABILITIES = ["models", "health", "queue", "metrics", "spill", "traces"];
+// The chip vocabulary MUST cover every capability the server actually emits, or a
+// provider advertising one gets no chip for it and the row reads as "not supported"
+// when it is. server.py emits model-discovery (vllm-local) and appends
+// model-control (lmstudio-local when the `lms` CLI resolves, vllm-local always) —
+// both were missing here, which hid the very capability the vLLM models-folder
+// section is gated on.
+const ALL_CAPABILITIES = [
+  "models", "model-control", "model-discovery", "health", "queue", "metrics", "spill", "traces",
+];
 
 /** Cockpit's expected Claude CLI binary name — anything else earns a warning callout. */
 const EXPECTED_CLI = "claude";
@@ -524,6 +532,250 @@ function NotEnforcedNote({ name, what }) {
       {what} is saved, but Cockpit does not apply it yet — the running services still read
       this from their environment variables. It takes effect when engine lifecycle control
       lands.
+    </div>
+  );
+}
+
+/**
+ * VllmModelsFolderSection — the ONE frontend caller of
+ * GET|PUT /api/local/{provider_id}/models-dir.
+ *
+ * Re-homed from the deleted LocalBrokerView's `ModelsFolderCard`. It is
+ * deliberately NOT a draft field:
+ *
+ *   - The route applies and persists server-side the moment it returns
+ *     (~/.claude-cockpit/vllm-models-dir.json, re-read at startup to build the
+ *     managed container's docker -v bind mount). Routing it through setField
+ *     would write a settings.json key nothing reads, and the container would
+ *     never be configured — that is the exact regression this section closes.
+ *   - So it owns its own value in local state and its own Save button, and the
+ *     card says out loud that it applies immediately rather than on the shell's
+ *     "Save changes". That asymmetry is real; hiding it is what makes it a trap.
+ *
+ * Capability-gated on `model-discovery`: LM Studio's catalog is already complete
+ * via /api/v0/models, so only vLLM-local declares it and only vLLM-local gets
+ * this section. Absent capability → the section does not render at all.
+ *
+ * Two honesty rules carried over verbatim in spirit:
+ *   - a 400 renders the SERVER's message, not a generic failure — the server is
+ *     the only thing that knows what is wrong with the path
+ *   - a successful save does NOT mean the running container picked it up
+ */
+function VllmModelsFolderSection({ provider }) {
+  const providerId = provider?.id || null;
+  const supported =
+    Boolean(providerId) &&
+    Array.isArray(provider?.capabilities) &&
+    provider.capabilities.includes("model-discovery");
+
+  // Server truth: {path, mount_path, scan_path, exists, writable_config, current_model}
+  const [current, setCurrent] = useState(null); // null = not read yet
+  const [input, setInput] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [modelsRefreshed, setModelsRefreshed] = useState(false);
+
+  useEffect(() => {
+    if (!supported) return undefined;
+    let cancelled = false;
+    (async () => {
+      const data = await safeGet(`/api/local/${encodeURIComponent(providerId)}/models-dir`);
+      if (cancelled || !data) return;
+      setCurrent(data);
+      setInput(data.path || "");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supported, providerId]);
+
+  const save = async () => {
+    if (saving) return;
+    const path = (input || "").trim();
+    setError(null);
+    setSaved(false);
+    setModelsRefreshed(false);
+    if (!path) {
+      setError("Enter a folder path first.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models-dir`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // Verbatim server text. It names what is wrong with the path (not
+        // absolute / not a directory / too long) and that IS the whole value.
+        setError(data?.error || "The server rejected this path but gave no reason.");
+        return;
+      }
+      setCurrent(data);
+      setInput(data.path || path);
+      setSaved(true);
+      // Changing the folder changes what is discoverable on disk, so re-read the
+      // list once. A one-shot GET on the same route the page already uses — NOT
+      // a second poller; useLocalModels owns the app-wide interval.
+      const models = await safeGet(`/api/local/${encodeURIComponent(providerId)}/models`);
+      if (models) setModelsRefreshed(true);
+    } catch (err) {
+      setError(`Could not reach Cockpit's server: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!supported) return null;
+
+  const hasPath = Boolean(current?.path);
+  const mountPath = current?.mount_path || null;
+  const scanPath = current?.scan_path || null;
+  const currentModel = current?.current_model || null;
+
+  return (
+    <div
+      data-testid="vllm-models-dir"
+      style={{ borderTop: "1px solid var(--cc-line)", marginTop: 10, paddingTop: 10 }}
+    >
+      <SectionTitle note="applies immediately — not on Save changes">Models Folder</SectionTitle>
+
+      <FieldRow
+        label="Host models folder"
+        hint="Folder CONTAINING your model subfolders"
+        action={
+          <ActionButton
+            label={saving ? "Saving…" : "Apply now"}
+            onClick={save}
+            disabled={saving}
+            accent
+            testId="vllm-models-dir-save"
+            title="Writes straight to Cockpit's server and persists — this control does not use the page's Save changes button"
+          />
+        }
+      >
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value);
+            setError(null);
+            setSaved(false);
+          }}
+          placeholder="C:\models"
+          spellCheck={false}
+          autoComplete="off"
+          aria-label="Host models folder"
+          data-testid="vllm-models-dir-input"
+          className="w-full rounded"
+          style={{
+            height: 26,
+            padding: "0 8px",
+            fontSize: 11,
+            fontFamily: "var(--font-mono, monospace)",
+            borderRadius: 7,
+            background: "var(--cc-elev)",
+            border: "1px solid var(--cc-border)",
+            color: "var(--cc-fg)",
+            outline: "none",
+            opacity: saving ? 0.6 : 1,
+          }}
+        />
+      </FieldRow>
+
+      {/* Server truth, read-only. Every field renders only when the server sent
+          it — a missing mount_path shows nothing rather than an invented one. */}
+      <div
+        data-testid="vllm-models-dir-state"
+        style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-dim)", padding: "4px 0 2px" }}
+      >
+        <div>
+          <span style={{ color: "var(--cc-muted)" }}>configured path: </span>
+          <span data-testid="vllm-models-dir-path">{hasPath ? current.path : "not set"}</span>
+          {hasPath && (
+            <span
+              data-testid="vllm-models-dir-exists"
+              style={{
+                marginLeft: 6,
+                fontWeight: 700,
+                color: current.exists ? "var(--cc-idle)" : "var(--cc-error)",
+              }}
+            >
+              {current.exists ? "exists" : "not found"}
+            </span>
+          )}
+        </div>
+        {mountPath && (
+          <div data-testid="vllm-models-dir-mount">
+            <span style={{ color: "var(--cc-muted)" }}>mounted in container at: </span>
+            {mountPath}
+          </div>
+        )}
+        {scanPath && (
+          <div data-testid="vllm-models-dir-scan">
+            <span style={{ color: "var(--cc-muted)" }}>scanned by Cockpit at: </span>
+            {scanPath}
+          </div>
+        )}
+        {currentModel && (
+          <div data-testid="vllm-models-dir-current-model">
+            <span style={{ color: "var(--cc-muted)" }}>current model: </span>
+            {currentModel}
+          </div>
+        )}
+      </div>
+
+      <Callout token="var(--cc-accent)" icon={FolderOpen} testId="vllm-models-dir-immediate">
+        This path is the one control on this page that does <strong>not</strong> wait for
+        <em> Save changes</em>. Apply now writes it to Cockpit&apos;s server and saves it to disk
+        straight away, and it stays set across restarts. On Windows, models usually live inside
+        WSL, so a path like <code>/home/&lt;you&gt;/models</code> is normal.
+      </Callout>
+
+      <Callout testId="vllm-models-dir-remount">
+        A saved path does <strong>not</strong> reconfigure a vLLM container that is already
+        running. The folder is mounted when the container starts, so if managed vLLM is serving
+        right now, restart it before the new folder&apos;s models can be loaded.
+      </Callout>
+
+      {error && (
+        <div
+          role="alert"
+          data-testid="vllm-models-dir-error"
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "flex-start",
+            marginTop: 10,
+            padding: "8px 10px",
+            borderRadius: 9,
+            fontSize: 11,
+            lineHeight: 1.5,
+            color: "var(--cc-error)",
+            background: tint("var(--cc-error)", 8),
+            border: `1px solid ${tint("var(--cc-error)", 35)}`,
+          }}
+        >
+          <TriangleAlert size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {saved && !error && (
+        <div
+          role="note"
+          data-testid="vllm-models-dir-saved"
+          style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-idle)", paddingTop: 6 }}
+        >
+          Saved and persisted.
+          {modelsRefreshed
+            ? " Model list re-read from the new folder."
+            : " Cockpit could not re-read the model list just now — reopen Engine ▸ Models to retry."}
+        </div>
+      )}
     </div>
   );
 }
@@ -1155,6 +1407,9 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
         />
         <NotEnforcedNote name="vllm" what="GPU memory utilisation" />
         <CapabilityChips capabilities={vllm?.capabilities} />
+        {/* Live, server-owned config — see the component's own header for why it
+            deliberately bypasses the draft store. */}
+        <VllmModelsFolderSection provider={vllm} />
       </div>
 
       {/* Ollama + OpenRouter — compact half-width pair */}

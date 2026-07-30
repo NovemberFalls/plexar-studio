@@ -10,25 +10,30 @@
  *
  * Data source (single call):
  *   GET /api/usage/report?range=24h|7d|30d|all
- *     → { range, generated_at, kpis, by_day[], by_model[], sessions[] }
+ *     → { range, generated_at, kpis, by_day[], by_model[], by_tool[],
+ *         sessions[], tool_events_since, previous }
  *   `by_day` is gap-filled server-side: every day is present, zeros where idle.
  *
- * HONESTY CONTRACT — any field may be null, meaning "not sourceable from the
- * data" (tool_calls routinely is). Null renders as "not reported" in a KPI and
- * an em dash in a table cell; it is NEVER rendered as 0, because a fabricated
- * zero is a lie about the user's spend. See reports/format.js.
+ * HONESTY CONTRACT — most fields may be null, meaning "not sourceable from the
+ * data". Null renders as "not reported" in a KPI and an em dash in a table cell;
+ * it is NEVER rendered as 0, because a fabricated zero is a lie about the user's
+ * spend. See reports/format.js.
+ *
+ * TOOL CALLS are the exception now: `kpis.tool_calls`, `sessions[].tool_calls`
+ * and `by_tool[]` are real, so 0 means zero and prints as 0. What remains
+ * uncertain is COVERAGE — `tool_events_since` is the earliest tool event in the
+ * whole store and is NOT range-scoped, so a range reaching back before it counts
+ * fewer calls than actually happened. toolCoverage() decides that boundary and
+ * this view renders one note for it, on Overview and on the Tools tab.
+ *
+ * DELTAS come from `previous`. When `previous.available` is false — `range=all`,
+ * or a user with no prior window — no card renders a delta at all, because an
+ * always-neutral 0% looks like a finding. Tone is per metric: see DELTA_RULES.
  *
  * What is deliberately NOT built, and why (each tab says this on screen):
- *   - Deltas on the KPI cards. The endpoint takes one `range` and offers no
- *     prior-period or offset parameter, so there is no comparable previous
- *     window to fetch. Slicing calendar days out of a longer range would not
- *     line up with an hour-based window like 24h. An always-neutral delta looks
- *     measured, so we render none and say why.
- *   - Tools / Traces / Local engine tabs. `tool_calls` is a per-session count
- *     with no per-tool breakdown anywhere in the contract, there is no
- *     per-session trace endpoint, and live engine state belongs to Engine by
- *     design. Each renders an honest panel naming what will live there and
- *     where that information is today.
+ *   - Traces / Local engine tabs. There is no per-session trace endpoint, and
+ *     live engine state belongs to Engine by design. Each renders an honest
+ *     panel naming what will live there and where that information is today.
  *
  * Props:
  *   onOpenTrace(terminalId)   optional; a session row click hands the terminal
@@ -46,19 +51,23 @@ import KpiRow from "./KpiRow.jsx";
 import TokensByDayChart from "./TokensByDayChart.jsx";
 import SpendByModel from "./SpendByModel.jsx";
 import SessionsTable from "./SessionsTable.jsx";
+import ToolsBreakdown from "./ToolsBreakdown.jsx";
 import {
   DASH,
   DEFAULT_RANGE,
   RANGES,
   REPORTS_TABS,
   applyFilters,
+  buildDeltas,
   buildSessionsCsv,
   csvFilename,
   filterOptions,
   fmtCost,
   fmtCount,
   fmtPct,
-  isMissing,
+  fmtSinceDate,
+  toolCoverage,
+  tokensUnreported,
 } from "./format.js";
 
 /** Shared style for the page's explanatory notes. */
@@ -76,12 +85,6 @@ const CARD = {
 
 /** Why a tab is not built, and where that information lives today. */
 const NOT_BUILT = {
-  tools: {
-    will:
-      "A per-tool breakdown — invocation counts, failure rate, and token cost per tool across the range.",
-    today:
-      "the Workflow panel in each session's pane header, which reads tool events live out of that session's JSONL. Nothing is stored: the usage database keeps assistant turns that carry a token-usage block and persists no tool events at all, so tool_calls is always empty and there is nothing yet to break down.",
-  },
   traces: {
     will:
       "One row per prompt, expandable into the runs it fanned out into, with tokens and wall time per node.",
@@ -95,6 +98,31 @@ const NOT_BUILT = {
       "Engine ▸ Live, which is the live view by design. Reports owns the past, so this tab waits on a stored history of engine metrics rather than mirroring a live panel.",
   },
 };
+
+/**
+ * The one thing Reports still has to say about tool calls, or null when the
+ * range is fully covered and no caveat is warranted.
+ *
+ * "none" and "partial" are genuinely different claims and must not share
+ * wording: "none" means nothing is stored anywhere (missing data), "partial"
+ * means the figure shown is a real but incomplete count (a floor).
+ */
+function coverageNoteText(coverage) {
+  if (coverage?.state === "none") {
+    return (
+      "Tool calls have not been recorded yet — no tool events are stored for any session. " +
+      "That is missing data, not a measurement of zero tool calls."
+    );
+  }
+  if (coverage?.state === "partial") {
+    return (
+      `Tool calls have only been recorded since ${fmtSinceDate(coverage.since)}, and this range ` +
+      "starts before that. Calls made in the earlier turns of this range were never stored, so " +
+      "the figure is a floor rather than a total."
+    );
+  }
+  return null;
+}
 
 // ── header primitives ─────────────────────────────────────
 
@@ -454,9 +482,10 @@ function FilterScopeNote() {
       }}
     >
       A filter is active. The sessions table, the spend bars, and the CSV export honour it. The KPI
-      row and the per-day chart still cover the whole range — the report has no per-project or
-      per-model daily breakdown to filter them by, and re-deriving those figures from session
-      totals would produce numbers the server never reported.
+      row, the per-day chart and the per-tool breakdown still cover the whole range — the report has
+      no per-project or per-model breakdown of daily totals or of <code>by_tool</code> to filter them
+      by, and re-deriving those figures from session totals would produce numbers the server never
+      reported.
     </div>
   );
 }
@@ -534,7 +563,30 @@ export default function ReportsView({
     [data]
   );
   const byModel = useMemo(() => (Array.isArray(data?.by_model) ? data.by_model : []), [data]);
-  const byDay = Array.isArray(data?.by_day) ? data.by_day : [];
+  const byDay = useMemo(() => (Array.isArray(data?.by_day) ? data.by_day : []), [data]);
+  const byTool = useMemo(() => (Array.isArray(data?.by_tool) ? data.by_tool : []), [data]);
+
+  // The range the SERVER says it cut, not the button that was clicked — they
+  // differ for the frame between selecting a range and its report arriving, and
+  // the coverage boundary must be judged against the data in hand.
+  const reportRange = data?.range || range;
+
+  const coverage = useMemo(
+    () =>
+      toolCoverage({
+        range: reportRange,
+        generatedAt: data?.generated_at,
+        byDay,
+        toolEventsSince: data?.tool_events_since,
+      }),
+    [reportRange, data, byDay]
+  );
+  const coverageNote = coverageNoteText(coverage);
+
+  const deltas = useMemo(
+    () => buildDeltas(data?.kpis, data?.previous, reportRange),
+    [data, reportRange]
+  );
 
   const projects = useMemo(() => filterOptions(sessions, "project"), [sessions]);
   const models = useMemo(() => filterOptions(sessions, "model"), [sessions]);
@@ -573,7 +625,8 @@ export default function ReportsView({
   }, [filtered, range, data]);
 
   const isEmpty = !loading && !error && data && sessions.length === 0 && byModel.length === 0;
-  const dataTabs = tab === "overview" || tab === "sessions" || tab === "models";
+  const dataTabs =
+    tab === "overview" || tab === "sessions" || tab === "models" || tab === "tools";
 
   let body;
   if (loading) {
@@ -588,6 +641,15 @@ export default function ReportsView({
     body = <NotBuiltPanel tabId={tab} />;
   } else if (isEmpty) {
     body = <EmptyStatePanel range={range} />;
+  } else if (tab === "tools") {
+    // by_tool is range-wide, not per session, so the project/model pills cannot
+    // reach it — say so rather than letting an active pill imply it applied.
+    body = (
+      <>
+        {filtersActive && <FilterScopeNote />}
+        <ToolsBreakdown byTool={byTool} note={coverageNote} />
+      </>
+    );
   } else if (tab === "models") {
     body = (
       <>
@@ -611,19 +673,29 @@ export default function ReportsView({
   } else {
     body = (
       <>
-        <KpiRow kpis={data?.kpis} />
+        <KpiRow kpis={data?.kpis} deltas={deltas} />
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <div role="note" data-testid="delta-note" style={NOTE}>
-            No period-over-period change is shown: the usage report accepts a single range and
-            offers no comparable previous window to measure against, and a neutral zero would look
-            like a finding.
-          </div>
-          {isMissing(data?.kpis?.tool_calls) ? (
-            <div role="note" data-testid="tool-calls-note" style={NOTE}>
-              Tool calls read &ldquo;not recorded&rdquo; because Cockpit does not store them yet. It
-              records token usage per assistant turn; the individual tool calls inside those turns
-              are not saved anywhere it can count. You have almost certainly made many — this is a
-              gap in the recording, not a measurement of zero.
+          {data?.previous?.available === true ? null : (
+            <div role="note" data-testid="delta-note" style={NOTE}>
+              No period-over-period change is shown:{" "}
+              {reportRange === "all"
+                ? "the range covers all recorded history, so there is no earlier window to compare it against."
+                : "the report has no comparable previous window for this range yet — Cockpit needs history reaching back a further period before a change means anything."}{" "}
+              A neutral zero would look like a finding.
+            </div>
+          )}
+          {coverageNote ? (
+            <div role="note" data-testid="tool-coverage-note" style={NOTE}>
+              {coverageNote}
+            </div>
+          ) : null}
+          {tokensUnreported(data?.kpis, sessions) ? (
+            <div role="note" data-testid="tokens-unreported-note" style={NOTE}>
+              Turns were recorded in this range but the token totals came back as zero, so these
+              tokens were <strong>not reported</strong> rather than not used. A streaming client has
+              to send <code>stream_options.include_usage</code> for the usage block to arrive with
+              the response; without it Cockpit sees the turn, counts no tokens for it, and the cost
+              below is understated for the same reason.
             </div>
           ) : null}
         </div>

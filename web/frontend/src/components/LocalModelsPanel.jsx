@@ -135,6 +135,16 @@ export default function LocalModelsPanel({
                       opacity: busy ? 0.5 : 1,
                     }}
                     title={loaded ? "Unload this model" : "Load this model"}
+                    /* The visible text is just "Load"/"Unload", so a screen
+                       reader would otherwise hear no model name at all — in a
+                       list of eight rows that is an unusable control. The busy
+                       state is announced too, since the label becomes "…". */
+                    aria-label={
+                      busy
+                        ? `${loaded ? "Unloading" : "Loading"} ${m.id || "model"}`
+                        : `${loaded ? "Unload" : "Load"} ${m.id || "model"}`
+                    }
+                    aria-busy={busy || undefined}
                   >
                     {busy ? "…" : loaded ? "Unload" : "Load"}
                   </button>

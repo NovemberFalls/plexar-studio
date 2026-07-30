@@ -3,18 +3,20 @@
  *
  * REPORTING HONESTY (the rule this file exists to enforce):
  * every field in GET /api/usage/report may be `null`, meaning "not sourceable
- * from the data" — `tool_calls` in particular routinely is. A null must NEVER
- * render as 0. A fabricated zero is a lie about the user's spend, so the
- * formatters below return "not reported" (KPIs, where there is room to say it)
- * or an em dash (table/bar cells, where there is not) and never fall through to
- * a numeric default. This mirrors LocalMetricsPanel's existing treatment and
- * localReporting/PerModelAgent.jsx's fmtTokensReport/fmtCostReport.
+ * from the data". A null must NEVER render as 0. A fabricated zero is a lie
+ * about the user's spend, so the formatters below return "not reported" (KPIs,
+ * where there is room to say it) or an em dash (table/bar cells, where there is
+ * not) and never fall through to a numeric default. Reports is now the sole
+ * owner of this rule — the LocalMetricsPanel / PerModelAgent treatments it was
+ * originally mirrored from have both been deleted.
  *
- * Integer formatting is delegated to localReporting/format.js so Reports and
- * the Engine reporting panels render the same number the same way.
+ * `tool_calls` is NO LONGER one of those fields: the usage tracker now reads
+ * `message.content` alongside `message.usage`, so both `kpis.tool_calls` and
+ * `sessions[].tool_calls` are real integers and a 0 genuinely means zero. The
+ * honesty question moved to COVERAGE — tool events only started being stored
+ * recently, so a long range can span turns that predate the recording. That is
+ * what `tool_events_since` and `toolCoverage()` below are for.
  */
-
-import { fmtInt } from "../localReporting/format.js";
 
 export const NOT_REPORTED = "not reported";
 export const DASH = "—";
@@ -62,6 +64,21 @@ export function num(v) {
   return isMissing(v) ? null : Number(v);
 }
 
+/**
+ * Integer with thousands separators. Moved here verbatim from the deleted
+ * localReporting/format.js (the Routing & Reporting view it served is gone);
+ * `fmtCount` is its only caller, and the behavior — including the em-dash
+ * return for a non-finite input — is unchanged.
+ *
+ * NOT shared with engine/ui.jsx's same-named helper, which deliberately
+ * differs: that one renders `String(Math.round(n))` with no separators for
+ * tight live-telemetry stats. Two names, two jobs, no accidental unification.
+ */
+export function fmtInt(n) {
+  if (typeof n !== "number" || !isFinite(n)) return "—";
+  return n.toLocaleString();
+}
+
 /** Missing-safe integer with thousands separators. */
 export function fmtCount(n, missing = NOT_REPORTED) {
   return isMissing(n) ? missing : fmtInt(Number(n));
@@ -98,15 +115,206 @@ export function shareFraction(n) {
   return f;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 /** "Jul 30" — a short day label for the chart's x axis. */
 export function dayLabel(iso) {
   const s = typeof iso === "string" ? iso : "";
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
   if (!m) return s || DASH;
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const monthIdx = Number(m[2]) - 1;
   const month = MONTHS[monthIdx] || m[2];
   return `${month} ${Number(m[3])}`;
+}
+
+/** "Jul 29, 2026" — a dated label for prose, read straight off the ISO string. */
+export function fmtSinceDate(iso) {
+  const s = typeof iso === "string" ? iso : "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (!m) return s || DASH;
+  const month = MONTHS[Number(m[2]) - 1] || m[2];
+  return `${month} ${Number(m[3])}, ${m[1]}`;
+}
+
+// ── tool-call coverage ────────────────────────────────────
+
+/** Window length of each bounded range, in ms. `all` is deliberately absent. */
+const RANGE_MS = {
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+};
+
+/**
+ * When the selected range begins, in epoch ms, or null for "unbounded".
+ *
+ * Bounded ranges are measured back from the server's own `generated_at`, which
+ * is the clock the range was cut with — using the browser's clock here would
+ * drift the boundary. `all` has no length, so it falls back to the earliest day
+ * the server actually reported (`by_day` is gap-filled, so that IS the start of
+ * the data); with no days at all the range is unbounded and returns null.
+ */
+export function rangeStartMs(range, generatedAt, byDay) {
+  const span = RANGE_MS[range];
+  const now = Date.parse(typeof generatedAt === "string" ? generatedAt : "");
+  if (span && Number.isFinite(now)) return now - span;
+  let earliest = null;
+  for (const d of Array.isArray(byDay) ? byDay : []) {
+    const t = Date.parse(`${String(d?.day || "")}T00:00:00Z`);
+    if (Number.isFinite(t) && (earliest === null || t < earliest)) earliest = t;
+  }
+  return earliest;
+}
+
+/**
+ * How much of the selected range tool calls are actually recorded for.
+ *
+ * `tool_events_since` is the earliest tool event in the WHOLE store — it is not
+ * range-scoped — so the comparison is against where the selected range starts:
+ *
+ *   - "none"    no tool events stored anywhere. Different from zero tool calls.
+ *   - "partial" the range starts BEFORE recording began, so turns at the start
+ *               of the range contributed calls that were never stored. The
+ *               number shown is a floor.
+ *   - "full"    the range starts at or after recording began: complete coverage,
+ *               so no note is warranted and none is shown.
+ *
+ * An unbounded range (`all`, or an unparseable stamp) always resolves "partial"
+ * when any `since` exists — it reaches back past the first stored event by
+ * definition. Erring toward "partial" is the safe direction: the failure to
+ * avoid is presenting an undercount as a total.
+ */
+export function toolCoverage({ range, generatedAt, byDay, toolEventsSince } = {}) {
+  if (typeof toolEventsSince !== "string" || toolEventsSince.length === 0) {
+    return { state: "none", since: null };
+  }
+  const since = Date.parse(toolEventsSince);
+  if (!Number.isFinite(since)) return { state: "none", since: null };
+  const start = rangeStartMs(range, generatedAt, byDay);
+  if (start === null || since > start) return { state: "partial", since: toolEventsSince };
+  return { state: "full", since: toolEventsSince };
+}
+
+// ── token honesty ─────────────────────────────────────────
+
+/**
+ * True when work demonstrably happened but tokens came back as zero.
+ *
+ * This is the CONTRADICTORY state, and it is the only one worth a hint: a
+ * streaming client that omits `stream_options.include_usage` produces turns with
+ * no usage block, so Cockpit records the turn and counts zero tokens for it. A
+ * zero shown without that explanation reads as "a quiet range".
+ *
+ * Deliberately false when turns are zero too — that IS a quiet range, and a
+ * configuration warning there would be a false alarm, which is worse than
+ * silence. Also false when total_tokens is null: a null already renders as "not
+ * reported" and needs no second explanation.
+ */
+export function tokensUnreported(kpis, sessions) {
+  const tokens = num(kpis?.total_tokens);
+  if (tokens === null || tokens !== 0) return false;
+  const turns = num(kpis?.turns);
+  const rows = Array.isArray(sessions) ? sessions.length : 0;
+  return (turns !== null && turns > 0) || rows > 0;
+}
+
+// ── period-over-period deltas ─────────────────────────────
+
+/**
+ * Delta tone → theme token. `good` is an improvement, `cost` is a spend signal
+ * worth noticing, `flat` is neutral. Lives here rather than in KpiRow so the
+ * mapping is assertable without importing a component.
+ */
+export const DELTA_TOKEN = {
+  good: "var(--cc-ok)",
+  cost: "var(--cc-waiting)",
+  flat: "var(--cc-dim)",
+};
+
+/**
+ * Per-KPI comparison rules, keyed by KpiRow card id.
+ *
+ * `mode` decides the arithmetic: `count`/`cost` compare as a percentage of the
+ * previous value, `points` (rates) compare as a difference in percentage points
+ * — a rate's "percent change" is a confusing second derivative, and it also
+ * removes a division.
+ *
+ * `up`/`down` decide the TONE, and they are deliberately not all "up is green":
+ *   - total tokens, turns, tool calls: flat both ways. Doing more work is not a
+ *     result; colouring it green would congratulate the user for spending.
+ *   - cost: up warns (--cc-waiting), down is good. This is the one figure where
+ *     an increase is something to notice.
+ *   - cache hit rate: up is good, down warns — a cache miss is a token the user
+ *     pays full price for, so a falling hit rate is a spend signal.
+ *   - local share: up is good (it displaced API spend), down flat. A drop is
+ *     usually just a deliberate model choice, not a regression to flag.
+ */
+export const DELTA_RULES = {
+  "total-tokens": { key: "total_tokens", mode: "count", up: "flat", down: "flat" },
+  cost: { key: "cost", mode: "cost", up: "cost", down: "good" },
+  "cache-hit-rate": { key: "cache_hit_rate", mode: "points", up: "good", down: "cost" },
+  "local-share": { key: "local_share", mode: "points", up: "good", down: "flat" },
+  turns: { key: "turns", mode: "count", up: "flat", down: "flat" },
+  "tool-calls": { key: "tool_calls", mode: "count", up: "flat", down: "flat" },
+};
+
+/** A rate as percentage points, using the same fraction-or-percent reading as fmtPct. */
+function pctPoints(v) {
+  const n = num(v);
+  if (n === null) return null;
+  return n > 1 ? n : n * 100;
+}
+
+const SIGN = (n) => (n > 0 ? "+" : "-");
+
+/**
+ * Build the KpiRow `deltas` map from `previous`.
+ *
+ * Returns `{}` — meaning no card renders a delta — when `previous.available` is
+ * false. That covers `range=all` (nothing precedes everything) and a brand-new
+ * user with no prior window, and it is why the slot is driven by data rather
+ * than by a hardcoded note.
+ *
+ * A previous value of 0 never divides: the change is stated in absolute terms
+ * with the prior figure spelled out, because "+∞%" and "NaN%" are worse than
+ * verbose.
+ */
+export function buildDeltas(kpis, previous, range) {
+  if (!previous || previous.available !== true) return {};
+  const prev = previous.kpis && typeof previous.kpis === "object" ? previous.kpis : null;
+  if (!prev) return {};
+  const cur = kpis && typeof kpis === "object" ? kpis : {};
+  const label = `previous ${RANGES.find((r) => r.id === range)?.label || range || "period"}`;
+
+  const out = {};
+  for (const [id, rule] of Object.entries(DELTA_RULES)) {
+    const isPoints = rule.mode === "points";
+    const now = isPoints ? pctPoints(cur[rule.key]) : num(cur[rule.key]);
+    const was = isPoints ? pctPoints(prev[rule.key]) : num(prev[rule.key]);
+    if (now === null || was === null) continue; // nothing comparable: no delta
+
+    const diff = now - was;
+    if (diff === 0) {
+      out[id] = { tone: "flat", text: `no change vs ${label}` };
+      continue;
+    }
+    const tone = diff > 0 ? rule.up : rule.down;
+    const sign = SIGN(diff);
+    const mag = Math.abs(diff);
+
+    let text;
+    if (isPoints) {
+      text = `${sign}${mag.toFixed(1)} pts vs ${label}`;
+    } else if (was === 0) {
+      // No denominator. State the absolute move and name the prior zero.
+      const amount = rule.mode === "cost" ? fmtCost(mag, DASH) : fmtCount(mag, DASH);
+      text = `${sign}${amount} vs ${label} (was ${rule.mode === "cost" ? "$0.00" : "0"})`;
+    } else {
+      text = `${sign}${Math.abs((diff / was) * 100).toFixed(1)}% vs ${label}`;
+    }
+    out[id] = { tone, text };
+  }
+  return out;
 }
 
 /**

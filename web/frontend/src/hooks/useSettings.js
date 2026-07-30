@@ -150,32 +150,30 @@ export default function useSettings() {
     };
   }, []);
 
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/settings");
+      const data = await res.json().catch(() => ({}));
+      if (!mounted.current) return;
+      if (!res.ok) {
+        setError(data?.error || "Could not load settings");
+      } else {
+        setPath(data?.path ?? null);
+        setSettings(data?.settings ?? {});
+        setDraft(data?.settings ?? {});
+        setError(null);
+      }
+    } catch {
+      if (mounted.current) setError("Could not load settings");
+    } finally {
+      if (mounted.current) setLoading(false);
+    }
+  }, []);
+
   // Fetch once. Settings are intent — there is nothing to poll for.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/settings");
-        const data = await res.json().catch(() => ({}));
-        if (cancelled) return;
-        if (!res.ok) {
-          setError(data?.error || "Could not load settings");
-        } else {
-          setPath(data?.path ?? null);
-          setSettings(data?.settings ?? {});
-          setDraft(data?.settings ?? {});
-          setError(null);
-        }
-      } catch {
-        if (!cancelled) setError("Could not load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    load();
+  }, [load]);
 
   const get = useCallback(
     (dottedPath, fallback = undefined) => getIn(draft, dottedPath, fallback),
@@ -278,6 +276,36 @@ export default function useSettings() {
   }, []);
 
   const dirty = dirtyPaths.size > 0;
+
+  /**
+   * Another surface (the rail's theme popover, via useTheme's
+   * persistTokenOverrides) can write settings.json without going through this
+   * hook. Without this listener our `settings` copy silently goes stale and the
+   * next `Save changes` would resurrect the very override the user just cleared.
+   *
+   * PRECEDENCE, and it is not negotiable: refetch ONLY when the draft is clean.
+   * If the user has unsaved edits, we leave their draft strictly alone — their
+   * pending work must never be clobbered by a background refetch. Saving is an
+   * explicit act and it wins; a background sync is not allowed to overrule it.
+   * The cost of skipping is a stale copy the user's own Save will overwrite
+   * anyway, which is the correct trade.
+   *
+   * `dirtyRef` keeps the listener identity stable so we do not resubscribe on
+   * every keystroke, while still reading the CURRENT dirty state at event time.
+   */
+  const dirtyRef = useRef(dirty);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  useEffect(() => {
+    const onSettingsChanged = () => {
+      if (dirtyRef.current) return;   // the user's unsaved draft is authoritative
+      load();
+    };
+    window.addEventListener("cockpit:settings-changed", onSettingsChanged);
+    return () => window.removeEventListener("cockpit:settings-changed", onSettingsChanged);
+  }, [load]);
 
   return useMemo(
     () => ({

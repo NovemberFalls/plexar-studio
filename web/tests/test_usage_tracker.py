@@ -75,6 +75,197 @@ def test_cost_math_default_pricing():
     assert cost == pytest.approx(DEFAULT_PRICING["input"] + DEFAULT_PRICING["output"])
 
 
+# --- tool_use ingest ---------------------------------------------------------
+
+def _assistant_tool_line(uuid, content, model="claude-opus-4",
+                         ts="2026-07-19T10:00:00Z", usage=True):
+    """Assistant line with an arbitrary `content` block list; `usage=False`
+    omits the usage block entirely (tools-without-usage turn)."""
+    message = {"model": model, "content": content}
+    if usage:
+        message["usage"] = {
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        }
+    return json.dumps({"type": "assistant", "uuid": uuid, "timestamp": ts, "message": message})
+
+
+def _tool_use(name, tid="t1"):
+    return {"type": "tool_use", "id": tid, "name": name}
+
+
+def _tool_rows(tracker):
+    return tracker._conn.execute(
+        "SELECT uuid, block_index, terminal_id, ts, model, tool_name, workdir "
+        "FROM tool_events ORDER BY uuid, block_index"
+    ).fetchall()
+
+
+def _write_and_ingest(tracker, tmp_path, lines, terminal_id="term-t",
+                      name="tools.jsonl", workdir=None):
+    p = tmp_path / name
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return tracker.ingest_jsonl(terminal_id, str(p), workdir), p
+
+
+def test_tool_use_block_persisted_with_name(tracker, tmp_path):
+    _write_and_ingest(tracker, tmp_path, [
+        _assistant_tool_line("u1", [_tool_use("Read")]),
+    ], workdir=r"C:\Code\my-repo")
+    rows = _tool_rows(tracker)
+    assert len(rows) == 1
+    assert rows[0]["tool_name"] == "Read"
+    assert rows[0]["uuid"] == "u1"
+    assert rows[0]["block_index"] == 0
+    assert rows[0]["terminal_id"] == "term-t"
+    assert rows[0]["model"] == "claude-opus-4"
+    assert rows[0]["ts"] == "2026-07-19T10:00:00Z"
+    assert rows[0]["workdir"] == r"C:\Code\my-repo"
+
+
+def test_multiple_tool_blocks_get_distinct_block_index(tracker, tmp_path):
+    _write_and_ingest(tracker, tmp_path, [
+        _assistant_tool_line("u1", [
+            {"type": "text", "text": "thinking out loud"},
+            _tool_use("Read", "a"),
+            _tool_use("Edit", "b"),
+            _tool_use("Read", "c"),
+        ]),
+    ])
+    rows = _tool_rows(tracker)
+    assert [(r["block_index"], r["tool_name"]) for r in rows] == [
+        (1, "Read"), (2, "Edit"), (3, "Read"),
+    ]
+
+
+def test_tool_reingest_is_idempotent(tracker, tmp_path):
+    """Re-ingest happens routinely (offset reset / file rotation). A duplicate-
+    inflating counter here would be silent data corruption."""
+    lines = [
+        _assistant_tool_line("u1", [_tool_use("Read", "a"), _tool_use("Bash", "b")]),
+        _assistant_tool_line("u2", [_tool_use("Edit", "c")]),
+    ]
+    _write_and_ingest(tracker, tmp_path, lines)
+    assert len(_tool_rows(tracker)) == 3
+
+    # Force a full re-read of the identical file (as a rotation would).
+    tracker._offsets.clear()
+    _write_and_ingest(tracker, tmp_path, lines)
+    assert len(_tool_rows(tracker)) == 3
+
+
+def test_tool_use_without_usage_block_still_recorded(tracker, tmp_path):
+    inserted, _ = _write_and_ingest(tracker, tmp_path, [
+        _assistant_tool_line("u1", [_tool_use("Read"), _tool_use("Bash", "b")], usage=False),
+    ])
+    assert inserted == 0, "no usage block -> no usage row"
+    assert [r["tool_name"] for r in _tool_rows(tracker)] == ["Read", "Bash"]
+
+
+def test_usage_without_tools_still_recorded(tracker, tmp_path):
+    inserted, _ = _write_and_ingest(tracker, tmp_path, [_assistant_line("u1")])
+    assert inserted == 1
+    assert _tool_rows(tracker) == []
+    assert tracker.session_summary("term-t")["input_tokens"] == 100
+
+
+def test_malformed_content_block_does_not_abort_the_line(tracker, tmp_path):
+    _write_and_ingest(tracker, tmp_path, [
+        _assistant_tool_line("u1", [
+            _tool_use("Read", "a"),
+            "a bare string, not a block",
+            None,
+            {"type": "tool_use"},          # no name -> "unknown"
+            _tool_use("Bash", "b"),
+        ]),
+    ])
+    rows = _tool_rows(tracker)
+    assert [r["tool_name"] for r in rows] == ["Read", "unknown", "Bash"]
+    # The usage row on the same line survived too.
+    assert tracker.session_summary("term-t")["input_tokens"] == 100
+
+
+def test_content_not_a_list_is_ignored(tracker, tmp_path):
+    _write_and_ingest(tracker, tmp_path, [
+        _assistant_tool_line("u1", "just a string content"),
+    ])
+    assert _tool_rows(tracker) == []
+
+
+@pytest.mark.parametrize("name", [None, "", "   "])
+def test_missing_or_blank_tool_name_becomes_unknown(tracker, tmp_path, name):
+    block = {"type": "tool_use", "id": "x"}
+    if name is not None:
+        block["name"] = name
+    _write_and_ingest(tracker, tmp_path, [_assistant_tool_line("u1", [block])])
+    rows = _tool_rows(tracker)
+    assert len(rows) == 1, "a call happened -- never skip it"
+    assert rows[0]["tool_name"] == "unknown"
+
+
+def test_non_tool_blocks_are_not_recorded(tracker, tmp_path):
+    _write_and_ingest(tracker, tmp_path, [
+        _assistant_tool_line("u1", [
+            {"type": "text", "text": "hi"},
+            {"type": "thinking", "thinking": "hmm"},
+        ]),
+    ])
+    assert _tool_rows(tracker) == []
+
+
+# --- schema migration for existing databases ---------------------------------
+
+def test_pre_migration_db_upgrades_without_error_or_data_loss(tmp_path):
+    """An existing usage.sqlite3 written before tool_events existed must open,
+    gain the new table, and keep every pre-existing row."""
+    import sqlite3 as _sqlite3
+
+    db = tmp_path / "legacy.sqlite3"
+    conn = _sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE usage_events (
+          id INTEGER PRIMARY KEY,
+          terminal_id TEXT NOT NULL,
+          jsonl_path TEXT NOT NULL,
+          message_uuid TEXT NOT NULL,
+          ts TEXT NOT NULL,
+          model TEXT NOT NULL,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(jsonl_path, message_uuid)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO usage_events (terminal_id, jsonl_path, message_uuid, ts, model,"
+        " input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)"
+        " VALUES ('old-term', '/x.jsonl', 'legacy-1', '2026-01-01T00:00:00Z',"
+        " 'claude-opus', 111, 222, 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    t = UsageTracker(db_path=db)
+    try:
+        # Legacy row intact, including the column added by an earlier migration.
+        summary = t.session_summary("old-term")
+        assert summary["input_tokens"] == 111
+        assert summary["output_tokens"] == 222
+        # New table exists and is usable.
+        assert t._conn.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0] == 0
+        p = tmp_path / "after.jsonl"
+        p.write_text(_assistant_tool_line("u1", [_tool_use("Read")]) + "\n", encoding="utf-8")
+        t.ingest_jsonl("new-term", str(p))
+        assert t._conn.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0] == 1
+        # And the legacy row is still reported.
+        assert t.range_report("all")["kpis"]["total_tokens"] == 111 + 222 + 150
+    finally:
+        t.close()
+
+
 # --- ingest --------------------------------------------------------------------
 
 def test_ingest_skips_malformed_and_duplicate(tracker, tmp_path):

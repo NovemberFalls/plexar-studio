@@ -86,7 +86,7 @@ const THEME_KEY = {
   "--cc-fg": "fg", "--cc-dim": "dim", "--cc-muted": "muted", "--cc-fn": "fn",
   "--cc-working": "working", "--cc-thinking": "thinking", "--cc-waiting": "waiting",
   "--cc-idle": "idle", "--cc-error": "error", "--cc-ok": "ok",
-  "--cc-kw": "kw", "--cc-type": "type", "--cc-macro": "macro", "--cc-num": "num",
+  "--cc-type": "type", "--cc-macro": "macro", "--cc-num": "num",
 };
 
 /**
@@ -96,9 +96,10 @@ const THEME_KEY = {
  * reference the token; `surfaces` names them in the shell's own vocabulary.
  *
  * Nothing here is estimated. A token whose consumers could not be enumerated
- * would carry `files: null` and render "used broadly" instead of a number —
- * --cc-kw is the honest edge case: NO component reads it directly, it only
- * exists as a :root default and is pushed to the DOM by applyThemeToDOM.
+ * would carry `files: null` and render "used broadly" instead of a number.
+ * Every token listed here has at least one real consumer: --cc-kw used to be
+ * the honest edge case (zero consumers, only this page's own preview) and was
+ * removed from the token system outright rather than kept as decoration.
  */
 const TOKEN_USAGE = {
   "--cc-bg": { files: 8, surfaces: ["Shell", "Command bar", "Lane strip", "Settings", "Engine", "Fleet", "Dialogs"] },
@@ -119,7 +120,6 @@ const TOKEN_USAGE = {
   "--cc-idle": { files: 7, surfaces: ["Lane strip", "Workspace panes", "Inspector", "Sidebar", "Settings", "Fleet"] },
   "--cc-error": { files: 11, surfaces: ["Rail", "Status strip", "Lane strip", "Workspace panes", "Inspector", "Sidebar", "Settings", "Engine", "Fleet"] },
   "--cc-ok": { files: 9, surfaces: ["Rail", "Status strip", "Inspector", "Settings", "Engine"] },
-  "--cc-kw": { files: 0, surfaces: [] },
   "--cc-type": { files: 3, surfaces: ["Settings", "Engine"] },
   "--cc-macro": { files: 6, surfaces: ["Settings", "Engine", "Fleet"] },
   "--cc-num": { files: 2, surfaces: ["Settings", "Engine"] },
@@ -480,6 +480,21 @@ function TokenEditor({ token, value, overridden, onCommit, onClear, onClose }) {
           : "The picker writes 6-digit hex. The text field accepts any CSS color, including rgba() and color-mix()."}
         {token === "--cc-accent" && " Editing the accent also retints --cc-working, the pane glow."}
       </div>
+
+      {/* Symmetry with ThemePopover: whichever surface you are on tells you the
+          truth about the other. An override here OUTRANKS the rail's accent
+          picker (applyThemeToDOM resolves overrides first), so the picker goes
+          inert until this override is reset — say it here rather than let the
+          user discover it by dragging a dead control. */}
+      {token === "--cc-accent" && overridden && (
+        <div style={{ marginTop: 10 }}>
+          <Callout token={DIRTY} testId="accent-supersedes-picker">
+            While <code>--cc-accent</code> is overridden here, it supersedes the accent
+            picker in the rail&rsquo;s theme popover — that picker will have no visible
+            effect until you Reset this token.
+          </Callout>
+        </div>
+      )}
     </div>
   );
 }
@@ -537,7 +552,7 @@ function PreviewPane({ glowStrength }) {
         }}
       >
         <div>
-          <span style={{ color: "var(--cc-kw)" }}>async def</span>{" "}
+          <span style={{ color: "var(--cc-macro)" }}>async def</span>{" "}
           <span style={{ color: "var(--cc-fn)" }}>relay</span>
           <span style={{ color: "var(--cc-dim)" }}>(</span>
           <span style={{ color: "var(--cc-type)" }}>Session</span>
@@ -615,9 +630,7 @@ function WhereUsed({ token }) {
           <div style={{ fontSize: 11, color: "var(--cc-dim)", marginBottom: 8, lineHeight: 1.5 }}>
             {usage.files === null
               ? `${token} is used broadly — its consumers were not enumerated.`
-              : usage.files === 0
-                ? `${token} is not read by any component. It exists as a :root default and is pushed to the DOM with the palette — today only the terminal's own coloring would consume it.`
-                : `${token} appears in ${usage.files} component ${usage.files === 1 ? "module" : "modules"}, counted from this repo.`}
+              : `${token} appears in ${usage.files} component ${usage.files === 1 ? "module" : "modules"}, counted from this repo.`}
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
             {usage.surfaces.map((s) => (

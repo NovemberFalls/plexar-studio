@@ -420,4 +420,298 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
       /only backend/i
     );
   });
+
+  /**
+   * Service identity, re-homed from the deleted LocalBrokerView test that
+   * asserted a wrong-service broker reads as offline rather than healthy.
+   *
+   * This branch was LIVE and had NO coverage on this page — every other case
+   * here passes compatible:true. It matters because LM Studio's dev server
+   * answers unknown paths with "200 anyway" plus an error body, so a reachable
+   * probe is not evidence of the right service. A green pill here would tell the
+   * user the lane broker is fine while something else holds the port.
+   */
+  it("reads a reachable-but-wrong service as 'wrong service', never as online", async () => {
+    installFetch({
+      status: {
+        reachable: true,
+        compatible: false,
+        service: "lmstudio",
+        detail: "LM Studio is answering on the lane-broker port",
+        url: "http://127.0.0.1:1235",
+        managed: false,
+      },
+    });
+    const shell = makeShell();
+    render(<ProvidersSettings {...shell} />);
+
+    const pill = await screen.findByTestId("broker-health");
+    await waitFor(() => expect(pill).toHaveTextContent(/wrong service/i));
+    // The failure mode this guards: a compatible:false probe rendering as green.
+    expect(pill).not.toHaveTextContent(/online/i);
+    expect(pill.getAttribute("style")).not.toMatch(/--cc-idle/);
+  });
+
+  /**
+   * Models-folder config, re-homed from the deleted LocalBrokerView
+   * DirectProviderConnectionCard (LocalBrokerView.modelsFolder.test.jsx).
+   *
+   * The behaviour CHANGED on purpose and these tests pin the new contract
+   * rather than the old one: LocalBrokerView PUT the path straight to
+   * /api/local/{id}/models-dir on a per-card Save and toasted the server's
+   * reply. Settings owns configuration now, so the field is draft intent
+   * written through setField and committed by the shell's save. Asserting the
+   * old PUT here would be asserting a behaviour the product no longer has.
+   */
+  it("routes a models-folder edit through setField with the exact dotted path", async () => {
+    const shell = makeShell({ draft: { "providers.lmstudio.models_dir": "~/.lmstudio/models" } });
+    render(<ProvidersSettings {...shell} />);
+    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+
+    const field = screen.getByTestId("field-providers.lmstudio.models_dir");
+    expect(field).toHaveValue("~/.lmstudio/models");
+
+    fireEvent.change(field, { target: { value: "D:\\models" } });
+    expect(shell.setField).toHaveBeenCalledWith("providers.lmstudio.models_dir", "D:\\models");
+  });
+
+  it("does not write the models folder to the server itself — the shell's save owns that", async () => {
+    const fetchMock = installFetch();
+    const shell = makeShell({ draft: { "providers.lmstudio.models_dir": "/models" } });
+    render(<ProvidersSettings {...shell} />);
+    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+
+    fireEvent.change(screen.getByTestId("field-providers.lmstudio.models_dir"), {
+      target: { value: "/mnt/models" },
+    });
+
+    // No PUT anywhere, and specifically nothing to the models-dir route the old
+    // LocalBrokerView card wrote to. A page that both drafts AND writes would
+    // give the user two competing sources of truth for one path.
+    await act(async () => {});
+    const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT");
+    expect(writes).toHaveLength(0);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("models-dir"))).toBe(false);
+  });
+});
+
+/**
+ * The vLLM models-folder section — the re-homed owner of
+ * GET|PUT /api/local/{id}/models-dir.
+ *
+ * These four assertions are restored from the deleted
+ * LocalBrokerView.modelsFolder.test.jsx. That component was removed as dead
+ * code, but it was the ONLY frontend caller of these routes, so deleting it
+ * meant a user could not point managed vLLM at a models directory from the UI
+ * at all. The routes were always live; only the caller went missing.
+ *
+ * Note the contract difference from the LM Studio "Models folder" field tested
+ * above: that one IS a settings.json draft (providers.lmstudio.models_dir). This
+ * one is a live server write that applies and persists immediately, which is why
+ * these tests assert a real PUT rather than a setField call.
+ */
+const DISCOVERY_PROVIDERS = {
+  providers: [
+    PROVIDERS.providers[0],
+    {
+      id: "vllm-local",
+      label: "vLLM (local)",
+      kind: "vllm",
+      scope: "local",
+      capabilities: ["models", "health", "model-control", "model-discovery"],
+    },
+  ],
+};
+
+const MODELS_DIR = {
+  path: "/home/me/models",
+  mount_path: "/models",
+  scan_path: "\\\\wsl$\\Ubuntu\\home\\me\\models",
+  exists: true,
+  writable_config: true,
+  current_model: "/models/Qwen3-Coder-30B-A3B-AWQ",
+};
+
+/**
+ * Fetch stub that knows the models-dir routes.
+ * `modelsDir` seeds the GET; `putResponse` / `putOk` control the PUT.
+ */
+function installDiscoveryFetch({
+  providers = DISCOVERY_PROVIDERS,
+  modelsDir = MODELS_DIR,
+  putResponse = { ...MODELS_DIR, path: "/mnt/models" },
+  putOk = true,
+} = {}) {
+  const impl = vi.fn(async (url, init) => {
+    const u = String(url);
+    if (u === "/api/local/providers") return jsonOk(providers);
+    if (u === "/api/local/status") return jsonOk(STATUS);
+    if (u.endsWith("/models-dir")) {
+      if (init?.method === "PUT") {
+        return putOk
+          ? jsonOk(putResponse)
+          : { ok: false, status: 400, json: async () => putResponse };
+      }
+      return jsonOk(modelsDir);
+    }
+    if (u.endsWith("/models")) {
+      return jsonOk({ reachable: true, models: [{ id: "/models/newmodel", state: "available" }] });
+    }
+    if (u.endsWith("/health")) {
+      return jsonOk({
+        broker: { reachable: true },
+        provider: { reachable: true, models_loaded: 1 },
+        ok: true,
+      });
+    }
+    if (u === "/api/settings/openrouter") return jsonOk(OPENROUTER);
+    return { ok: false, status: 404, json: async () => ({}) };
+  });
+  globalThis.fetch = impl;
+  return impl;
+}
+
+describe("ProvidersSettings — vLLM models folder (live server write)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete globalThis.fetch;
+  });
+
+  it("renders the section when vLLM declares model-discovery", async () => {
+    installDiscoveryFetch();
+    render(<ProvidersSettings {...makeShell()} />);
+
+    await waitFor(() => expect(screen.getByTestId("vllm-models-dir")).toBeInTheDocument());
+    expect(screen.getByText("Models Folder")).toBeInTheDocument();
+    expect(screen.getByLabelText("Host models folder")).toBeInTheDocument();
+  });
+
+  it("does not render the section without model-discovery", async () => {
+    // PROVIDERS' vLLM entry declares only ["models","health"].
+    const fetchMock = installDiscoveryFetch({ providers: PROVIDERS });
+    render(<ProvidersSettings {...makeShell()} />);
+
+    await waitFor(() => expect(screen.getByTestId("card-vllm")).toBeInTheDocument());
+    await act(async () => {});
+    expect(screen.queryByTestId("vllm-models-dir")).not.toBeInTheDocument();
+    expect(screen.queryByText("Models Folder")).not.toBeInTheDocument();
+    // Absent capability must mean absent traffic too, not a hidden section that
+    // still probes the route.
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/models-dir"))).toBe(false);
+  });
+
+  it("PUTs the entered path to /api/local/{id}/models-dir and re-reads the model list", async () => {
+    const fetchMock = installDiscoveryFetch();
+    const shell = makeShell();
+    render(<ProvidersSettings {...shell} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("vllm-models-dir-input")).toHaveValue("/home/me/models")
+    );
+
+    fireEvent.change(screen.getByTestId("vllm-models-dir-input"), {
+      target: { value: "/mnt/models" },
+    });
+    fireEvent.click(screen.getByTestId("vllm-models-dir-save"));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/local/vllm-local/models-dir",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ path: "/mnt/models" }) })
+      )
+    );
+    // Changing the folder changes what is discoverable, so the list is re-read.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([u]) => String(u) === "/api/local/vllm-local/models")
+      ).toBe(true)
+    );
+    // A live write must NOT also be drafted — that would be two sources of truth
+    // for one path, and the draft key is one nothing reads.
+    expect(shell.setField).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId("vllm-models-dir-saved")).toBeInTheDocument());
+  });
+
+  it("surfaces the server's own 400 message verbatim", async () => {
+    installDiscoveryFetch({ putOk: false, putResponse: { error: "path must be absolute" } });
+    render(<ProvidersSettings {...makeShell()} />);
+
+    await waitFor(() => expect(screen.getByTestId("vllm-models-dir-input")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("vllm-models-dir-input"), {
+      target: { value: "relative/path" },
+    });
+    fireEvent.click(screen.getByTestId("vllm-models-dir-save"));
+
+    const alert = await screen.findByRole("alert");
+    // Verbatim: the server is the only thing that knows what is wrong with the
+    // path, so a generic "failed" would throw away the entire diagnostic.
+    expect(alert).toHaveTextContent("path must be absolute");
+    expect(screen.queryByTestId("vllm-models-dir-saved")).not.toBeInTheDocument();
+  });
+
+  it("says the path applies immediately rather than on Save changes", async () => {
+    installDiscoveryFetch();
+    render(<ProvidersSettings {...makeShell()} />);
+
+    const note = await screen.findByTestId("vllm-models-dir-immediate");
+    expect(note).toHaveAttribute("role", "note");
+    expect(note).toHaveTextContent(/does not wait for Save changes/i);
+    expect(screen.getByTestId("vllm-models-dir")).toHaveTextContent(
+      /applies immediately — not on Save changes/i
+    );
+    // The control itself is labelled as an immediate action, not "Save".
+    expect(screen.getByTestId("vllm-models-dir-save")).toHaveAccessibleName("Apply now");
+  });
+
+  it("warns that an already-running container is not remounted", async () => {
+    installDiscoveryFetch();
+    render(<ProvidersSettings {...makeShell()} />);
+
+    const note = await screen.findByTestId("vllm-models-dir-remount");
+    expect(note).toHaveAttribute("role", "note");
+    expect(note).toHaveTextContent(
+      /does not reconfigure a vLLM container that is already running/i
+    );
+    expect(note).toHaveTextContent(/restart it/i);
+  });
+
+  it("renders mount and scan paths, the exists indicator, and current model when sent", async () => {
+    installDiscoveryFetch();
+    render(<ProvidersSettings {...makeShell()} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("vllm-models-dir-path")).toHaveTextContent("/home/me/models")
+    );
+    expect(screen.getByTestId("vllm-models-dir-exists")).toHaveTextContent("exists");
+    expect(screen.getByTestId("vllm-models-dir-mount")).toHaveTextContent("/models");
+    expect(screen.getByTestId("vllm-models-dir-scan")).toHaveTextContent("home\\me\\models");
+    expect(screen.getByTestId("vllm-models-dir-current-model")).toHaveTextContent(
+      "/models/Qwen3-Coder-30B-A3B-AWQ"
+    );
+  });
+
+  it("omits fields the server did not send instead of fabricating them", async () => {
+    installDiscoveryFetch({
+      modelsDir: { path: "", mount_path: "", scan_path: "", exists: false, writable_config: true },
+    });
+    render(<ProvidersSettings {...makeShell()} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("vllm-models-dir-path")).toHaveTextContent("not set")
+    );
+    expect(screen.queryByTestId("vllm-models-dir-mount")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("vllm-models-dir-scan")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("vllm-models-dir-current-model")).not.toBeInTheDocument();
+    // No path configured → no exists/not-found verdict to render about it.
+    expect(screen.queryByTestId("vllm-models-dir-exists")).not.toBeInTheDocument();
+  });
+
+  it("reports a missing folder as not found rather than silently accepting it", async () => {
+    installDiscoveryFetch({ modelsDir: { ...MODELS_DIR, exists: false } });
+    render(<ProvidersSettings {...makeShell()} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("vllm-models-dir-exists")).toHaveTextContent("not found")
+    );
+  });
 });

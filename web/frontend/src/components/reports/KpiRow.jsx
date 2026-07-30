@@ -5,15 +5,14 @@
  * Tool calls, straight off `kpis` in GET /api/usage/report.
  *
  * DELTAS: a card renders a delta ONLY when the caller supplies one. The report
- * endpoint takes a single `range` and exposes no prior-period or offset
- * parameter, so Cockpit cannot fetch a comparable previous window — and a
- * calendar-day slice of a longer range would not line up with an hour-based
- * window like 24h. Rather than render an always-neutral "0%" that looks
- * measured, ReportsView passes no deltas at all and says why in a note. The
- * delta slot stays implemented so it lights up the day a comparator lands.
+ * now returns a `previous` block, so ReportsView builds the map with
+ * buildDeltas() — but `previous.available` is false for `range=all` and for a
+ * user with no prior window, and in that case nothing is passed and no card
+ * renders a delta. An always-neutral "0%" would look measured; silence does not.
+ * Tone is per metric (see DELTA_RULES): not every increase is green.
  */
 
-import { fmtCost, fmtCount, fmtPct, isMissing, NOT_REPORTED } from "./format.js";
+import { DELTA_TOKEN, fmtCost, fmtCount, fmtPct, isMissing, NOT_REPORTED } from "./format.js";
 
 const CARD = {
   borderRadius: 12,
@@ -29,13 +28,6 @@ const LABEL = {
   textTransform: "uppercase",
   letterSpacing: ".08em",
   color: "var(--cc-muted)",
-};
-
-/** Delta tone → token. `good` improves, `cost` is spend going up, `flat` neutral. */
-const DELTA_TOKEN = {
-  good: "var(--cc-ok)",
-  cost: "var(--cc-waiting)",
-  flat: "var(--cc-dim)",
 };
 
 function KpiCard({ id, label, value, missing, hint, delta }) {
@@ -58,6 +50,9 @@ function KpiCard({ id, label, value, missing, hint, delta }) {
       {delta ? (
         <div
           data-testid={`kpi-delta-${id}`}
+          // The tone is exposed because it is a claim about the number, not
+          // styling: "cost went up" must stay assertable without reading colour.
+          data-tone={DELTA_TOKEN[delta.tone] ? delta.tone : "flat"}
           style={{ fontSize: 10, marginTop: 4, color: DELTA_TOKEN[delta.tone] || DELTA_TOKEN.flat }}
         >
           {delta.text}
@@ -105,16 +100,14 @@ export default function KpiRow({ kpis, deltas }) {
     },
     { id: "turns", label: "Turns", raw: k.turns, value: fmtCount(k.turns) },
     {
-      // tool_calls is ALWAYS null today: the usage store keeps assistant turns
-      // that carry a `usage` block and persists no tool_use events at all, so a
-      // number here would be invented. The card stays — the spec asked for six,
-      // and the sixth honestly having no source is the correct thing to show.
-      // Swapping in a different metric to fill the row would hide that.
+      // tool_calls is a real integer now that the tracker reads message.content
+      // as well as message.usage, so 0 means zero and is printed as "0". What
+      // can still be partial is COVERAGE of a long range — ReportsView renders
+      // that as a note from `tool_events_since`, not as a value substitution.
       id: "tool-calls",
       label: "Tool calls",
       raw: k.tool_calls,
-      value: fmtCount(k.tool_calls, "not recorded"),
-      hint: isMissing(k.tool_calls) ? "no source yet — see note below" : undefined,
+      value: fmtCount(k.tool_calls),
     },
   ];
 

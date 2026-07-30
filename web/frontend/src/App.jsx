@@ -23,6 +23,7 @@ import StatusStrip from "./components/shell/StatusStrip";
 import SettingsView from "./components/settings/SettingsView";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneLive, predictedWaitSeconds, pressureFraction } from "./utils/laneMath";
+import { useLocalModelsPoller } from "./hooks/useLocalModels";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -288,8 +289,9 @@ export default function App() {
   // this mirrors the full selected provider object back up so App can gate
   // per-capability polling and panel rendering).
   const [selectedProvider, setSelectedProvider] = useState(null); // {id,label,kind,scope,capabilities} | null
-  const [localModels, setLocalModels] = useState(null); // GET /api/local/{id}/models
-  const [localBusyModelId, setLocalBusyModelId] = useState(null); // model id loading/unloading, or null
+  // GET /api/local/{id}/models and the load/unload busy marker live in the
+  // shared useLocalModels store (one poller, every surface reads it) — see the
+  // useLocalModelsPoller call below.
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -1076,91 +1078,22 @@ export default function App() {
     };
   }, [backendReady, localEnabled, selectedProvider, metricsWindow]);
 
-  // Poll the selected provider's models every 10s — only when the `models`
-  // capability is present (mirrors the queue/metrics gating above). The sole
-  // consumer is the busy-marker effect below, which needs the model's `state`
-  // to know when a TopBar-initiated load has settled. Panels fetch their own
-  // copies (EngineModels / EngineRequests).
-  useEffect(() => {
-    if (!backendReady || !localEnabled || !selectedProvider) {
-      setLocalModels(null);
-      return;
-    }
-    const providerId = selectedProvider.id;
-    const caps = selectedProvider.capabilities || [];
-    const controller = new AbortController();
-    const { signal } = controller;
-
-    const fetchLocalModels = async () => {
-      if (!caps.includes("models")) {
-        setLocalModels(null);
-        return;
-      }
-      try {
-        const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models`, { signal });
-        setLocalModels(res.ok ? await res.json() : { reachable: false });
-      } catch (_) {
-        // swallow — best-effort
-      }
-    };
-
-    fetchLocalModels();
-    // Poll fast (2s) while a load is in flight so the TopBar spinner resolves
-    // promptly once the model's state flips; back to 10s when idle.
-    const id = setInterval(fetchLocalModels, localBusyModelId ? 2000 : 10000);
-    return () => {
-      clearInterval(id);
-      controller.abort();
-    };
-  }, [backendReady, localEnabled, selectedProvider, localBusyModelId]);
-
-  // Clear the busy marker once the /models poll shows the target model has
-  // settled (LM Studio reports no progress %, so state transition IS the signal).
-  useEffect(() => {
-    if (!localBusyModelId) return;
-    const list = Array.isArray(localModels?.models) ? localModels.models : [];
-    const m = list.find((x) => x.id === localBusyModelId);
-    // Busy clears when the model appears loaded (a load completed) or is gone /
-    // not-loaded after an unload — either way its steady state is reached.
-    if (m && m.state === "loaded") setLocalBusyModelId(null);
-  }, [localModels, localBusyModelId]);
-
-  // Load a local model from the TopBar picker, where the target provider may
-  // differ from the currently `selectedProvider`. Dispatches
-  // by API behavior rather than needing a fetched provider-capability lookup:
-  // LM Studio's /load endpoint succeeds directly; vLLM's /load 409s (it can
-  // only serve one model per container), so a 409 falls through to /restart.
-  const loadOrRestartLocalModel = useCallback(async (providerId, modelId) => {
-    if (!providerId || !modelId) return;
-    setLocalBusyModelId(modelId);
-    try {
-      const res = await fetch(
-        `/api/local/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/load`,
-        { method: "POST" },
-      );
-      if (res.ok) return;
-      if (res.status === 409) {
-        const rres = await fetch(`/api/local/${encodeURIComponent(providerId)}/restart`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: modelId }),
-        });
-        const rdata = await rres.json().catch(() => ({}));
-        if (!rres.ok || !rdata?.ok) {
-          toast(rdata?.error || "Could not start model", "error");
-        } else {
-          toast(`Restarting with ${modelId}…`, "info");
-        }
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      toast(data.error || "This provider doesn't support loading models", "error");
-    } catch (_) {
-      toast("Provider unreachable — model not loaded", "error");
-    } finally {
-      setLocalBusyModelId(null);
-    }
-  }, [toast]);
+  // `/api/local/{provider}/models` has exactly ONE poller app-wide, and it lives
+  // in useLocalModels — App and Engine used to each run their own, asking the
+  // same question twice every 10s whenever Engine was open. `watching` is the
+  // "is anyone actually looking" gate: Engine visible, or the Defaults drop-down
+  // (which hosts the TopBar model picker) open. When neither is true and no load
+  // is in flight nothing is polled at all — strictly less traffic than before,
+  // and the marker's own 2s cadence keeps the spinner prompt regardless.
+  const {
+    busyModelId: localBusyModelId,
+    loadOrRestartModel: loadOrRestartLocalModel,
+  } = useLocalModelsPoller({
+    enabled: backendReady && localEnabled,
+    provider: selectedProvider,
+    watching: showLocalBroker || defaultsOpen,
+    onToast: toast,
+  });
 
   // Commit a single lane-class spill threshold (seconds, or null to disable),
   // scoped to the selected provider. PUTs the partial map and applies the

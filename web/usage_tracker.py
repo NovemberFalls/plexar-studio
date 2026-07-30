@@ -126,6 +126,27 @@ class UsageTracker:
                 );
                 CREATE INDEX IF NOT EXISTS idx_local_runs_terminal ON local_runs(terminal_id);
                 CREATE INDEX IF NOT EXISTS idx_local_runs_ts ON local_runs(ts);
+
+                /* One row per tool_use content block in an assistant message.
+                   An assistant turn can carry SEVERAL tool_use blocks, so the
+                   message uuid alone is not a key -- (uuid, block_index) is.
+                   That composite PK is what makes re-ingest idempotent: the
+                   watcher routinely re-reads a JSONL (offset reset, file
+                   rotation) and INSERT OR IGNORE must not inflate counters. */
+                CREATE TABLE IF NOT EXISTS tool_events (
+                  uuid TEXT NOT NULL,
+                  block_index INTEGER NOT NULL,
+                  terminal_id TEXT NOT NULL,
+                  jsonl_path TEXT NOT NULL,
+                  ts TEXT NOT NULL,
+                  model TEXT NOT NULL DEFAULT '',
+                  tool_name TEXT NOT NULL DEFAULT 'unknown',
+                  workdir TEXT,
+                  PRIMARY KEY (uuid, block_index)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tool_events_terminal ON tool_events(terminal_id);
+                CREATE INDEX IF NOT EXISTS idx_tool_events_ts ON tool_events(ts);
+                CREATE INDEX IF NOT EXISTS idx_tool_events_name ON tool_events(tool_name);
                 """
             )
             self._conn.commit()
@@ -185,10 +206,18 @@ class UsageTracker:
             logger.error("Failed recording local run for provider=%s terminal=%s", provider_id, terminal_id, exc_info=True)
 
     def ingest_jsonl(self, terminal_id: str, jsonl_path: str, workdir: str | None = None) -> int:
-        """Parse Claude Code JSONL; insert one row per assistant message with a
-        usage block. Tracks per-file byte offset in memory for incremental reads
-        (falls back to a full re-read if the file shrank). Returns number of new
-        rows. Never raises on malformed lines — logs and skips."""
+        """Parse Claude Code JSONL; insert one usage_events row per assistant
+        message that carries a usage block, AND one tool_events row per
+        ``tool_use`` content block in any assistant message. The two are
+        independent: a turn may have usage without tools, tools without usage,
+        or both. Tracks per-file byte offset in memory for incremental reads
+        (falls back to a full re-read if the file shrank).
+
+        Returns number of new *usage* rows (unchanged contract -- callers use
+        this as a token-activity signal). Tool-event inserts are counted
+        separately for logging only. Both inserts are INSERT OR IGNORE against
+        their unique keys, so re-ingesting the same lines is idempotent.
+        Never raises on malformed lines — logs and skips."""
         path = Path(jsonl_path)
         key = str(jsonl_path)
         try:
@@ -215,13 +244,16 @@ class UsageTracker:
             return 0
 
         rows = []
+        tool_rows = []
         for line in data.split("\n"):
             line = line.strip()
             if not line:
                 continue
-            row = self._parse_line(terminal_id, key, line, workdir)
+            row, line_tools = self._parse_line(terminal_id, key, line, workdir)
             if row is not None:
                 rows.append(row)
+            if line_tools:
+                tool_rows.extend(line_tools)
 
         inserted = 0
         if rows:
@@ -243,25 +275,63 @@ class UsageTracker:
                     logger.warning("Failed inserting usage rows for %s", terminal_id, exc_info=True)
                     inserted = 0
 
+        if tool_rows:
+            with self._lock:
+                try:
+                    self._conn.executemany(
+                        """
+                        INSERT OR IGNORE INTO tool_events
+                          (uuid, block_index, terminal_id, jsonl_path, ts,
+                           model, tool_name, workdir)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        tool_rows,
+                    )
+                    self._conn.commit()
+                except sqlite3.Error:
+                    logger.warning("Failed inserting tool rows for %s", terminal_id, exc_info=True)
+
         self._offsets[key] = new_offset
         return inserted
 
-    def _parse_line(self, terminal_id: str, jsonl_path: str, line: str, workdir: str | None = None) -> tuple | None:
+    def _parse_line(
+        self, terminal_id: str, jsonl_path: str, line: str, workdir: str | None = None
+    ) -> tuple[tuple | None, list[tuple]]:
+        """Parse one JSONL line into ``(usage_row_or_None, tool_rows)``.
+
+        The two outputs are produced INDEPENDENTLY on purpose. An assistant turn
+        that calls tools frequently carries no ``usage`` block, and a turn that
+        reports usage frequently carries no tool_use blocks; an early ``return``
+        on a missing ``usage`` (the previous behaviour) silently discarded every
+        tool call on such turns. Nothing below may short-circuit past the other
+        extractor.
+        """
         try:
             obj = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             logger.debug("Skipping malformed JSONL line in %s", jsonl_path, exc_info=True)
-            return None
+            return None, []
         if not isinstance(obj, dict):
-            return None
+            return None, []
         if obj.get("type") != "assistant":
-            return None
+            return None, []
         uuid = obj.get("uuid")
         if not uuid:
-            return None
+            return None, []
         msg = obj.get("message")
         if not isinstance(msg, dict):
-            return None
+            return None, []
+
+        model = msg.get("model") or ""
+        ts = obj.get("timestamp") or ""
+
+        usage_row = self._usage_row(terminal_id, jsonl_path, uuid, ts, model, msg, workdir)
+        tool_rows = self._tool_rows(terminal_id, jsonl_path, uuid, ts, model, msg, workdir)
+        return usage_row, tool_rows
+
+    @staticmethod
+    def _usage_row(terminal_id, jsonl_path, uuid, ts, model, msg: dict, workdir) -> tuple | None:
+        """usage_events row for this assistant message, or None if it reports no usage."""
         usage = msg.get("usage")
         if not isinstance(usage, dict):
             return None
@@ -272,8 +342,6 @@ class UsageTracker:
             except (TypeError, ValueError):
                 return 0
 
-        model = msg.get("model") or ""
-        ts = obj.get("timestamp") or ""
         return (
             terminal_id,
             jsonl_path,
@@ -286,6 +354,41 @@ class UsageTracker:
             _int(usage.get("cache_read_input_tokens")),
             workdir,
         )
+
+    @staticmethod
+    def _tool_rows(terminal_id, jsonl_path, uuid, ts, model, msg: dict, workdir) -> list[tuple]:
+        """One tool_events row per ``tool_use`` content block.
+
+        Block shape matches jsonl_watcher's reading of the same files: content
+        is a list of blocks, a tool call is ``{"type": "tool_use", "name": ...,
+        "id": ...}``. ``block_index`` is the block's position in that list, so
+        several tool calls in one message get distinct keys and stay stable
+        across re-ingest. A block whose ``name`` is missing/blank records
+        ``"unknown"`` rather than being skipped -- a call still happened.
+        A malformed individual block is skipped without aborting the rest.
+        """
+        content = msg.get("content")
+        if not isinstance(content, list):
+            return []
+        rows: list[tuple] = []
+        for idx, block in enumerate(content):
+            try:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use":
+                    continue
+                name = block.get("name")
+                tool_name = str(name).strip() if name is not None else ""
+                if not tool_name:
+                    tool_name = "unknown"
+                rows.append((uuid, idx, terminal_id, jsonl_path, ts, model, tool_name, workdir))
+            except Exception:
+                logger.debug(
+                    "Skipping malformed tool_use block %s[%s] in %s", uuid, idx, jsonl_path,
+                    exc_info=True,
+                )
+                continue
+        return rows
 
     # -- summaries ------------------------------------------------------------
 
@@ -657,6 +760,118 @@ class UsageTracker:
 
     # -- Reports page: one-shot range report -----------------------------------
 
+    @staticmethod
+    def _range_span(range_key: str) -> timedelta | None:
+        """Length of *range_key* as a timedelta; None for 'all' (unbounded)."""
+        return {
+            "24h": timedelta(hours=24),
+            "7d": timedelta(days=7),
+            "30d": timedelta(days=30),
+            "all": None,
+        }[range_key]
+
+    def _window_rows(self, start: str | None, end: str | None) -> tuple[list, list, list]:
+        """Fetch usage/local/tool rows whose ts falls in ``[start, end)``.
+
+        Either bound may be None (unbounded). This is the ONLY row-fetch path
+        used by range_report, for both the current and the prior period, so the
+        two periods can never diverge in what they count.
+        """
+        clauses: list[str] = []
+        params: list[str] = []
+        if start is not None:
+            clauses.append("ts >= ?")
+            params.append(start)
+        if end is not None:
+            clauses.append("ts < ?")
+            params.append(end)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        with self._lock:
+            api_rows = self._conn.execute(
+                "SELECT terminal_id, ts, model, input_tokens, output_tokens, "
+                "cache_creation_tokens, cache_read_tokens, workdir "
+                "FROM usage_events" + where,
+                tuple(params),
+            ).fetchall()
+            local_rows = self._conn.execute(
+                "SELECT terminal_id, ts, provider_id, model, input_tokens, "
+                "output_tokens, workdir FROM local_runs" + where,
+                tuple(params),
+            ).fetchall()
+            tool_rows = self._conn.execute(
+                "SELECT terminal_id, ts, tool_name, workdir FROM tool_events" + where,
+                tuple(params),
+            ).fetchall()
+        return api_rows, local_rows, tool_rows
+
+    @staticmethod
+    def _compute_kpis(api_rows: list, local_rows: list, tool_rows: list) -> dict:
+        """The six headline KPIs for a window. Single source of truth -- the
+        current period and the prior period both go through here, so a delta is
+        always a comparison of two identically-computed numbers."""
+        tot_in = tot_out = tot_cw = tot_cr = tot_local = 0
+        tot_cost = 0.0
+        for r in api_rows:
+            inp = r["input_tokens"] or 0
+            out = r["output_tokens"] or 0
+            cw = r["cache_creation_tokens"] or 0
+            cr = r["cache_read_tokens"] or 0
+            tot_in += inp
+            tot_out += out
+            tot_cw += cw
+            tot_cr += cr
+            tot_cost += _row_cost(r["model"] or "", inp, out, cw, cr)
+        for r in local_rows:
+            tot_local += (r["input_tokens"] or 0) + (r["output_tokens"] or 0)
+
+        total_tokens = tot_in + tot_out + tot_cw + tot_cr + tot_local
+        cache_denom = tot_cr + tot_in
+        return {
+            "total_tokens": total_tokens,
+            "cost": round(tot_cost, 4),
+            "cache_hit_rate": round((tot_cr / cache_denom) if cache_denom else 0.0, 6),
+            "local_share": round((tot_local / total_tokens) if total_tokens else 0.0, 6),
+            "turns": len(api_rows) + len(local_rows),
+            "tool_calls": len(tool_rows),
+        }
+
+    def _previous_period(self, range_key: str, now: datetime) -> dict:
+        """The immediately preceding window of EQUAL length.
+
+        24h -> the 24h before this 24h; 7d -> the 7 days before these 7 days.
+        'all' has no meaningful prior period, and a window with genuinely no
+        rows reports available=False so the UI renders no delta instead of a
+        misleading +100%.
+        """
+        span = self._range_span(range_key)
+        if span is None:
+            return {"available": False, "kpis": None}
+        end = (now - span).isoformat()
+        start = (now - span - span).isoformat()
+        api_rows, local_rows, tool_rows = self._window_rows(start, end)
+        if not api_rows and not local_rows and not tool_rows:
+            return {"available": False, "kpis": None}
+        return {"available": True, "kpis": self._compute_kpis(api_rows, local_rows, tool_rows)}
+
+    def _tool_events_since(self) -> str | None:
+        """Earliest tool event ts in the WHOLE store, or None if none exist.
+
+        Deliberately not range-scoped: rows ingested before tool tracking
+        existed carry no tool events, so a range that predates this timestamp is
+        only partially covered. The UI uses this to say "tool calls recorded
+        since <date>" rather than implying full coverage.
+        """
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT MIN(ts) AS first_ts FROM tool_events WHERE ts != ''"
+                ).fetchone()
+            return row["first_ts"] if row and row["first_ts"] else None
+        except sqlite3.Error:
+            logger.warning("Failed reading earliest tool event ts", exc_info=True)
+            return None
+
     def range_report(self, range_key: str = "7d") -> dict:
         """Everything the Reports page renders, in one query pass.
 
@@ -687,48 +902,25 @@ class UsageTracker:
         present, zero-valued where there was no activity, so a chart cannot
         misread a gap as the end of the data.
 
-        `tool_calls` is always None: Cockpit's usage store records token usage
-        per assistant turn only -- tool invocations are not persisted anywhere
-        in this schema, so a number here would be fabricated.
+        `tool_calls` counts persisted ``tool_use`` blocks (tool_events). Rows
+        ingested before tool tracking existed carry none, so `tool_events_since`
+        reports the earliest tool event in the store -- a range starting before
+        that timestamp is only partially covered, and the UI must say so rather
+        than implying the whole range is accounted for.
+
+        `previous` carries the same six KPIs for the immediately preceding
+        window of equal length (see _previous_period).
         """
         if range_key not in _RANGE_KEYS:
             raise ValueError(f"range must be one of {_RANGE_KEYS}")
 
         now = datetime.now(timezone.utc)
-        cutoff: str | None = None
-        if range_key == "24h":
-            cutoff = (now - timedelta(hours=24)).isoformat()
-        elif range_key == "7d":
-            cutoff = (now - timedelta(days=7)).isoformat()
-        elif range_key == "30d":
-            cutoff = (now - timedelta(days=30)).isoformat()
+        span = self._range_span(range_key)
+        cutoff: str | None = (now - span).isoformat() if span is not None else None
 
-        with self._lock:
-            if cutoff is None:
-                api_rows = self._conn.execute(
-                    "SELECT terminal_id, ts, model, input_tokens, output_tokens, "
-                    "cache_creation_tokens, cache_read_tokens, workdir FROM usage_events"
-                ).fetchall()
-                local_rows = self._conn.execute(
-                    "SELECT terminal_id, ts, provider_id, model, input_tokens, "
-                    "output_tokens, workdir FROM local_runs"
-                ).fetchall()
-            else:
-                api_rows = self._conn.execute(
-                    "SELECT terminal_id, ts, model, input_tokens, output_tokens, "
-                    "cache_creation_tokens, cache_read_tokens, workdir "
-                    "FROM usage_events WHERE ts >= ?",
-                    (cutoff,),
-                ).fetchall()
-                local_rows = self._conn.execute(
-                    "SELECT terminal_id, ts, provider_id, model, input_tokens, "
-                    "output_tokens, workdir FROM local_runs WHERE ts >= ?",
-                    (cutoff,),
-                ).fetchall()
+        api_rows, local_rows, tool_rows = self._window_rows(cutoff, None)
 
-        tot_in = tot_out = tot_cw = tot_cr = tot_local = 0
-        tot_cost = 0.0
-        turns = 0
+        tot_local = 0
         by_day: dict[str, dict] = {}
         by_model: dict[tuple, dict] = {}
         sessions: dict[str, dict] = {}
@@ -747,7 +939,7 @@ class UsageTracker:
                     "project": self._repo_from_workdir(workdir),
                     "model": None, "input": 0, "output": 0, "cache_read": 0,
                     "cache_write": 0, "local": 0, "total": 0, "turns": 0,
-                    "cost": 0.0, "tool_calls": None, "_models": {},
+                    "cost": 0.0, "tool_calls": 0, "_models": {},
                 }
             elif b["project"] == "unknown" and workdir:
                 b["project"] = self._repo_from_workdir(workdir)
@@ -761,13 +953,6 @@ class UsageTracker:
             row_total = inp + out + cw + cr
             model = r["model"] or ""
             row_cost = _row_cost(model, inp, out, cw, cr)
-
-            tot_in += inp
-            tot_out += out
-            tot_cw += cw
-            tot_cr += cr
-            tot_cost += row_cost
-            turns += 1
 
             day = (r["ts"] or "")[:10] or now.date().isoformat()
             d = _day_bucket(day)
@@ -803,8 +988,6 @@ class UsageTracker:
             out = r["output_tokens"] or 0
             row_total = inp + out
             model = r["model"] or ""
-            tot_local += row_total
-            turns += 1
 
             day = (r["ts"] or "")[:10] or now.date().isoformat()
             d = _day_bucket(day)
@@ -827,10 +1010,33 @@ class UsageTracker:
                 if model:
                     s["_models"][model] = s["_models"].get(model, 0) + row_total
 
-        total_tokens = tot_in + tot_out + tot_cw + tot_cr + tot_local
-        cache_denom = tot_cr + tot_in
-        cache_hit_rate = (tot_cr / cache_denom) if cache_denom else 0.0
-        local_share = (tot_local / total_tokens) if total_tokens else 0.0
+        # -- tool events: totals, per-session, per-tool ------------------------
+        by_tool: dict[str, int] = {}
+        for r in tool_rows:
+            name = r["tool_name"] or "unknown"
+            by_tool[name] = by_tool.get(name, 0) + 1
+            tid = r["terminal_id"]
+            if tid:
+                # A tool call can belong to a terminal that produced no usage
+                # row in this window -- bucket it anyway rather than dropping it.
+                s = _session_bucket(tid, r["workdir"])
+                s["tool_calls"] += 1
+
+        # Headline numbers come from the shared KPI function so that this period
+        # and `previous` are computed by identical code.
+        kpis = self._compute_kpis(api_rows, local_rows, tool_rows)
+        total_tokens = kpis["total_tokens"]
+        total_tool_calls = kpis["tool_calls"]
+
+        tools_out = [
+            {
+                "tool_name": name,
+                "calls": calls,
+                "share": round(calls / total_tool_calls, 6) if total_tool_calls else 0.0,
+            }
+            for name, calls in by_tool.items()
+        ]
+        tools_out.sort(key=lambda t: (t["calls"], t["tool_name"]), reverse=True)
 
         # -- gap-fill the day series ------------------------------------------
         if range_key == "all":
@@ -899,16 +1105,12 @@ class UsageTracker:
         return {
             "range": range_key,
             "generated_at": now.isoformat(),
-            "kpis": {
-                "total_tokens": total_tokens,
-                "cost": round(tot_cost, 4),
-                "cache_hit_rate": round(cache_hit_rate, 6),
-                "local_share": round(local_share, 6),
-                "turns": turns,
-                "tool_calls": None,
-            },
+            "kpis": kpis,
+            "tool_events_since": self._tool_events_since(),
+            "previous": self._previous_period(range_key, now),
             "by_day": series,
             "by_model": models_out,
+            "by_tool": tools_out,
             "sessions": sessions_out,
         }
 

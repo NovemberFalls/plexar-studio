@@ -4565,8 +4565,8 @@ _USAGE_REPORT_RANGES = ("24h", "7d", "30d", "all")
 @app.get("/api/usage/report")
 async def get_usage_report(range: str = "7d"):
     """Everything the Reports page renders, in ONE call (KPIs + day series +
-    per-model spend + sessions table). See usage_tracker.range_report for the
-    exact formulas; the important ones:
+    per-model spend + per-tool calls + sessions table + prior-period KPIs).
+    See usage_tracker.range_report for the exact formulas; the important ones:
 
       * cost is API-EQUIVALENT (list $/1M rates from the verified pricing
         table), NOT a subscription bill. Local-provider tokens are costed at
@@ -4576,9 +4576,16 @@ async def get_usage_report(range: str = "7d"):
         denominator is 0.
       * by_day is gap-filled -- every day in the range is present, zeroed
         where there was no activity.
-      * kpis.tool_calls and sessions[].tool_calls are ALWAYS null: tool
-        invocations are not persisted in the usage store, so any number here
-        would be fabricated.
+      * kpis.tool_calls / sessions[].tool_calls / by_tool are REAL counts of
+        persisted `tool_use` blocks (usage_tracker.tool_events). Rows ingested
+        before tool tracking shipped carry no tool events, so
+        `tool_events_since` gives the earliest recorded tool event (or null) --
+        the UI must label the number "recorded since <date>" rather than
+        implying full coverage of the range.
+      * previous = {available, kpis} for the immediately preceding window of
+        equal length. available is false for range=all (no meaningful prior
+        period) and whenever the prior window has no data at all, so the UI
+        renders no delta instead of a misleading +100%.
 
     Live session display names are attached where the terminal is still
     running; historical rows keep name=null.

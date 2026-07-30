@@ -6,36 +6,26 @@
  * Model FILES and folders are configuration and live in Settings ▸ Providers.
  * What is loaded right now is engine state, so it lives here.
  */
-import { useState } from "react";
 import { Boxes } from "lucide-react";
 
 import LocalModelsPanel from "../LocalModelsPanel.jsx";
+import useLocalModels from "../../hooks/useLocalModels.js";
 import { Card, CardTitle, Note, OfflinePanel, Badge } from "./ui.jsx";
 
-export default function EngineModels({ provider, caps, data, onToast, onNavigate }) {
-  const [busyModelId, setBusyModelId] = useState(null);
-  const models = data?.models;
+export default function EngineModels({ provider, caps, data, onToast, onNavigate, busyModelId, onWriteModel }) {
+  // Busy state is app-wide, not local: a load kicked off from the TopBar picker
+  // must spin the row here too, and vice versa. Both surfaces mark the same
+  // model through the shared store, and the same /models poll clears it.
+  const store = useLocalModels();
+  const busy = busyModelId !== undefined ? busyModelId : store.busyModelId;
+  // EngineView already merges the shared list into `data`; the fallback keeps
+  // this card correct when it is mounted without that frame.
+  const models = data?.models !== undefined ? data.models : store.models;
   const controlEnabled = Boolean(caps?.has("model-control"));
 
-  const write = async (modelId, action) => {
+  const write = (modelId, action) => {
     if (!provider?.id || !modelId) return;
-    setBusyModelId(modelId);
-    try {
-      const res = await fetch(
-        `/api/local/${encodeURIComponent(provider.id)}/models/${encodeURIComponent(modelId)}/${action}`,
-        { method: "POST" }
-      );
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || payload?.ok === false) {
-        onToast?.(payload?.error || `Could not ${action} ${modelId}`, "error");
-      } else {
-        onToast?.(`${action === "load" ? "Loading" : "Unloading"} ${modelId}…`, "info");
-      }
-    } catch {
-      onToast?.(`Could not reach Cockpit to ${action} the model`, "error");
-    } finally {
-      setBusyModelId(null);
-    }
+    (onWriteModel || store.writeModel)(provider.id, modelId, action, onToast);
   };
 
   if (!caps?.has("models")) {
@@ -61,7 +51,7 @@ export default function EngineModels({ provider, caps, data, onToast, onNavigate
           models={models}
           providerKind={provider?.kind}
           controlEnabled={controlEnabled}
-          busyModelId={busyModelId}
+          busyModelId={busy}
           onLoad={(id) => write(id, "load")}
           onUnload={(id) => write(id, "unload")}
         />

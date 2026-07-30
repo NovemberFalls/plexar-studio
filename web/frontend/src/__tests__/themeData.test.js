@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   THEMES,
+  OVERRIDABLE_TOKENS,
+  TOKEN_GROUPS,
   getTheme,
   listThemes,
   getSavedTheme,
@@ -14,7 +16,9 @@ const REQUIRED_PROPERTIES = [
   'border', 'line',
   'fg', 'dim', 'muted',
   'accent',
-  'kw', 'fn', 'type', 'ok', 'macro', 'num',
+  // 'kw' is deliberately absent: --cc-kw was removed from the token system —
+  // no product surface ever read it, and it was theme-inconsistent.
+  'fn', 'type', 'ok', 'macro', 'num',
   'working', 'thinking', 'waiting', 'idle', 'error',
 ];
 
@@ -122,5 +126,35 @@ describe('applyThemeToDOM', () => {
     // Should not throw
     expect(() => applyThemeToDOM(null)).not.toThrow();
     expect(() => applyThemeToDOM(undefined)).not.toThrow();
+  });
+
+  it('never writes --cc-kw: the token was removed, not just hidden', () => {
+    for (const theme of Object.values(THEMES)) {
+      applyThemeToDOM(theme);
+      expect(document.documentElement.style.getPropertyValue('--cc-kw')).toBe('');
+    }
+  });
+
+  it('applies every palette without throwing', () => {
+    for (const theme of Object.values(THEMES)) {
+      expect(() => applyThemeToDOM(theme, { accent: '#ff0000', glowStrength: 12 })).not.toThrow();
+    }
+  });
+});
+
+describe('--cc-kw removal', () => {
+  it('is not an overridable token', () => {
+    expect(OVERRIDABLE_TOKENS).not.toContain('--cc-kw');
+  });
+
+  it('leaves the syntax group as exactly type / macro / num', () => {
+    const syntax = TOKEN_GROUPS.find((g) => g.id === 'syntax');
+    expect(syntax.tokens).toEqual(['--cc-type', '--cc-macro', '--cc-num']);
+  });
+
+  it('is absent from every palette object', () => {
+    for (const theme of Object.values(THEMES)) {
+      expect(theme).not.toHaveProperty('kw');
+    }
   });
 });

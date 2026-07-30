@@ -61,6 +61,42 @@ def _assistant_line(uuid, model="claude-opus-4", input_tokens=100, output_tokens
     })
 
 
+def _tool_line(uuid, tool_names, model="claude-opus-4", ts=None,
+               usage=True, input_tokens=10, output_tokens=5, extra_blocks=None):
+    """An assistant line carrying one tool_use block per entry in *tool_names*.
+
+    `tool_names` entries may be a str (the name), None (block with no `name`
+    key) or a non-dict sentinel string "MALFORMED" (a bare string in the
+    content list, which must be skipped without aborting the line).
+    `usage=False` omits the usage block entirely -- the tool-calls-without-usage
+    case that the old parser silently dropped.
+    """
+    content = []
+    for name in tool_names:
+        if name == "MALFORMED":
+            content.append("not-a-dict")
+        elif name is None:
+            content.append({"type": "tool_use", "id": "t"})
+        else:
+            content.append({"type": "tool_use", "id": f"t-{name}", "name": name})
+    if extra_blocks:
+        content.extend(extra_blocks)
+    message = {"model": model, "content": content}
+    if usage:
+        message["usage"] = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
+    return json.dumps({
+        "type": "assistant",
+        "uuid": uuid,
+        "timestamp": ts or _iso(0),
+        "message": message,
+    })
+
+
 def _ingest(tracker, tmp_path, lines, terminal_id="term-1", workdir=r"C:\Code\my-repo", name="s.jsonl"):
     p = tmp_path / name
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -74,7 +110,10 @@ def _ingest(tracker, tmp_path, lines, terminal_id="term-1", workdir=r"C:\Code\my
 def test_range_report_accepts_valid_ranges(tracker, rng):
     report = tracker.range_report(rng)
     assert report["range"] == rng
-    assert set(report) == {"range", "generated_at", "kpis", "by_day", "by_model", "sessions"}
+    assert set(report) == {
+        "range", "generated_at", "kpis", "tool_events_since", "previous",
+        "by_day", "by_model", "by_tool", "sessions",
+    }
 
 
 def test_range_report_rejects_bad_range(tracker):
@@ -106,13 +145,20 @@ async def test_endpoint_defaults_to_7d(client):
 
 @pytest.mark.asyncio
 async def test_endpoint_shape_matches_contract(client, tracker, tmp_path, monkeypatch):
-    _ingest(tracker, tmp_path, [_assistant_line("u1", input_tokens=10, output_tokens=5)])
+    _ingest(tracker, tmp_path, [
+        _assistant_line("u1", input_tokens=10, output_tokens=5),
+        _tool_line("u2", ["Read"]),
+    ])
     monkeypatch.setattr(server_module, "usage_tracker", tracker)
     res = await client.get("/api/usage/report?range=7d")
     data = res.json()
     assert set(data["kpis"]) == {
         "total_tokens", "cost", "cache_hit_rate", "local_share", "turns", "tool_calls",
     }
+    assert data["kpis"]["tool_calls"] == 1
+    assert data["by_tool"] == [{"tool_name": "Read", "calls": 1, "share": 1.0}]
+    assert data["tool_events_since"] is not None
+    assert set(data["previous"]) == {"available", "kpis"}
     day = data["by_day"][0]
     for key in ("day", "input", "output", "cache_read", "cache_write", "local", "total", "cost"):
         assert key in day
@@ -287,13 +333,161 @@ def test_session_turns_and_model(tracker, tmp_path):
     assert s["model"] == "claude-opus"  # dominant by tokens
 
 
-def test_tool_calls_is_null_not_zero(tracker, tmp_path):
-    """Tool invocations are not persisted in the usage schema, so the honest
-    answer is null -- a 0 would read as 'no tools were used'."""
+def test_tool_calls_zero_when_turn_used_no_tools(tracker, tmp_path):
+    """A turn with usage and no tool_use blocks is a real 'zero tools' answer."""
     _ingest(tracker, tmp_path, [_assistant_line("u1")])
     report = tracker.range_report("all")
-    assert report["kpis"]["tool_calls"] is None
-    assert report["sessions"][0]["tool_calls"] is None
+    assert report["kpis"]["tool_calls"] == 0
+    assert report["sessions"][0]["tool_calls"] == 0
+    assert report["by_tool"] == []
+
+
+# -- tool calls: KPIs, by_tool, coverage honesty ---------------------------
+
+
+def test_tool_use_block_is_counted_with_its_name(tracker, tmp_path):
+    _ingest(tracker, tmp_path, [_tool_line("u1", ["Read"])])
+    report = tracker.range_report("all")
+    assert report["kpis"]["tool_calls"] == 1
+    assert report["by_tool"] == [{"tool_name": "Read", "calls": 1, "share": 1.0}]
+
+
+def test_multiple_tool_blocks_in_one_message_all_counted(tracker, tmp_path):
+    _ingest(tracker, tmp_path, [_tool_line("u1", ["Read", "Edit", "Read"])])
+    report = tracker.range_report("all")
+    assert report["kpis"]["tool_calls"] == 3
+    assert report["by_tool"][0] == {"tool_name": "Read", "calls": 2, "share": pytest.approx(2 / 3, abs=1e-5)}
+
+
+def test_by_tool_sorted_desc_and_shares_sum_to_one(tracker, tmp_path):
+    _ingest(tracker, tmp_path, [
+        _tool_line("u1", ["Read", "Read", "Read"]),
+        _tool_line("u2", ["Bash", "Bash"]),
+        _tool_line("u3", ["Grep"]),
+    ])
+    report = tracker.range_report("all")
+    assert [t["tool_name"] for t in report["by_tool"]] == ["Read", "Bash", "Grep"]
+    assert [t["calls"] for t in report["by_tool"]] == [3, 2, 1]
+    assert sum(t["share"] for t in report["by_tool"]) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_kpi_tool_calls_equals_sum_of_session_tool_calls(tracker, tmp_path):
+    _ingest(tracker, tmp_path, [_tool_line("a1", ["Read", "Edit"])],
+            terminal_id="t-a", name="a.jsonl")
+    _ingest(tracker, tmp_path, [_tool_line("b1", ["Bash"])],
+            terminal_id="t-b", name="b.jsonl")
+    report = tracker.range_report("all")
+    assert report["kpis"]["tool_calls"] == 3
+    assert sum(s["tool_calls"] for s in report["sessions"]) == report["kpis"]["tool_calls"]
+
+
+def test_tool_events_since_null_on_empty_store(tracker):
+    assert tracker.range_report("all")["tool_events_since"] is None
+    assert tracker.range_report("7d")["tool_events_since"] is None
+
+
+def test_tool_events_since_is_earliest_tool_event(tracker, tmp_path):
+    old, new = _iso(9), _iso(1)
+    _ingest(tracker, tmp_path, [
+        _tool_line("u1", ["Read"], ts=new),
+        _tool_line("u2", ["Bash"], ts=old),
+    ])
+    # Not range-scoped: a 24h range still reports the store's earliest event so
+    # the UI can say coverage started before the range.
+    assert tracker.range_report("all")["tool_events_since"] == old
+    assert tracker.range_report("24h")["tool_events_since"] == old
+
+
+def test_historical_usage_rows_without_tool_events_are_not_papered_over(tracker, tmp_path):
+    """Pre-tool-tracking rows legitimately contribute 0 tool calls; the report
+    must NOT invent them, and tool_events_since marks where coverage begins."""
+    _ingest(tracker, tmp_path, [_assistant_line("old", ts=_iso(20))])
+    _ingest(tracker, tmp_path, [_tool_line("new", ["Read"], ts=_iso(1))],
+            name="b.jsonl")
+    report = tracker.range_report("30d")
+    assert report["kpis"]["turns"] == 2
+    assert report["kpis"]["tool_calls"] == 1
+    # Coverage starts at the first tool event, well after the oldest usage row.
+    assert report["tool_events_since"] is not None
+    assert report["tool_events_since"] > _iso(20)
+
+
+# -- prior-period deltas ---------------------------------------------------
+
+
+def test_previous_unavailable_on_fresh_store(tracker):
+    for rng in ("24h", "7d", "30d"):
+        prev = tracker.range_report(rng)["previous"]
+        assert prev == {"available": False, "kpis": None}
+
+
+def test_previous_unavailable_for_range_all(tracker, tmp_path):
+    _ingest(tracker, tmp_path, [_assistant_line("u1", ts=_iso(100))])
+    assert tracker.range_report("all")["previous"] == {"available": False, "kpis": None}
+
+
+def test_previous_available_when_prior_data_exists(tracker, tmp_path):
+    # 1.5 days ago falls in the 24h window BEFORE the current 24h window.
+    _ingest(tracker, tmp_path, [
+        _assistant_line("now", input_tokens=100, output_tokens=0, ts=_iso(0.1)),
+        _assistant_line("prior", input_tokens=40, output_tokens=0, ts=_iso(1.5)),
+    ])
+    report = tracker.range_report("24h")
+    assert report["kpis"]["total_tokens"] == 100
+    prev = report["previous"]
+    assert prev["available"] is True
+    assert prev["kpis"]["total_tokens"] == 40
+    assert set(prev["kpis"]) == set(report["kpis"])
+
+
+def test_previous_window_boundaries_are_exactly_the_preceding_period(tracker, tmp_path):
+    """Fabricated timestamps either side of both boundaries of the 24h prior
+    window: only the row strictly inside it may be counted."""
+    _ingest(tracker, tmp_path, [
+        # too new -- inside the CURRENT window, not the prior one
+        _assistant_line("current", input_tokens=1, output_tokens=0, ts=_iso(0.5)),
+        # inside the prior window (between 24h and 48h ago)
+        _assistant_line("prior", input_tokens=200, output_tokens=0, ts=_iso(1.5)),
+        # too old -- before the prior window opened (>48h ago)
+        _assistant_line("ancient", input_tokens=9999, output_tokens=0, ts=_iso(2.5)),
+    ])
+    prev = tracker.range_report("24h")["previous"]
+    assert prev["available"] is True
+    assert prev["kpis"]["total_tokens"] == 200
+    assert prev["kpis"]["turns"] == 1
+
+
+def test_previous_counts_tool_calls_in_prior_window(tracker, tmp_path):
+    _ingest(tracker, tmp_path, [
+        _tool_line("now", ["Read"], ts=_iso(0.1)),
+        _tool_line("prior", ["Bash", "Edit"], ts=_iso(1.5)),
+    ])
+    report = tracker.range_report("24h")
+    assert report["kpis"]["tool_calls"] == 1
+    assert report["previous"]["kpis"]["tool_calls"] == 2
+
+
+def test_previous_uses_same_kpi_path_as_current(tracker, tmp_path):
+    """Shift the same single row from the current window into the prior window
+    and the KPI dict must come out identical -- proof both periods run through
+    one aggregation path."""
+    _ingest(tracker, tmp_path, [
+        _assistant_line("a", input_tokens=250, output_tokens=10,
+                        cache_read=750, cache_creation=100, ts=_iso(0.1))],
+            terminal_id="t1", name="a.jsonl")
+    current = tracker.range_report("24h")["kpis"]
+
+    t2 = UsageTracker(db_path=tmp_path / "other.sqlite3")
+    try:
+        _ingest(t2, tmp_path, [
+            _assistant_line("a", input_tokens=250, output_tokens=10,
+                            cache_read=750, cache_creation=100, ts=_iso(1.5))],
+                terminal_id="t1", name="b.jsonl")
+        prior = t2.range_report("24h")["previous"]
+    finally:
+        t2.close()
+    assert prior["available"] is True
+    assert prior["kpis"] == current
 
 
 def test_range_filters_old_rows_out(tracker, tmp_path):

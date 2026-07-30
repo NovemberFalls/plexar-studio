@@ -24,6 +24,54 @@ const ThemeContext = createContext(null);
  */
 export const TOKEN_COMMIT_MS = 120;
 
+/**
+ * Broadcast after this hook writes settings behind the Settings section's back,
+ * so `useSettings` can refetch instead of holding a copy it does not know is
+ * stale. Listened for in hooks/useSettings.js.
+ */
+export const SETTINGS_CHANGED_EVENT = "cockpit:settings-changed";
+
+/**
+ * Persist the override map to settings.json.
+ *
+ * WHY THIS EXISTS — the bug it fixes: clearing an override used to write React
+ * state and the localStorage mirror ONLY. But ThemeProvider's mount-time
+ * /api/settings read treats a present `appearance.token_overrides` as
+ * authoritative and overwrites the mirror. So "Clear token override" appeared to
+ * work, and then the override came BACK on the next launch — a remedy that
+ * silently un-did itself, which is the exact class of behavior we are removing.
+ *
+ * WHOLE MAP, ALWAYS. `appearance.token_overrides` is a WHOLE_DICT_PATH (see
+ * useSettings.js): the backend REPLACES that key rather than deep-merging,
+ * because a free-form map has to allow deletion. A narrow patch would silently
+ * destroy every sibling override. `{}` is meaningful ("clear them all") and is
+ * NOT the same as omitting the key.
+ *
+ * Resolves {ok: true} or {ok: false, error} — never throws, and never reports
+ * success it did not get. A swallowed failure here would reproduce the original
+ * bug in a new place.
+ */
+export async function persistTokenOverrides(map) {
+  const clean = sanitizeOverrides(map);
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ appearance: { token_overrides: clean } }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { ok: false, error: data?.error || "The settings service rejected the change." };
+    }
+    window.dispatchEvent(
+      new CustomEvent(SETTINGS_CHANGED_EVENT, { detail: { section: "appearance" } })
+    );
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Could not reach the settings service." };
+  }
+}
+
 /** Parses a `storage` event payload. Returns undefined when unusable. */
 function parseMirrorPayload(raw, sanitize) {
   if (raw === null) return {};        // key removed => a real "clear them all"
@@ -130,15 +178,30 @@ export function ThemeProvider({ children }) {
     commitTimerRef.current = setTimeout(publishOverrides, TOKEN_COMMIT_MS);
   }, [paintOverrides, cancelPendingCommit, publishOverrides]);
 
+  /**
+   * DISCRETE actions persist to the server; the live drag (setTokenOverride)
+   * deliberately does not. A drag is a provisional edit that the tokens page
+   * routes through the Settings draft and its explicit `Save changes`;
+   * persisting per pointer-move would spam the endpoint and fight that draft.
+   * A clear is a decision, and it has to outlive the process — see
+   * persistTokenOverrides' header for the bug this closes.
+   *
+   * Both resolve {ok, error?} so the caller can SHOW a failure. The local clear
+   * stands either way (the picker is usable again in this window immediately);
+   * what a failed PUT costs is durability, and the UI says so rather than
+   * implying the override is gone for good.
+   */
   const clearTokenOverride = useCallback((name) => {
-    if (!(name in pendingRef.current)) return;
+    if (!(name in pendingRef.current)) return Promise.resolve({ ok: true, changed: false });
     const next = { ...pendingRef.current };
     delete next[name];
     commitOverrides(next);             // discrete action: publish at once
+    return persistTokenOverrides(next);
   }, [commitOverrides]);
 
   const resetTokenOverrides = useCallback(() => {
     commitOverrides({});
+    return persistTokenOverrides({});  // {} means "clear them all", not "leave alone"
   }, [commitOverrides]);
 
   // A drag that is still mid-flight when the window closes must not be lost.
@@ -268,6 +331,7 @@ export function ThemeProvider({ children }) {
         tokenOverrides,
         overrideCount: Object.keys(tokenOverrides).length,
         setTokenOverride, clearTokenOverride, resetTokenOverrides,
+        persistTokenOverrides,
         userPalettes, savePalette, applyPalette, deletePalette,
         adoptServerTheme,
         tokenGroups: TOKEN_GROUPS,
@@ -309,8 +373,9 @@ export function useThemeSafe() {
     tokenOverrides: {},
     overrideCount: 0,
     setTokenOverride: () => {},
-    clearTokenOverride: () => {},
-    resetTokenOverrides: () => {},
+    clearTokenOverride: () => Promise.resolve({ ok: true, changed: false }),
+    resetTokenOverrides: () => Promise.resolve({ ok: true }),
+    persistTokenOverrides: () => Promise.resolve({ ok: true }),
     userPalettes: {},
     savePalette: () => {},
     applyPalette: () => {},

@@ -15,7 +15,7 @@
  * of being guessed at.
  */
 
-import { DASH, fmtCost, fmtCount, isMissing, num, sessionLabel, sumColumn } from "./format.js";
+import { DASH, fmtCost, fmtCount, num, sessionLabel, sumColumn } from "./format.js";
 
 const ROW_H = 34;
 
@@ -213,11 +213,10 @@ export default function SessionsTable({ rows, statusByTerminalId, onOpenTrace, t
   const cacheRead = sumColumn(list, "cache_read");
   const cacheWrite = sumColumn(list, "cache_write");
 
-  // The Tools column has no source today (tool_use events are not persisted),
-  // so it is uniformly empty. An unexplained empty column reads as a bug — and
-  // worse, as "you made zero tool calls", which is certainly false. The note is
-  // conditional so it disappears the day the backend starts storing them.
-  const toolsUnsourced = list.length > 0 && list.every((r) => isMissing(r?.tool_calls));
+  // The Tools column is sourced now (sessions[].tool_calls is a real integer),
+  // so there is no unsourced-column note here any more. Range-level coverage of
+  // tool recording is stated once by ReportsView from `tool_events_since`
+  // instead of being repeated per card.
 
   return (
     <div
@@ -320,24 +319,6 @@ export default function SessionsTable({ rows, statusByTerminalId, onOpenTrace, t
           </table>
         </div>
       )}
-
-      {toolsUnsourced ? (
-        <div
-          role="note"
-          data-testid="tools-unsourced-note"
-          style={{
-            padding: "9px 16px",
-            borderTop: "1px solid var(--cc-line)",
-            fontSize: 10,
-            lineHeight: 1.5,
-            color: "var(--cc-muted)",
-          }}
-        >
-          The Tools column is empty because tool calls are not recorded yet — Cockpit stores token
-          usage per assistant turn, and individual tool calls are not saved anywhere it can count
-          them. This is missing data, not a count of zero.
-        </div>
-      ) : null}
     </div>
   );
 }

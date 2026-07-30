@@ -406,11 +406,16 @@ export default function TopBar({
                   const isOpenRouterGroup = group.provider === "openrouter";
                   const isLocalGroup = group.provider === "local";
                   const groupDisabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localLaunchEnabled);
-                  const groupHint = isLocalGroup && !localLaunchEnabled
-                    ? "Enable the local broker to launch local models"
-                    : groupDisabled
-                      ? "Add a key via the key icon to enable"
-                      : null;
+                  // A group may carry its own note — e.g. a local provider that
+                  // does not publish a model list. That is NOT an offline claim,
+                  // so it must not be phrased or styled as an error.
+                  const groupHint = group.note
+                    ? group.note
+                    : isLocalGroup && !localLaunchEnabled
+                      ? "Enable the local broker to launch local models"
+                      : groupDisabled
+                        ? "Add a key via the key icon to enable"
+                        : null;
                   return (
                     <div key={group.label}>
                       {gi > 0 && (
