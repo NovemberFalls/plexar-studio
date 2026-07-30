@@ -6,6 +6,7 @@
    session can be configured with. */
 import { useState, useEffect } from "react";
 import { PanelLeft, ChevronDown, KeyRound, Cpu } from "lucide-react";
+import UsageLimitsPill from "./UsageLimitsPill";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 import {
@@ -76,6 +77,7 @@ export default function TopBar({
   const [themeOpen, setThemeOpen] = useState(false);
   const [openRouterOpen, setOpenRouterOpen] = useState(false);
   const [localOpen, setLocalOpen] = useState(false);
+  const [limitsOpen, setLimitsOpen] = useState(false);
   // tri-state: null = not yet checked, true/false = last known GET result
   const [openRouterConfigured, setOpenRouterConfigured] = useState(null);
 
@@ -128,6 +130,7 @@ export default function TopBar({
     setEffortOpen(false);
     setThemeOpen(false);
     setLocalOpen(false);
+    setLimitsOpen(false);
   }
 
   const live = laneLive(localQueue, localMetrics);
@@ -169,6 +172,14 @@ export default function TopBar({
       <div className="flex items-center" style={{ gap: 7 }}>
         {/* Fleet view lives in the ActivityRail (left) — deliberately NOT
             duplicated here; the top bar owns session levers + the broker. */}
+
+        {/* Claude subscription limits — real 5-hour / weekly utilization,
+            the same figures the CLI shows under /status. */}
+        <UsageLimitsPill
+          open={limitsOpen}
+          onToggle={() => { const wasOpen = limitsOpen; closeAll(); setLimitsOpen(!wasOpen); }}
+          onClose={() => setLimitsOpen(false)}
+        />
 
         {/* Local broker — queue + metrics (machine-global). Compact live
             readout when enabled; dim icon otherwise. Click opens the drawer. */}
