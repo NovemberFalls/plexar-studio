@@ -46,6 +46,7 @@ import {
   Terminal,
   TriangleAlert,
 } from "lucide-react";
+import SpillPolicy from "./SpillPolicy";
 
 // ── tokens / shared style fragments ───────────────────────
 const ACCENT_FG = "#0f1216"; // the one permitted literal: accent-button foreground
@@ -865,6 +866,13 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
 
   const rows = providers || [];
   const byKind = (kind) => rows.find((p) => p.kind === kind) || null;
+  // The spill card hosts whichever backend declares the `spill` capability —
+  // spill is a lane-broker feature, so in practice that is the broker-fronted
+  // provider. Passed down as a prop rather than re-fetched so the page keeps
+  // exactly one /api/local/providers read.
+  const spillProvider = rows.find(
+    (p) => Array.isArray(p.capabilities) && p.capabilities.includes("spill")
+  ) || null;
   const lmStudio = byKind("lmstudio");
   const vllm = byKind("vllm");
   const ollama = byKind("ollama");
@@ -975,6 +983,15 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           hint="1 keeps decode fastest"
         />
         <NotEnforcedNote name="lane-broker" what="Lane concurrency" />
+      </div>
+
+      {/* ── Spill policy + its translation panel ──────── */}
+      {/* The translation table sits BESIDE the control, never in a tooltip — it
+          is what makes a seconds threshold comprehensible. The pair is wider
+          than the settings column, so it scrolls horizontally rather than
+          squashing either half. */}
+      <div style={{ overflowX: "auto", overflowY: "hidden", minWidth: 0, paddingBottom: 2 }}>
+        <SpillPolicy provider={spillProvider} loading={providers === null} />
       </div>
 
       {/* ── Backends ──────────────────────────────────── */}

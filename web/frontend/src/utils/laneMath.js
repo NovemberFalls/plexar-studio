@@ -110,6 +110,27 @@ export function waitEquivalent(thresholdDepth, p50WallSeconds) {
 }
 
 /**
+ * Would a request submitted at this predicted wait be spilled to the API?
+ *
+ * The comparison is STRICTLY GREATER, pinned from broker source
+ * (broker.py::_queued_forward): `if threshold is not None and predicted >
+ * threshold`. A predicted wait exactly equal to the threshold runs LOCALLY.
+ * Getting this off by one boundary would make the translation panel disagree
+ * with the broker on precisely the row the operator is squinting at.
+ *
+ * @returns {boolean|null} null when the answer is unknowable — either the wait
+ *   is unmeasured (no p50) or the threshold is null (spill disabled for the
+ *   class, so nothing ever spills, which is `false` not `null`). Only the
+ *   unmeasured case is null.
+ */
+export function wouldSpill(predictedWait, thresholdSeconds) {
+  if (thresholdSeconds === null || thresholdSeconds === undefined) return false; // spill disabled
+  if (typeof thresholdSeconds !== "number" || !isFinite(thresholdSeconds) || thresholdSeconds < 0) return null;
+  if (typeof predictedWait !== "number" || !isFinite(predictedWait) || predictedWait < 0) return null;
+  return predictedWait > thresholdSeconds;
+}
+
+/**
  * Fraction of the way to the spill trigger, clamped to 0..1 — the fill of the
  * lane pressure meter and of the per-class live bars.
  *
