@@ -68,6 +68,18 @@ def to_session():
     return _make_mock_session("to-002", "To Session")
 
 
+@pytest.fixture(autouse=True)
+def _no_submit_delay(monkeypatch):
+    """Zero the paste→submit gap for the whole module.
+
+    Injection is deliberately two writes separated by ``_SUBMIT_DELAY`` (1s in
+    production) so the CR lands as a keypress rather than as pasted content.
+    Paying that second per injection would add minutes to the suite, and no
+    test here is asserting the duration.
+    """
+    monkeypatch.setattr(bm_module, "_SUBMIT_DELAY", 0)
+
+
 @pytest.fixture()
 def patch_pty(monkeypatch, from_session, to_session):
     """Monkeypatch pty_manager on the bridge_manager module.
@@ -76,6 +88,11 @@ def patch_pty(monkeypatch, from_session, to_session):
     write_pty_async call.
     """
     sessions = {from_session.id: from_session, to_session.id: to_session}
+
+    # Injection is two writes — the bracketed-paste block, then a bare CR after
+    # _SUBMIT_DELAY (see bridge_manager._paste_and_submit).  Zero the delay so
+    # the suite does not pay a real second per injection.
+    monkeypatch.setattr(bm_module, "_SUBMIT_DELAY", 0)
 
     monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
     monkeypatch.setattr(bm_module.pty_manager, "_get_jsonl_path", lambda s: "/tmp/fake.jsonl")
@@ -89,6 +106,32 @@ def patch_pty(monkeypatch, from_session, to_session):
     monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
 
     return write_calls
+
+
+def paste_only(write_calls):
+    """Filter out the bare-CR submit writes, keeping paste writes in order.
+
+    Unlike ``pastes()`` this makes no pairing assertion, so it is safe to call
+    while relays are still in flight (a paste may not have been submitted yet).
+    """
+    return [c for c in write_calls if c[1] != bm_module._SUBMIT]
+
+
+def pastes(write_calls):
+    """Return only the bracketed-paste writes, asserting each one was submitted.
+
+    Every injection is a paste write followed by a separate bare-CR write; a
+    paste with no trailing submit is the "message sits in the composer forever"
+    bug, so this helper refuses to hide it.
+    """
+    submits = [c for c in write_calls if c[1] == bm_module._SUBMIT]
+    paste_calls = [c for c in write_calls if c[1] != bm_module._SUBMIT]
+    assert len(submits) == len(paste_calls), (
+        f"expected one submit per paste, got {len(paste_calls)} pastes / {len(submits)} submits"
+    )
+    for tid, _data in paste_calls:
+        assert (tid, bm_module._SUBMIT) in submits, f"paste to {tid} was never submitted"
+    return paste_calls
 
 
 # ---------------------------------------------------------------------------
@@ -120,14 +163,17 @@ async def test_start_manual_writes_bracketed_paste(bm, patch_pty, from_session, 
     )
 
     assert result == {"ok": True}
-    assert len(patch_pty) == 1
-    _tid, data = patch_pty[0]
+    calls = pastes(patch_pty)
+    assert len(calls) == 1
+    _tid, data = calls[0]
     assert _tid == to_session.id
     # BP escapes present
     assert _BP_START in data
     assert _BP_END in data
-    # Submitted with CR
-    assert _SUBMIT in data
+    # The CR must NOT ride inside the paste — a CR in the same write is eaten
+    # as pasted content and the message never sends.  `pastes()` has already
+    # asserted a separate submit write followed this one.
+    assert _SUBMIT not in data
     # Prefix on its own line, then the message
     assert '[From session "From Session"]:' in data
     assert "Hello from the bridge" in data
@@ -200,8 +246,9 @@ async def test_start_manual_default_prefix_when_none(bm, patch_pty, from_session
     result = await bm.start_manual(from_session.id, to_session.id, "bare message", prefix=None)
 
     assert result == {"ok": True}
-    assert len(patch_pty) == 1
-    _tid, data = patch_pty[0]
+    calls = pastes(patch_pty)
+    assert len(calls) == 1
+    _tid, data = calls[0]
     assert "bare message" in data
     # No spurious prefix line when None
     assert "[From session" not in data
@@ -281,7 +328,8 @@ async def test_start_auto_no_jsonl_still_starts(bm, monkeypatch, from_session, t
     assert result.get("ok") is True, f"Expected ok=True for no-JSONL sessions, got: {result}"
     assert "bridge_id" in result
     # Kickoff writes must still have been sent to both sides
-    assert len(write_calls) == 2, f"Expected 2 kickoff writes, got {len(write_calls)}"
+    kickoffs = pastes(write_calls)
+    assert len(kickoffs) == 2, f"Expected 2 kickoff pastes, got {len(kickoffs)}"
 
     # Cleanup
     bid = result["bridge_id"]
@@ -348,13 +396,14 @@ async def test_start_auto_kicks_off_both_sides(bm, patch_pty, from_session, to_s
     await asyncio.sleep(0)
 
     # Two kickoff writes: one per session
-    assert len(patch_pty) == 2
-    target_ids = {tid for tid, _ in patch_pty}
+    calls = pastes(patch_pty)
+    assert len(calls) == 2
+    target_ids = {tid for tid, _ in calls}
     assert from_session.id in target_ids
     assert to_session.id in target_ids
 
     # Each kickoff contains the BP start
-    for _tid, data in patch_pty:
+    for _tid, data in calls:
         assert _BP_START in data
 
     # Cleanup
@@ -546,7 +595,7 @@ async def test_sentinel_in_relay_text_ends_bridge(bm, monkeypatch, from_session,
 
     # The message was delivered: at least one relay write happened (beyond the two kickoffs).
     # At minimum the kickoff writes (2) plus the relay write (1).
-    assert len(write_calls) >= 3
+    assert len(paste_only(write_calls)) >= 3
 
 
 # ---------------------------------------------------------------------------
@@ -895,20 +944,21 @@ async def test_channel_start_sends_kickoff_to_all(monkeypatch):
     await asyncio.sleep(0)
 
     # Exactly 3 kickoff writes: lead + 2 workers
-    assert len(write_calls) == 3, f"Expected 3 kickoff writes, got {len(write_calls)}: {[t for t, _ in write_calls]}"
+    kickoffs = pastes(write_calls)
+    assert len(kickoffs) == 3, f"Expected 3 kickoff pastes, got {len(kickoffs)}: {[t for t, _ in kickoffs]}"
 
     # All must contain _BP_START
-    for tid, data in write_calls:
+    for tid, data in kickoffs:
         assert _BP_START in data, f"Missing _BP_START in kickoff to {tid}"
 
     # Lead kickoff goes to lead.id and contains "LEAD"
-    lead_writes = [(tid, data) for tid, data in write_calls if tid == lead.id]
+    lead_writes = [(tid, data) for tid, data in kickoffs if tid == lead.id]
     assert len(lead_writes) == 1, f"Expected 1 lead write, got {len(lead_writes)}"
     assert "LEAD" in lead_writes[0][1], "Lead kickoff must contain 'LEAD'"
 
     # Worker kickoffs go to worker IDs and each contains "WORKER"
     for w in workers:
-        worker_writes = [(tid, data) for tid, data in write_calls if tid == w.id]
+        worker_writes = [(tid, data) for tid, data in kickoffs if tid == w.id]
         assert len(worker_writes) == 1, f"Expected 1 write for worker {w.id}, got {len(worker_writes)}"
         assert "WORKER" in worker_writes[0][1], f"Worker kickoff for {w.id} must contain 'WORKER'"
 
@@ -1025,7 +1075,8 @@ async def test_channel_start_no_jsonl_still_starts(monkeypatch):
     assert result.get("ok") is True, f"Expected ok=True for no-JSONL sessions, got: {result}"
     assert "channel_id" in result
     # Kickoff writes must still have been sent to all 3 members (lead + 2 workers)
-    assert len(write_calls) == 3, f"Expected 3 kickoff writes, got {len(write_calls)}"
+    kickoffs = pastes(write_calls)
+    assert len(kickoffs) == 3, f"Expected 3 kickoff pastes, got {len(kickoffs)}"
 
     record = cm._channels[result["channel_id"]]
     await _cancel_channel_tasks(record)
@@ -1194,11 +1245,11 @@ async def test_channel_worker_relay_targets_lead_only(monkeypatch):
     for _ in range(30):
         await asyncio.sleep(0.05)
         # Relay writes come AFTER the 3 kickoff writes
-        if len(write_calls) > 3:
+        if len(paste_only(write_calls)) > 3:
             break
 
     # Collect relay writes (beyond the initial 3 kickoff writes)
-    relay_writes = write_calls[3:]
+    relay_writes = paste_only(write_calls)[3:]
     assert len(relay_writes) >= 1, "Expected at least one relay write from w1"
 
     # All relay write targets must be the lead (not w2)
@@ -1251,10 +1302,10 @@ async def test_channel_lead_relay_targets_all_workers(monkeypatch):
     # Wait for the lead relay to write to both workers
     for _ in range(30):
         await asyncio.sleep(0.05)
-        if len(write_calls) > 4:  # 3 kickoffs + at least 2 relay writes
+        if len(paste_only(write_calls)) > 4:  # 3 kickoff pastes + >=2 relay pastes
             break
 
-    relay_writes = write_calls[3:]
+    relay_writes = paste_only(write_calls)[3:]
     relay_targets = {tid for tid, _ in relay_writes}
 
     assert w1.id in relay_targets, f"w1 not among relay targets: {relay_targets}"
@@ -1401,8 +1452,9 @@ async def test_start_manual_large_payload_uses_file_handoff(bm, patch_pty, from_
     )
 
     assert result == {"ok": True}
-    assert len(patch_pty) == 1
-    _tid, data = patch_pty[0]
+    calls = pastes(patch_pty)
+    assert len(calls) == 1
+    _tid, data = calls[0]
     assert _tid == to_session.id
 
     # The PTY payload must NOT contain the full body (3000 A's)
@@ -1467,8 +1519,9 @@ async def test_start_manual_small_payload_stays_inline(bm, patch_pty, from_sessi
     )
 
     assert result == {"ok": True}
-    assert len(patch_pty) == 1
-    _tid, data = patch_pty[0]
+    calls = pastes(patch_pty)
+    assert len(calls) == 1
+    _tid, data = calls[0]
     assert _tid == to_session.id
 
     # Full message must appear inline in the payload
@@ -1579,7 +1632,7 @@ async def test_inject_large_payload_uses_file_handoff(monkeypatch, from_session,
 
     # _inject now returns a string sentinel: "ok" | "skip" | "fatal"
     assert inject_result == "ok", f"_inject should return 'ok' on success, got {inject_result!r}"
-    assert len(write_calls) == 1
+    assert len(pastes(write_calls)) == 1
 
     _tid, data = write_calls[0]
     assert _tid == to_session.id

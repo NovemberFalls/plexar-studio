@@ -34,6 +34,75 @@ logger = logging.getLogger("cockpit.pty")
 # paste fragmentation on ~400-byte pastes where ConPTY silently drops bytes.
 _INTER_CHUNK_DELAY = 0.010
 
+# Size at or below which a write goes out as ONE call, uncut.
+#
+# This was 200 bytes, which meant an ordinary bridge message (~700 bytes) was
+# sliced into four chunks — and the slicer cut at a blind byte offset, so a cut
+# could land *inside* the `\x1b[200~` / `\x1b[201~` bracketed-paste markers.  A
+# split marker means the receiving TUI never enters paste mode at all, so every
+# embedded newline submits separately and one message arrives as several
+# mangled fragments.  64 KB puts every realistic paste (and every bridge
+# message) on the single-write path.
+#
+# Chunking still exists above this ceiling, because ConPTY's input pipe really
+# does drop bytes on multi-thousand-line pastes — but it is now a safety valve
+# for genuinely huge payloads instead of the normal path, and its boundaries
+# are escape-aware (see _split_preserving_escapes).
+_SINGLE_WRITE_MAX = 65536
+
+# Chunk size used only above _SINGLE_WRITE_MAX.
+_CHUNK_SIZE = 4096
+
+def _split_preserving_escapes(data: str, chunk_size: int) -> list[str]:
+    """Split *data* into ~*chunk_size* pieces without ever cutting an escape.
+
+    A boundary that falls inside an ANSI escape sequence (notably the
+    bracketed-paste markers ``\\x1b[200~`` / ``\\x1b[201~``) delivers a broken
+    sequence to the receiving TUI, which then never enters paste mode and
+    treats every embedded newline as a submit — one message arrives as several
+    fragments.  This walks each candidate boundary backwards to the start of
+    any escape sequence it landed in, so sequences always cross intact.
+
+    A boundary is unsafe when an ``\\x1b`` appears within the short window
+    before it with no sequence-terminating byte in between.  ANSI CSI
+    terminators are ``@``-``~`` (0x40-0x7E); the search window is bounded so a
+    lone stray ESC in ordinary text can never rewind the split arbitrarily far.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    # Longest escape sequence we guard against; bracketed-paste markers are 6
+    # bytes, so 16 is generous headroom without unbounded backtracking.
+    max_escape_len = 16
+
+    chunks: list[str] = []
+    pos = 0
+    n = len(data)
+    while pos < n:
+        end = min(pos + chunk_size, n)
+        if end < n:
+            # Walk back to just before an ESC that this boundary would bisect.
+            window_start = max(pos, end - max_escape_len)
+            esc = data.rfind("\x1b", window_start, end)
+            if esc != -1:
+                # Unsafe only if the sequence has not already terminated.
+                # For CSI (``ESC [``) the terminator search must start AFTER the
+                # ``[`` introducer — ``[`` is 0x5B and so sits inside the
+                # 0x40-0x7E final-byte range, which would otherwise read every
+                # CSI sequence as already complete the moment its ``[`` arrived.
+                tail = data[esc:end]
+                body = tail[2:] if tail[1:2] == "[" else tail[1:]
+                if not any("\x40" <= ch <= "\x7e" for ch in body):
+                    # Never emit an empty chunk — if the ESC sits at the very
+                    # start of this chunk the sequence is longer than the
+                    # window, so take the boundary as-is rather than stall.
+                    if esc > pos:
+                        end = esc
+        chunks.append(data[pos:end])
+        pos = end
+    return chunks
+
+
 # Environment override letting a user point cockpit at a `claude` binary that
 # lives somewhere none of the standard installers use.
 _CLAUDE_CLI_PATH_ENV = "CLAUDE_CLI_PATH"
@@ -1302,11 +1371,11 @@ class PtyManager:
             data_len = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
             timeout = max(5.0, 5.0 + (data_len / 32768))
 
-            # Small payloads: single write (fast path).
-            # Threshold is 200 bytes — lowered from 400 to match the new chunk
-            # size so that any paste that would have been chunked still goes
-            # through the slower path with inter-chunk delays.
-            if data_len <= 200:
+            # Single write for anything up to _SINGLE_WRITE_MAX (64 KB), which
+            # covers every bridge message and every ordinary paste.  Keeping the
+            # payload in one call is what guarantees the bracketed-paste markers
+            # arrive intact — see _SINGLE_WRITE_MAX.
+            if data_len <= _SINGLE_WRITE_MAX:
                 try:
                     return await asyncio.wait_for(
                         loop.run_in_executor(
@@ -1322,12 +1391,10 @@ class PtyManager:
                     logger.debug("PTY async write error for %s", terminal_id)
                     return False
 
-            # Larger payloads: chunk with async yields to let the pipe drain.
-            # 200-byte chunks keep each write well under ConPTY's pipe limit.
-            chunk_size = 200
-            offset = 0
-            while offset < len(data):
-                chunk = data[offset:offset + chunk_size]
+            # Above the ceiling: chunk with async yields to let the pipe drain,
+            # on boundaries that never fall inside an ANSI escape sequence.
+            chunks = _split_preserving_escapes(data, _CHUNK_SIZE)
+            for chunk_index, chunk in enumerate(chunks):
                 try:
                     ok = await asyncio.wait_for(
                         loop.run_in_executor(
@@ -1339,20 +1406,19 @@ class PtyManager:
                         return False
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "PTY write timed out for %s at offset %d/%d",
-                        terminal_id, offset, len(data),
+                        "PTY write timed out for %s at chunk %d/%d",
+                        terminal_id, chunk_index + 1, len(chunks),
                     )
                     session.alive = False
                     return False
                 except Exception:
                     logger.debug("PTY async write error for %s", terminal_id)
                     return False
-                offset += chunk_size
                 # Yield to event loop between chunks so the ConPTY pipe can drain
                 # and heartbeats stay responsive.  A real delay (not just sleep(0))
                 # is required for ConPTY — the pseudoconsole input buffer drops
                 # bytes when chunks arrive faster than claude.exe can consume them.
-                if offset < len(data):
+                if chunk_index + 1 < len(chunks):
                     await asyncio.sleep(_INTER_CHUNK_DELAY)
             return True
 

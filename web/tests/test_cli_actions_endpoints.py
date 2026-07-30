@@ -31,6 +31,7 @@ logging_config.setup("WARNING")
 from server import app
 import server as server_module
 from pty_manager import TerminalSession
+import bridge_manager  # _SUBMIT: injection is paste-then-submit, two writes
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,12 @@ def _mock_session_for_write_tests(terminal_id="term-cli", alive=True):
 # ---------------------------------------------------------------------------
 # PATCH /api/terminals/{terminal_id} — validation
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_submit_delay(monkeypatch):
+    """Zero the paste->submit gap; production waits 1s between the two writes."""
+    monkeypatch.setattr(bridge_manager, "_SUBMIT_DELAY", 0)
 
 
 @pytest.mark.asyncio
@@ -179,10 +186,14 @@ async def test_rename_sync_claude_success_injects_rename_command(client, monkeyp
     assert data["sync_requested"] is True
     assert data["claude_synced"] is True
 
-    assert len(write_calls) == 1
+    # Two writes: the bracketed-paste block, then a separate bare-CR submit.
+    # The CR must not ride inside the paste — the TUI eats it as pasted
+    # content and the command would sit in the composer, never running.
+    assert len(write_calls) == 2
     tid, payload = write_calls[0]
     assert tid == "term-cli"
     assert "/rename New Name" in payload
+    assert write_calls[1] == ("term-cli", bridge_manager._SUBMIT)
 
 
 @pytest.mark.asyncio
@@ -426,10 +437,12 @@ async def test_command_success_injects_command(client, monkeypatch):
     assert res.status_code == 200
     assert res.json() == {"ok": True}
 
-    assert len(write_calls) == 1
+    # Paste write, then a separate submit CR — see the rename test above.
+    assert len(write_calls) == 2
     tid, payload = write_calls[0]
     assert tid == "term-cli"
     assert "/model opus" in payload  # bracketed-paste wrap surrounds the raw command
+    assert write_calls[1] == ("term-cli", bridge_manager._SUBMIT)
 
 
 @pytest.mark.asyncio

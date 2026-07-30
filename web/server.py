@@ -34,13 +34,14 @@ logger = logging.getLogger("cockpit.server")
 import pty_manager as pty_manager_module  # noqa: E402 -- module handle for resolve_claude_cli(); see /api/cli
 from pty_manager import ClaudeCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
-# _wait_for_idle_simple / _wrap are underscore-prefixed (bridge_manager treats
+# _wait_for_idle_simple / _paste_and_submit are underscore-prefixed (bridge_manager treats
 # them as internal helpers), but they are exactly the typing-quiet + idle gate
 # and bracketed-paste injection mechanics the CLI-actions routes below need
 # (PATCH rename sync, POST command). Reusing them here avoids re-implementing
 # proven injection machinery — see bridge_manager.py's V1 manual relay for the
 # same pattern.
-from bridge_manager import _wait_for_idle_simple, _wrap  # noqa: E402
+from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E402 -- _paste_and_submit, never _wrap: the submit CR must be a separate write or the TUI eats it as pasted content
+import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
 from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other local-module imports above
 import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the other local-module imports above
@@ -986,7 +987,7 @@ async def _sync_claude_rename(terminal_id: str, name: str) -> bool:
         idle = await _wait_for_idle_simple(terminal_id, timeout=_RENAME_SYNC_TIMEOUT)
         if not idle:
             return False
-        return bool(await pty_manager.write_pty_async(terminal_id, _wrap(f"/rename {name}")))
+        return bool(await _paste_and_submit(terminal_id, f"/rename {name}"))
     except Exception:
         logger.warning("Claude rename sync failed for terminal %s", terminal_id, exc_info=True)
         return False
@@ -1074,7 +1075,7 @@ async def send_terminal_command(terminal_id: str, request: Request):
     if not idle:
         return JSONResponse({"ok": False, "error": "Session is busy"}, status_code=409)
 
-    ok = await pty_manager.write_pty_async(terminal_id, _wrap(command))
+    ok = await _paste_and_submit(terminal_id, command)
     if not ok:
         return JSONResponse({"ok": False, "error": "PTY write failed"}, status_code=500)
     return JSONResponse({"ok": True})
@@ -1505,6 +1506,21 @@ async def get_spend_status():
     never raises and reports its own gaps via ``caveats``.
     """
     return JSONResponse(await asyncio.to_thread(spend_guard.evaluate))
+
+
+@app.get("/api/anthropic/usage")
+async def get_anthropic_usage(refresh: bool = False):
+    """Real subscription utilization — the 5-hour / weekly bars from `/status`.
+
+    ALWAYS 200, like /api/spend/status: this feeds an inline panel, and an HTTP
+    error would blank it. ``available: false`` plus a ``reason`` is how the
+    unavailable cases are reported, so the UI can say *why* (expired login vs.
+    no subscription vs. offline) instead of showing an empty bar.
+
+    The OAuth token stays server-side — only derived percentages and reset
+    timestamps cross to the browser.
+    """
+    return JSONResponse(await anthropic_usage.fetch_usage(force=refresh))
 
 
 @app.post("/api/bridge/manual")

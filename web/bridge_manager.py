@@ -60,6 +60,17 @@ _BP_END = "\x1b[201~"
 # Carriage-return used to submit the pasted block once bracketed-paste ends.
 _SUBMIT = "\r"
 
+# Delay between the bracketed-paste write and the submit carriage-return.
+#
+# The CR MUST NOT ride in the same write as the paste payload.  Claude Code's
+# TUI buffers stdin on `\x1b[200~` and flushes on `\x1b[201~`; a CR arriving in
+# that same read is consumed as *pasted content* (a newline inside a paste
+# inserts a line — it does not submit).  That is the "bridge pastes the prompt
+# but never sends it, so a human has to hit Enter" failure mode.  Writing the
+# CR separately, after the TUI has drained and re-rendered the paste, makes the
+# submit land as a real keypress.
+_SUBMIT_DELAY = 1.0
+
 _IDLE_POLL_INTERVAL = 0.5
 
 # How long _wait_for_idle will wait for a *live* peer to become idle before
@@ -162,8 +173,29 @@ class _BridgeRecord:
 # ---------------------------------------------------------------------------
 
 def _wrap(text: str) -> str:
-    """Wrap *text* in bracketed-paste escapes and append a carriage-return."""
-    return f"{_BP_START}{text}{_BP_END}{_SUBMIT}"
+    """Wrap *text* in bracketed-paste escapes.
+
+    Deliberately does NOT append the submit carriage-return — see
+    ``_SUBMIT_DELAY`` and ``_paste_and_submit``.  A CR in the same write is
+    swallowed as pasted content and the message never sends.
+    """
+    return f"{_BP_START}{text}{_BP_END}"
+
+
+async def _paste_and_submit(terminal_id: str, text: str) -> bool:
+    """Paste *text* into *terminal_id*, then submit it as a separate keypress.
+
+    Two writes with ``_SUBMIT_DELAY`` between them.  The first carries the
+    bracketed-paste block; the second carries a bare carriage-return once the
+    TUI has drained and re-rendered the paste.  Returns True only if BOTH
+    writes succeed — a paste that lands without its submit is exactly the
+    stuck-in-the-composer state this split exists to prevent, so callers must
+    treat it as a failed relay rather than a delivered one.
+    """
+    if not await pty_manager.write_pty_async(terminal_id, _wrap(text)):
+        return False
+    await asyncio.sleep(_SUBMIT_DELAY)
+    return await pty_manager.write_pty_async(terminal_id, _SUBMIT)
 
 
 # ---------------------------------------------------------------------------
@@ -422,10 +454,10 @@ async def _inject(
     # a redundant attribution header.
     inject_text = await _maybe_file_handoff(text, peer_name=None)
 
-    ok = await pty_manager.write_pty_async(terminal_id, _wrap(inject_text))
+    ok = await _paste_and_submit(terminal_id, inject_text)
     if not ok:
         logger.warning(
-            "[bridge %s] write_pty_async returned False for %s",
+            "[bridge %s] paste/submit failed for %s",
             record.bridge_id, terminal_id,
         )
         return "fatal"
@@ -772,7 +804,7 @@ class BridgeManager:
         # sender attribution even when the full body lives in the relay file.
         inject_text = await _maybe_file_handoff(full_text, peer_name=from_session.name)
 
-        ok = await pty_manager.write_pty_async(to_terminal_id, _wrap(inject_text))
+        ok = await _paste_and_submit(to_terminal_id, inject_text)
         if not ok:
             return {"ok": False, "error": "PTY write failed for target session"}
         return {"ok": True}
@@ -846,8 +878,8 @@ class BridgeManager:
 
         # Send kickoff to both sides simultaneously.
         from_ok, to_ok = await asyncio.gather(
-            pty_manager.write_pty_async(from_terminal_id, _wrap(from_kickoff)),
-            pty_manager.write_pty_async(to_terminal_id, _wrap(to_kickoff)),
+            _paste_and_submit(from_terminal_id, from_kickoff),
+            _paste_and_submit(to_terminal_id, to_kickoff),
         )
 
         if not from_ok or not to_ok:
@@ -1515,9 +1547,9 @@ class ChannelManager:
 
         # Send all kickoffs simultaneously
         kickoff_coros = [
-            pty_manager.write_pty_async(lead_id, _wrap(lead_kickoff)),
+            _paste_and_submit(lead_id, lead_kickoff),
         ] + [
-            pty_manager.write_pty_async(wid, _wrap(worker_kickoffs[wid]))
+            _paste_and_submit(wid, worker_kickoffs[wid])
             for wid in worker_ids
         ]
         results = await asyncio.gather(*kickoff_coros)

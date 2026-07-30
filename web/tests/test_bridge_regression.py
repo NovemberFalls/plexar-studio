@@ -53,6 +53,17 @@ from pty_manager import PtyManager
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_submit_delay(monkeypatch):
+    """Zero the paste->submit gap module-wide.
+
+    Injection is two writes separated by ``_SUBMIT_DELAY`` (1s in production)
+    so the CR lands as a keypress rather than as pasted content.  Paying that
+    second per injection would dominate this file's timing assertions.
+    """
+    monkeypatch.setattr(bm_module, "_SUBMIT_DELAY", 0)
+
+
 def _make_mock_session(terminal_id="t1", name="Session", alive=True, tracker_state="idle"):
     """Build a mock TerminalSession with the fields bridge_manager reads."""
     s = MagicMock()
@@ -201,7 +212,12 @@ async def test_inject_returns_ok_and_calls_write_when_peer_idle(monkeypatch):
     result = await _inject("idle-2", "hello", record)
 
     assert result == "ok", f"Expected 'ok' for idle peer, got {result!r}"
-    assert len(write_calls) == 1, "write_pty_async must be called exactly once"
+    # Two writes: the bracketed-paste block, then a separate bare-CR submit.
+    # The CR is deliberately NOT part of the paste — inside it, the TUI eats it
+    # as pasted content and the message never sends.
+    assert len(write_calls) == 2, "expected a paste write followed by a submit write"
+    assert write_calls[1][1] == bm_module._SUBMIT, "second write must be the bare submit CR"
+    assert bm_module._SUBMIT not in write_calls[0][1], "CR must not ride inside the paste"
     assert write_calls[0][0] == "idle-2"
 
 
