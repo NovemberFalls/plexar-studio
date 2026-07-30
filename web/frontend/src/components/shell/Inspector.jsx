@@ -169,10 +169,26 @@ function BridgeCard({ bridge, onEndBridge, onOpenTranscript }) {
   );
 }
 
-/** 38px context-usage ring with a percent label, colored by threshold (mirrors TerminalPane's pane-header ring). */
-function ContextRing({ contextUsed, contextMax }) {
+/**
+ * 38px context-usage ring with a percent label, colored by threshold (mirrors
+ * TerminalPane's pane-header ring).
+ *
+ * THREE distinct states, and they must not look alike:
+ *   1. `hasTurns === false` — the session has recorded no assistant turn at all,
+ *      so its context really is empty. Renders a true 0% plus "no turns yet".
+ *      Previously this showed "n/a", which is the same thing a broken lookup
+ *      shows: a brand-new session looked identical to a failure.
+ *   2. turns exist but no percentage — `context_percent` is SCRAPED from PTY
+ *      text (pty_manager's `context\D{0,30}?(\d{1,3})%` regex) and Claude Code
+ *      does not routinely print it, so null here is the common case and means
+ *      "not measurable", NOT "zero". Rendering 0% would be a fabrication, so it
+ *      stays a dash with "not reported by the session".
+ *   3. a percentage is known — render it, colored by threshold.
+ */
+function ContextRing({ contextUsed, contextMax, hasTurns }) {
   const havePct = typeof contextUsed === "number" && typeof contextMax === "number" && contextMax > 0;
-  const pct = havePct ? Math.min(100, Math.max(0, (contextUsed / contextMax) * 100)) : null;
+  const noTurns = !havePct && hasTurns === false;
+  const pct = havePct ? Math.min(100, Math.max(0, (contextUsed / contextMax) * 100)) : noTurns ? 0 : null;
   const color =
     pct === null
       ? "var(--cc-muted)"
@@ -204,10 +220,14 @@ function ContextRing({ contextUsed, contextMax }) {
       </svg>
       <div>
         <div className="text-[13px] font-bold" style={{ color: "var(--cc-fg)" }}>
-          {pct === null ? "n/a" : `${Math.round(pct)}%`} context
+          {pct === null ? "—" : `${Math.round(pct)}%`} context
         </div>
         <div className="text-[10px]" style={{ color: "var(--cc-dim)" }}>
-          {fmtCount(contextUsed)} / {fmtCount(contextMax)}
+          {noTurns
+            ? "no turns yet"
+            : havePct
+              ? `${fmtCount(contextUsed)} / ${fmtCount(contextMax)}`
+              : "not reported by the session"}
         </div>
       </div>
     </div>
@@ -434,7 +454,11 @@ export default function Inspector({
           {/* Usage */}
           <SectionLabel>Usage</SectionLabel>
           <div style={{ marginBottom: 8 }}>
-            <ContextRing contextUsed={usage?.contextUsed ?? null} contextMax={usage?.contextMax ?? null} />
+            <ContextRing
+              contextUsed={usage?.contextUsed ?? null}
+              contextMax={usage?.contextMax ?? null}
+              hasTurns={usage?.hasTurns}
+            />
           </div>
           <div style={{ marginBottom: 16 }}>
             <UsageRow label="Input / output" value={`${fmtCount(usage?.inputTokens)} / ${fmtCount(usage?.outputTokens)}`} />
@@ -444,6 +468,28 @@ export default function Inspector({
               <span style={{ color: "var(--cc-fn)" }}>{fmtCost(usage?.costUsd)}</span>
             </div>
           </div>
+          {/* "We have no data" and "the data says zero" must not read alike. A
+              null `usage` means the per-session lookup produced nothing at all,
+              which is a real caveat about the READING — not a claim that the
+              session did no work. Rows above already render n/a; this names why. */}
+          {!usage && (
+            <div
+              role="note"
+              className="text-[10px]"
+              style={{ color: "var(--cc-waiting)", marginTop: -8, marginBottom: 16 }}
+            >
+              Usage not available for this session yet.
+            </div>
+          )}
+          {usage?.hasTurns === false && (
+            <div
+              role="note"
+              className="text-[10px]"
+              style={{ color: "var(--cc-dim)", marginTop: -8, marginBottom: 16 }}
+            >
+              No assistant turns recorded yet — these totals are genuinely zero, not missing.
+            </div>
+          )}
 
           {/* Workflow */}
           {wf.length > 0 && (

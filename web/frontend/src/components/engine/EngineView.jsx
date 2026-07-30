@@ -212,7 +212,10 @@ export default function EngineView({
   // The models list comes from the shared store, not from this view's poll.
   // App drives the only poller; Engine just subscribes, and the busy marker is
   // app-wide so a load started in the TopBar picker shows its spinner here too.
-  const { models: sharedModels, busyModelId, writeModel } = useLocalModels();
+  // The write is NOT taken from the store here: the store's writeModel reports any
+  // non-OK status as an error toast, and a 404 "capability not available" must
+  // retract the control instead of shouting. EngineModels owns that write.
+  const { models: sharedModels, busyModelId } = useLocalModels();
   const data = useMemo(() => ({ ...polled, models: sharedModels }), [polled, sharedModels]);
 
   // Serving state. health is authoritative when offered; otherwise fall back to
@@ -250,7 +253,6 @@ export default function EngineView({
     onNavigate,
     localEnabled,
     busyModelId,
-    onWriteModel: writeModel,
   };
 
   return (

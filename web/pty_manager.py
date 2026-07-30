@@ -146,6 +146,9 @@ _TOKEN_RE = re.compile(r"(\d[\d,]*)\s*tokens?")
 _COST_RE = re.compile(r"\$(\d+\.?\d*)")
 # Live effort-level change, e.g. "Set effort level to high" (from the /effort slash command output)
 _EFFORT_RE = re.compile(r"Set effort level to (\w+)")
+# Context fill printed by Claude Code itself, e.g. "Context window is 73% full".
+# Kept as the PRECEDING source (not the primary one) -- see SessionStateTracker.
+_CONTEXT_PCT_RE = re.compile(r"context\D{0,30}?(\d{1,3})\s*%", re.IGNORECASE)
 
 
 class SessionStateTracker:
@@ -161,8 +164,38 @@ class SessionStateTracker:
         self._last_cost_val: float = 0.0
         self.output_lines: deque = deque(maxlen=500)  # ring buffer: last 500 ANSI-stripped lines
         self._line_fragment: str = ""  # incomplete line accumulator
-        self.context_percent: Optional[int] = None  # last seen context window fill %
+        # Context window fill. TWO independent sources, in strict precedence
+        # order -- see the `context_percent` property below.
+        #   reported_* : scraped from PTY text when Claude Code prints a context
+        #                line. Rare, but an explicitly reported number beats
+        #                anything we derive, so it wins when present.
+        #   derived_*  : computed from the LATEST usage_events turn
+        #                (input + cache_read tokens / model context window) by
+        #                PtyManager.refresh_derived_context. This is the normal
+        #                source: the scrape used to be the ONLY source, and
+        #                because Claude Code does not routinely print that
+        #                string, context_percent was permanently None.
+        self.reported_context_percent: Optional[int] = None
+        self.derived_context_percent: Optional[int] = None
         self.effort: Optional[str] = None  # last effort level seen in PTY output (e.g. "high")
+
+    @property
+    def context_percent(self) -> Optional[int]:
+        """Context window fill %, or None when genuinely unknown.
+
+        PRECEDENCE: a percentage Claude Code itself printed (``reported_``) wins
+        over the one we derive from token counts (``derived_``). The session's own
+        accounting is authoritative; ours is a reconstruction whose denominator
+        can be wrong (unknown model, wrong variant).
+
+        None means "not measurable", NOT zero -- the frontend renders an em dash
+        plus "not reported" for None and a true 0% only when no turn exists.
+        Read-only on purpose: writing through this name is what let the scrape
+        silently monopolise the value.
+        """
+        if self.reported_context_percent is not None:
+            return self.reported_context_percent
+        return self.derived_context_percent
 
     def feed(self, raw_data: str) -> None:
         """Process new PTY output data."""
@@ -199,9 +232,14 @@ class SessionStateTracker:
         # Detect context window fill percentage from Claude Code output.
         # Matches patterns like "Context window is 73% full", "73% of context", etc.
         # The regex looks for "context" followed (within 30 non-digit chars) by a percentage.
-        ctx_match = re.search(r'context\D{0,30}?(\d{1,3})\s*%', clean, re.IGNORECASE)
+        #
+        # This is the FALLBACK-shaped source that used to be the only one: it
+        # takes precedence when it fires (see the context_percent property), but
+        # Claude Code rarely prints such a line, so it is not what makes the ring
+        # work -- refresh_derived_context is.
+        ctx_match = _CONTEXT_PCT_RE.search(clean)
         if ctx_match:
-            self.context_percent = int(ctx_match.group(1))
+            self.reported_context_percent = int(ctx_match.group(1))
 
         # Detect live effort-level changes (e.g. from the /effort slash command).
         effort_match = _EFFORT_RE.search(clean)
@@ -270,7 +308,11 @@ class TerminalSession:
     # active_consumer is allowed to drain output_queue — "latest connection wins".
     # Mutated only from the asyncio event loop (single-threaded), so no lock is needed.
     active_consumer: int = 0
-    context_percent: Optional[int] = None  # last seen context window fill % (from tracker)
+    # Vestigial: nothing writes this and nothing reads it. The serialised value
+    # comes from `session.tracker.context_percent` (both _session_to_dict here
+    # and server.py's single-terminal route read the tracker). Left in place only
+    # because it is part of the dataclass signature; do not start using it.
+    context_percent: Optional[int] = None
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_user_input_time: float = 0.0  # monotonic timestamp of last user keystroke (bridge typing-quiet gate)
     last_output_time: float = 0.0  # monotonic timestamp of last PTY output (JSONL staleness detection)
@@ -347,6 +389,10 @@ class PtyManager:
     # every live session.  1 second is fine-grained enough that the bridge idle
     # gate sees a fresh state within one poll cycle without significant overhead.
     _STATE_TICKER_INTERVAL = 1.0
+    # Refresh the derived context percentage every Nth tick -> 5s, matching
+    # server.py's usage-ingest loop. Ingest is what puts new turns in the DB, so
+    # polling faster than it cannot see anything new.
+    _CONTEXT_REFRESH_TICKS = 5
 
     def __init__(self):
         self.sessions: dict[str, TerminalSession] = {}
@@ -1405,13 +1451,19 @@ class PtyManager:
         'busy' state long after the session had actually become idle, causing
         spurious bridge terminations.
 
+        It ALSO refreshes the derived context percentage, but only every
+        _CONTEXT_REFRESH_TICKS-th tick (5s) -- see refresh_derived_context for why
+        that cadence and not per-tick or per-chunk.
+
         Error handling: a bad session's tick() must never kill the loop.
         Exceptions per session are caught and logged; the loop continues.
         CancelledError propagates cleanly to allow graceful shutdown.
         """
+        ticks = 0
         try:
             while True:
                 await asyncio.sleep(self._STATE_TICKER_INTERVAL)
+                ticks += 1
                 # Snapshot sessions to avoid mutation during iteration.
                 for session in list(self.sessions.values()):
                     if not session.alive:
@@ -1424,8 +1476,91 @@ class PtyManager:
                             session.id,
                             exc_info=True,
                         )
+                if ticks % self._CONTEXT_REFRESH_TICKS == 0:
+                    # sqlite3 is synchronous: run the reads in the PTY executor so
+                    # a slow disk cannot stall the event loop (and with it every
+                    # session's output forwarding).
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            self._pty_executor, self.refresh_derived_context
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "State ticker: context refresh failed", exc_info=True
+                        )
         except asyncio.CancelledError:
             raise
+
+    def refresh_derived_context(self) -> None:
+        """Recompute every live session's derived context percentage.
+
+        CADENCE: called from the state ticker every 5s, matching server.py's
+        usage-ingest loop -- there is no new information to read between two
+        ingests, so anything faster is pure I/O. Explicitly NOT on the PTY read
+        path: feed() runs per output chunk on a PTY reader thread, and a sqlite
+        read there would put disk latency in front of terminal output.
+
+        For each session: read the LATEST usage_events turn, take
+        input + cache_read as the prompt size, and divide by the window resolved
+        from the session's CONFIGURED model (which is the only string carrying the
+        "[1m]" long-context variant -- the JSONL's model id does not).
+
+        Sets derived_context_percent to None when the window is unknown, so the
+        ring stays an honest em dash rather than showing a number computed from a
+        guessed denominator. Never raises: a usage-DB hiccup must not disturb a
+        session.
+        """
+        # Imported lazily: keeps pty_manager importable (and cheap) without the
+        # usage DB, which several test modules rely on.
+        import context_window
+        from usage_tracker import usage_tracker
+
+        for session in list(self.sessions.values()):
+            if not session.alive:
+                continue
+            try:
+                window = context_window.resolve_context_window(
+                    session.model, provider=session.provider
+                )
+                if window is None:
+                    session.tracker.derived_context_percent = None
+                    continue
+                turn = usage_tracker.latest_turn(session.id)
+                if turn is None:
+                    # No recorded turn: the context genuinely holds nothing yet.
+                    # Left as None rather than 0 -- the frontend derives its true
+                    # "0% / no turns yet" state from the usage payload's
+                    # last_event_ts, and a 0 here would instead be read as a
+                    # measured percentage.
+                    session.tracker.derived_context_percent = None
+                    continue
+                prompt_tokens = context_window.prompt_tokens_from_event(
+                    turn.get("input_tokens"), turn.get("cache_read_tokens")
+                )
+                result = context_window.context_percent(prompt_tokens, window)
+                if result is None:
+                    session.tracker.derived_context_percent = None
+                    continue
+                display, raw = result
+                if raw > 100.0:
+                    # A real session cannot exceed its own window; this means the
+                    # denominator is wrong (most likely a 1M-variant session whose
+                    # configured model lost its "[1m]" suffix somewhere).
+                    logger.debug(
+                        "Context fill %.1f%% exceeds 100%% for session %s "
+                        "(model=%r provider=%s prompt=%d window=%d) -- window is "
+                        "probably wrong, clamping to 100%% for display",
+                        raw, session.id, session.model, session.provider,
+                        prompt_tokens, window,
+                    )
+                session.tracker.derived_context_percent = display
+            except Exception:
+                logger.warning(
+                    "Context refresh failed for session %s", session.id, exc_info=True
+                )
 
     def shutdown(self):
         """Kill all sessions and clean up resources."""

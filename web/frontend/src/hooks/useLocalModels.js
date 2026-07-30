@@ -139,9 +139,16 @@ export function setLocalModelBusy(modelId) {
 /**
  * Load a model, restarting the provider when it can only serve one.
  *
- * Dispatches by API behaviour rather than a capability lookup: LM Studio's
- * /load succeeds directly; vLLM's /load 409s (one model per container), so a
- * 409 falls through to /restart.
+ * Dispatches by API behaviour rather than a capability lookup:
+ *   200 — LM Studio loaded it directly.
+ *   409 — a MANAGED vLLM cannot hot-load (one model per container), so fall
+ *         through to /restart, which is the only mechanism that works.
+ *   404 — the provider does not declare `model-control` at all, so this control
+ *         should not have been offered. That is NOT a failure: an EXTERNAL vLLM
+ *         answers 404 here because Cockpit does not own its container. Report it
+ *         as information and point at the surface that explains it in full,
+ *         rather than a red "doesn't support loading models" alarm about a
+ *         perfectly healthy backend.
  */
 export async function loadOrRestartLocalModel(providerId, modelId) {
   if (!providerId || !modelId) return;
@@ -167,7 +174,15 @@ export async function loadOrRestartLocalModel(providerId, modelId) {
       return;
     }
     const data = await res.json().catch(() => ({}));
-    toast(data.error || "This provider doesn't support loading models", "error");
+    if (res.status === 404) {
+      // Not offered, not broken. See the docstring: an external vLLM lands here.
+      toast(
+        "This provider doesn't offer model switching from Cockpit — see Engine ▸ Models for why.",
+        "info",
+      );
+      return;
+    }
+    toast(data.error || "Could not load model", "error");
   } catch (_) {
     toast("Provider unreachable — model not loaded", "error");
   } finally {

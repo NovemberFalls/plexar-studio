@@ -1778,6 +1778,12 @@ export default function App() {
    *
    * Missing values stay undefined and render "n/a": a 0 here would claim "no
    * tokens used", which is a different and false statement.
+   *
+   * `hasTurns` is the honesty discriminator the Inspector needs. It keys off
+   * `last_event_ts`, which session_summary() sets to null ONLY when the terminal
+   * has no usage_events rows whatsoever. Without it, a freshly-spawned session
+   * (real zeros) and a failed lookup (unknown) both rendered n/a, so a working
+   * system looked broken while the status strip showed large global totals.
    */
   const inspectorUsage = useMemo(() => {
     if (!focusedSession) return null;
@@ -1793,6 +1799,9 @@ export default function App() {
       cacheRead: u?.cache_read_tokens,
       cacheWrite: u?.cache_creation_tokens,
       costUsd: u?.est_cost_usd,
+      // undefined when we have no payload at all -- only a payload can testify
+      // about whether turns exist.
+      hasTurns: u ? u.last_event_ts != null : undefined,
     };
   }, [focusedSession, usageByTerminal]);
   const inspectorWorkflows = focusedSession
@@ -2031,10 +2040,17 @@ export default function App() {
                   localEnabled={localEnabled}
                   setLocalEnabled={setLocalEnabled}
                   onToast={toast}
-                  /* Engine hands off rather than dead-ending. The second arg is
-                     Engine's own idea of a subsection; Reports names its tabs
-                     differently, so it is intentionally ignored here. */
-                  onNavigate={(section) => setActiveSection(section)}
+                  /* Engine hands off rather than dead-ending. The subsection IS
+                     honoured for Settings, where it is a real settings section id
+                     (e.g. "providers"): dropping it landed every "Thresholds are
+                     set in Settings > Providers" link on General & startup, which
+                     is worse than no link because it looks like the page moved.
+                     Reports names its tabs differently, so its subsection is not
+                     a settings id and is ignored rather than guessed at. */
+                  onNavigate={(section, subsection) => {
+                    setActiveSection(section);
+                    if (section === "settings" && subsection) setSettingsSection(subsection);
+                  }}
                 />
               </div>
             )}

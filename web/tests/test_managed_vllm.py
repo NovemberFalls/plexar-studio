@@ -37,11 +37,19 @@ def client():
 
 @pytest.fixture(autouse=True)
 def _clean_managed_vllm_state():
+    # "external" and the capability list are mutated by start_managed_vllm now
+    # (ownership decides whether "model-control" is advertised), so both must be
+    # restored or the lifecycle tests leak state into the registry tests.
+    caps = server_module._PROVIDERS["vllm-local"]["capabilities"]
+    caps_snapshot = list(caps)
     server_module._MANAGED_VLLM["proc"] = None
+    server_module._MANAGED_VLLM["external"] = False
     server_module.COCKPIT_MANAGED_VLLM = "0"
     yield
     server_module._MANAGED_VLLM["proc"] = None
+    server_module._MANAGED_VLLM["external"] = False
     server_module.COCKPIT_MANAGED_VLLM = "0"
+    caps[:] = caps_snapshot
 
 
 def _fake_proc():
@@ -52,13 +60,97 @@ def _fake_proc():
 
 # ── Provider registry ─────────────────────────────────────
 
-def test_vllm_local_provider_shape():
+def test_vllm_local_provider_shape(vllm_ownership):
+    vllm_ownership("0")
     provider = server_module._PROVIDERS["vllm-local"]
     assert provider["kind"] == "vllm"
     assert provider["scope"] == "local"
-    assert set(provider["capabilities"]) == {"models", "health", "metrics", "model-discovery", "model-control"}
+    # "model-control" is NOT in the base set -- it is appended only when Cockpit
+    # owns the container (see the managed/external tests below).
+    assert set(provider["capabilities"]) == {"models", "health", "metrics", "model-discovery"}
     for key in server_module._PROVIDER_REQUIRED_KEYS:
         assert key in provider
+
+
+# ── model-control is conditional on ownership ─────────────
+
+
+def test_model_control_absent_when_vllm_external(vllm_ownership):
+    """The reported bug: COCKPIT_MANAGED_VLLM defaults to "0", so an
+    unconditional "model-control" made the UI offer a restart the route always
+    refused with 409."""
+    vllm_ownership("0")
+    assert server_module._vllm_is_managed() is False
+    assert "model-control" not in server_module._PROVIDERS["vllm-local"]["capabilities"]
+
+
+def test_model_control_present_when_vllm_managed(vllm_ownership):
+    vllm_ownership("1")
+    assert server_module._vllm_is_managed() is True
+    assert "model-control" in server_module._PROVIDERS["vllm-local"]["capabilities"]
+
+
+def test_model_control_dropped_when_external_wins_double_bind(vllm_ownership):
+    """Opted in, but something else already answers on the port -> Cockpit is a
+    pure observer and must not advertise control."""
+    vllm_ownership("1", external=True)
+    assert server_module._vllm_is_managed() is False
+    assert "model-control" not in server_module._PROVIDERS["vllm-local"]["capabilities"]
+
+
+def test_refresh_is_idempotent(vllm_ownership):
+    vllm_ownership("1")
+    server_module._refresh_vllm_model_control()
+    server_module._refresh_vllm_model_control()
+    caps = server_module._PROVIDERS["vllm-local"]["capabilities"]
+    assert caps.count("model-control") == 1
+
+
+@pytest.mark.asyncio
+async def test_providers_managed_flag_follows_ownership(client, vllm_ownership):
+    vllm_ownership("0")
+    async with client as c:
+        r = await c.get("/api/local/providers")
+    vllm = [p for p in r.json()["providers"] if p["id"] == "vllm-local"][0]
+    assert vllm["managed"] is False
+    assert "model-control" not in vllm["capabilities"]
+
+
+@pytest.mark.asyncio
+async def test_providers_managed_flag_true_when_managed(client, vllm_ownership):
+    vllm_ownership("1")
+    async with client as c:
+        r = await c.get("/api/local/providers")
+    vllm = [p for p in r.json()["providers"] if p["id"] == "vllm-local"][0]
+    assert vllm["managed"] is True
+    assert "model-control" in vllm["capabilities"]
+
+
+@pytest.mark.asyncio
+async def test_providers_managed_flag_matches_status_for_broker(client):
+    """The broker provider's `managed` must be the SAME determination
+    /api/local/status reports -- never a second guess that can disagree."""
+    async with client as c:
+        providers = (await c.get("/api/local/providers")).json()["providers"]
+    lms = [p for p in providers if p["id"] == "lmstudio-local"][0]
+    assert lms["managed"] is server_module._broker_is_managed()
+
+
+@pytest.mark.asyncio
+async def test_providers_never_leak_urls_or_auth(client, vllm_ownership):
+    """The `managed` boolean must not become a channel for URLs/auth."""
+    vllm_ownership("1")
+    async with client as c:
+        body = (await c.get("/api/local/providers")).json()
+    for p in body["providers"]:
+        assert set(p) == {
+            "id", "label", "kind", "scope", "capabilities", "endpoint_hint", "managed",
+        }
+        assert isinstance(p["managed"], bool)
+    dumped = str(body)
+    assert "http://" not in dumped and "https://" not in dumped
+    assert "auth" not in dumped
+    assert "broker_url" not in dumped and "management_url" not in dumped
 
 
 def test_lmstudio_local_still_default():
@@ -140,6 +232,10 @@ async def test_external_vllm_wins(monkeypatch):
     assert started is False
     mock_exec.assert_not_called()
     assert server_module._MANAGED_VLLM["proc"] is None
+    # The double-bind probe recorded that ownership went elsewhere, so the
+    # capability is withdrawn even though the operator opted in.
+    assert server_module._MANAGED_VLLM["external"] is True
+    assert "model-control" not in server_module._PROVIDERS["vllm-local"]["capabilities"]
 
 
 @pytest.mark.asyncio
@@ -159,6 +255,9 @@ async def test_nothing_listening_launches_container(monkeypatch):
     assert started is True
     mock_exec.assert_awaited_once()
     assert server_module._MANAGED_VLLM["proc"] is fake_proc
+    # Cockpit owns it -> control is now honestly advertised.
+    assert server_module._MANAGED_VLLM["external"] is False
+    assert "model-control" in server_module._PROVIDERS["vllm-local"]["capabilities"]
 
     call_args = mock_exec.await_args.args
     joined = " ".join(call_args)

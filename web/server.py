@@ -45,6 +45,7 @@ from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other 
 import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the other local-module imports above
 from pricing_store import pricing_store  # noqa: E402
 import spend_guard  # noqa: E402 -- reads settings_store/usage_tracker lazily; the sole spend-decision module
+import context_window  # noqa: E402 -- pure resolver; fed the local /models payload below so local sessions get a real context ring
 
 START_TIME = _time.time()
 
@@ -2533,15 +2534,60 @@ _PROVIDERS = {
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
 
-# Model load/unload for LM Studio is driven through its `lms` CLI. If the CLI
-# is not on PATH (common in a packaged sidecar), the provider simply does NOT
-# advertise "model-control", so the UI hides the load/unload buttons rather
-# than offering a control that would always fail. vLLM's control is a container
-# restart (no CLI needed), so it advertises "model-control" unconditionally.
+# A capability is a PROMISE that the matching route will accept the call. Both
+# model-control providers therefore advertise it conditionally:
+#
+#   LM Studio — load/unload runs through its `lms` CLI. No CLI on PATH (common
+#   in a packaged sidecar) → no "model-control", so the UI hides the buttons
+#   instead of offering a control that would always fail.
+#
+#   vLLM — there is no hot-swap API (one model per process, fixed by --model at
+#   launch), so the only mechanism is restarting the process. Cockpit can only
+#   do that for a container IT owns, i.e. COCKPIT_MANAGED_VLLM=1 and the
+#   double-bind guard did not hand ownership to an external process. When vLLM
+#   is external (the default — COCKPIT_MANAGED_VLLM defaults to "0"), advertising
+#   "model-control" was unconditional false advertising: the UI showed a
+#   Restart/Swap button and the route answered 409 every single time.
 _LMS_CLI = shutil.which("lms")
 if _LMS_CLI:
     _PROVIDERS["lmstudio-local"]["capabilities"].append("model-control")
-_PROVIDERS["vllm-local"]["capabilities"].append("model-control")
+
+
+def _vllm_is_managed() -> bool:
+    """True when Cockpit owns the vLLM process's lifecycle.
+
+    Two conditions, both required:
+      * opt-in via COCKPIT_MANAGED_VLLM=1 (read as a module global so tests and
+        the refresh below see the same value the restart route sees), and
+      * the startup double-bind guard did not find something already answering
+        on the vLLM port. `start_managed_vllm` records that verdict in
+        _MANAGED_VLLM["external"]; with env=1 but an external server already up,
+        Cockpit is a pure observer and must not claim otherwise.
+
+    Single source of truth for the "model-control" capability, the `managed`
+    flag on GET /api/local/providers, and the restart route's refusal.
+    """
+    if COCKPIT_MANAGED_VLLM != "1":
+        return False
+    return not _MANAGED_VLLM.get("external", False)
+
+
+def _refresh_vllm_model_control() -> None:
+    """Sync vllm-local's "model-control" capability with _vllm_is_managed().
+
+    Called at import and again after the managed-vLLM start attempt, because
+    the double-bind guard can only resolve ownership once it has probed the
+    port. Idempotent.
+    """
+    provider = _PROVIDERS.get("vllm-local")
+    if provider is None:
+        return
+    caps = provider["capabilities"]
+    if _vllm_is_managed():
+        if "model-control" not in caps:
+            caps.append("model-control")
+    elif "model-control" in caps:
+        caps.remove("model-control")
 
 _PROVIDER_REQUIRED_KEYS = ("id", "label", "kind", "scope", "broker_url", "capabilities")
 
@@ -2985,10 +3031,36 @@ def _endpoint_hint(p: dict) -> str | None:
     return f"{host}:{parsed.port}" if parsed.port else host
 
 
+def _provider_managed(p: dict) -> bool:
+    """True when Cockpit owns this provider's service lifecycle.
+
+    Resolved from the SAME determination each subsystem already uses, never a
+    second guess:
+      * broker-fronted providers (the vendored lane broker, i.e. a local
+        provider whose broker_url is the configured broker URL) →
+        _broker_is_managed(), the same call GET /api/local/status reports.
+      * vLLM → _vllm_is_managed(), the same call that gates the
+        "model-control" capability and the restart route's refusal.
+    Everything else (remote scope, a provider from COCKPIT_PROVIDERS_FILE
+    pointing at somebody else's server) is external by definition.
+
+    A boolean only — no URL, no auth. The UI uses it to EXPLAIN ("external
+    process — restart it where you started it") instead of guessing.
+    """
+    if p.get("scope") != "local":
+        return False
+    if p.get("kind") == "vllm":
+        return _vllm_is_managed()
+    if p.get("broker_url") == _LOCAL_BROKER_URL:
+        return _broker_is_managed()
+    return False
+
+
 @app.get("/api/local/providers")
 async def get_local_providers():
     """List registered providers -- full URLs and auth are never sent to the
-    browser; local providers carry a display-only host:port endpoint_hint."""
+    browser; local providers carry a display-only host:port endpoint_hint and a
+    `managed` boolean saying whether Cockpit owns that service's lifecycle."""
     return JSONResponse({
         "providers": [
             {
@@ -2998,6 +3070,7 @@ async def get_local_providers():
                 "scope": p["scope"],
                 "capabilities": p["capabilities"],
                 "endpoint_hint": _endpoint_hint(p),
+                "managed": _provider_managed(p),
             }
             for p in _PROVIDERS.values()
         ]
@@ -3748,6 +3821,17 @@ def _cached_detect() -> dict:
 _MANAGED_BROKER = {"task": None}
 
 
+def _broker_is_managed() -> bool:
+    """True when Cockpit's own in-process broker task is the thing listening.
+
+    The single determination behind both GET /api/local/status's `managed` flag
+    and the `managed` flag for broker-fronted providers on
+    GET /api/local/providers — the two must never be able to disagree.
+    """
+    task = _MANAGED_BROKER["task"]
+    return task is not None and not task.done()
+
+
 def _broker_port() -> int:
     try:
         return int(_LOCAL_BROKER_URL.rsplit(":", 1)[1])
@@ -3822,7 +3906,17 @@ async def stop_managed_broker() -> None:
 # kill vLLM's throughput). Cockpit optionally owns a vLLM container the same
 # way it owns the lane broker: opt-in, double-bind guarded, best-effort, and
 # never blocking startup/shutdown.
-_MANAGED_VLLM = {"proc": None, "container": "cockpit-vllm"}
+#
+# "external": set True by start_managed_vllm's double-bind probe when something
+# else already answers on the vLLM port. It starts False (nothing probed yet),
+# and _vllm_is_managed() reads it — see that function for why ownership cannot
+# be decided from the env var alone.
+_MANAGED_VLLM = {"proc": None, "container": "cockpit-vllm", "external": False}
+
+# Now that _MANAGED_VLLM exists, settle vllm-local's "model-control" capability
+# for the default (pre-startup) state. start_managed_vllm calls this again once
+# the double-bind probe has actually resolved ownership.
+_refresh_vllm_model_control()
 
 # The vLLM container bakes its model in as a launch arg (no hot-swap), so the
 # active model is a runtime-mutable value seeded from the env default. The
@@ -3888,9 +3982,16 @@ async def start_managed_vllm() -> bool:
     try:
         await asyncio.to_thread(_broker_get, "/v1/models", "", _VLLM_URL)
         logger.info("External vLLM already at %s — not spawning managed one", _VLLM_URL)
+        # Ownership went to the external process: drop "model-control" so the UI
+        # never offers a restart Cockpit is not entitled to perform.
+        _MANAGED_VLLM["external"] = True
+        _refresh_vllm_model_control()
         return False
     except Exception:
         pass  # nothing listening — ours to run
+
+    _MANAGED_VLLM["external"] = False
+    _refresh_vllm_model_control()
 
     try:
         argv = _vllm_docker_argv("run")
@@ -3931,8 +4032,7 @@ async def stop_managed_vllm() -> None:
 async def get_local_status():
     """Report what is actually connected at the configured broker URL."""
     result = await asyncio.to_thread(_cached_detect)
-    managed = _MANAGED_BROKER["task"] is not None and not _MANAGED_BROKER["task"].done()
-    return JSONResponse({**result, "url": _LOCAL_BROKER_URL, "managed": managed})
+    return JSONResponse({**result, "url": _LOCAL_BROKER_URL, "managed": _broker_is_managed()})
 
 
 # ── Provider-keyed local routes ───────────────────────────
@@ -4354,6 +4454,16 @@ async def get_provider_models(provider_id: str):
                 "host_path": entry.get("host_path"),
             })
 
+    # Feed the resolver the windows this provider just published, so a session
+    # running a LOCAL model gets a real context ring instead of an em dash.
+    # context_window prefers `loaded_context_length` over `max_context_length`
+    # (the running instance's actual window, not its ceiling) and makes no
+    # network call of its own -- this is the only place that data arrives.
+    try:
+        context_window.set_local_model_windows(provider_id, models)
+    except Exception:
+        logger.debug("Could not record context windows for provider %s", provider_id, exc_info=True)
+
     return JSONResponse({"reachable": True, "models": models})
 
 
@@ -4435,7 +4545,11 @@ async def load_provider_model(provider_id: str, model_id: str):
         return JSONResponse({"error": "control not available for remote providers"}, status_code=403)
     if provider.get("kind") == "vllm":
         return JSONResponse(
-            {"error": "vLLM cannot hot-load a model — use POST /restart with a model"},
+            {"error": (
+                "vLLM cannot hot-load a model — it serves one model per process, fixed "
+                "by --model at launch. Use POST /api/local/vllm-local/restart with a "
+                "model instead (managed containers only)."
+            )},
             status_code=409,
         )
     if not _LMS_CLI:
@@ -4457,7 +4571,11 @@ async def unload_provider_model(provider_id: str, model_id: str):
         return JSONResponse({"error": "control not available for remote providers"}, status_code=403)
     if provider.get("kind") == "vllm":
         return JSONResponse(
-            {"error": "vLLM cannot unload a single model — it serves one model per container"},
+            {"error": (
+                "vLLM cannot unload a single model — it serves one model per process. "
+                "Stopping the process is the only unload, and Cockpit only does that for "
+                "a container it owns (COCKPIT_MANAGED_VLLM=1)."
+            )},
             status_code=409,
         )
     if not _LMS_CLI:
@@ -4484,18 +4602,39 @@ async def unload_provider_model(provider_id: str, model_id: str):
 async def restart_provider_model(provider_id: str, request: Request):
     """Restart the managed vLLM container with a new model (vLLM has no hot-swap).
 
-    Only valid for the managed vLLM provider; an EXTERNAL vLLM (something else
-    is answering on the port) is not Cockpit's to restart → 409.
+    Only valid for the managed vLLM provider; an EXTERNAL vLLM (COCKPIT_MANAGED_VLLM
+    is not "1", or the startup double-bind probe found something already serving)
+    is not Cockpit's to restart → 409. Killing a container the user started by
+    hand would be destructive, so the refusal explains where to do it instead.
     """
     provider = _require_provider(provider_id)
     if provider is None:
         return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "model-control" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
     if provider.get("scope") != "local" or provider.get("kind") != "vllm":
         return JSONResponse({"error": "restart is only supported for the local vLLM provider"}, status_code=409)
-    if COCKPIT_MANAGED_VLLM != "1":
-        return JSONResponse({"error": "vLLM is external — Cockpit can't restart it"}, status_code=409)
+    # Ownership is checked BEFORE the capability gate, deliberately: withdrawing
+    # "model-control" from an external vLLM is what stops the UI offering the
+    # button, but a direct/stale call still deserves the explanation rather than
+    # a bare "capability not available".
+    if not _vllm_is_managed():
+        return JSONResponse(
+            {
+                "error": (
+                    "vLLM has no model hot-swap API — one model per process, fixed by "
+                    "--model at launch — so changing model means restarting the process. "
+                    "Cockpit can only do that for a container it owns (start Cockpit with "
+                    "COCKPIT_MANAGED_VLLM=1). This vLLM is external, so restart it where "
+                    "you started it, with the new --model."
+                ),
+                "managed": False,
+                "env": "COCKPIT_MANAGED_VLLM",
+            },
+            status_code=409,
+        )
+    # Reachable only if a COCKPIT_PROVIDERS_FILE entry strips the capability
+    # while Cockpit still owns the container.
+    if "model-control" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
     try:
         body = await request.json()
     except Exception:

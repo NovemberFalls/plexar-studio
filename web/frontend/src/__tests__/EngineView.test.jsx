@@ -33,13 +33,30 @@ const PROVIDER = {
   capabilities: ["queue", "metrics", "spill", "models", "traces", "health"],
 };
 
-/** vLLM: served direct, so no queue/spill/traces capability at all. */
+/** vLLM: served direct, so no queue/spill/traces capability at all. Cockpit owns
+ *  the container here (`managed`), which is what makes restart offerable. */
 const VLLM = {
   id: "vllm-local",
   label: "vLLM (local)",
   kind: "vllm",
   scope: "local",
+  managed: true,
   capabilities: ["models", "health", "metrics", "model-discovery", "model-control"],
+};
+
+/**
+ * The owner's actual live registry: an EXTERNAL vLLM. The backend stopped
+ * advertising `model-control` for this case, so no swap/restart control may
+ * render — clicking one could only ever produce a refusal toast, which is the
+ * bug this fixture exists to pin.
+ */
+const VLLM_EXTERNAL = {
+  id: "vllm-local",
+  label: "vLLM (local)",
+  kind: "vllm",
+  scope: "local",
+  managed: false,
+  capabilities: ["models", "health", "metrics", "model-discovery"],
 };
 
 const PAYLOADS = {
@@ -65,6 +82,18 @@ function mockFetch(overrides = {}) {
       const v = overrides[path];
       if (v === "reject") return Promise.reject(new Error("offline"));
       if (v === "error") return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+      // The backend now answers an unavailable capability with 404, not 409.
+      if (v === "notfound") {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: async () => ({ error: "capability not available" }),
+        });
+      }
+      // { status, body } for the refusal codes whose STATUS is the contract.
+      if (v && typeof v === "object" && typeof v.status === "number" && "body" in v) {
+        return Promise.resolve({ ok: v.status < 400, status: v.status, json: async () => v.body });
+      }
       return Promise.resolve({ ok: true, status: 200, json: async () => v });
     }
     const body = PAYLOADS[path];
@@ -244,12 +273,89 @@ describe("EngineView frame", () => {
     expect(screen.getByTestId("engine-live-footer")).toHaveTextContent("requests served");
   });
 
-  it("disables Swap model and Restart when the backend declares no model-control", async () => {
+  it("offers NO swap/restart control at all when the backend declares no model-control", async () => {
     render(<EngineView provider={PROVIDER} onNavigate={vi.fn()} />);
-    await waitFor(() => expect(screen.getByTestId("engine-swap")).toBeInTheDocument());
-    expect(screen.getByTestId("engine-swap")).toBeDisabled();
-    expect(screen.getByTestId("engine-restart")).toBeDisabled();
-    expect(screen.getByTestId("engine-restart").getAttribute("title")).toMatch(/vllm-only/i);
+    await waitFor(() => expect(screen.getByTestId("engine-model-control-note")).toBeInTheDocument());
+    // The absent direction is the point: a disabled-then-toast button was the bug.
+    expect(screen.queryByTestId("engine-swap")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("engine-restart")).not.toBeInTheDocument();
+    const note = screen.getByTestId("engine-model-control-note");
+    expect(note).toHaveAttribute("role", "note");
+    expect(note).toHaveTextContent(/does not declare the model-control capability/i);
+  });
+
+  it("explains an EXTERNAL vLLM instead of offering a restart it cannot perform", async () => {
+    render(<WithShell provider={VLLM_EXTERNAL} onNavigate={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("engine-model-control-note")).toBeInTheDocument());
+    expect(screen.queryByTestId("engine-swap")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("engine-restart")).not.toBeInTheDocument();
+    const note = screen.getByTestId("engine-model-control-note");
+    // The `managed: false` flag is what lets the note say something TRUE: no
+    // hot-swap API, and Cockpit does not own the process.
+    expect(note).toHaveTextContent(/no model hot-swap API/i);
+    expect(note).toHaveTextContent(/COCKPIT_MANAGED_VLLM/);
+    expect(note).toHaveTextContent(/Restart it where you started it/i);
+    // Nothing may have been POSTed to the lifecycle routes.
+    expect(paths(globalThis.fetch).some((u) => u.includes("/restart"))).toBe(false);
+  });
+
+  it("renders the working controls for a managed provider that declares model-control", async () => {
+    render(<WithShell provider={VLLM} onNavigate={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("engine-swap")).toBeEnabled());
+    expect(screen.getByTestId("engine-restart")).toBeEnabled();
+    expect(screen.queryByTestId("engine-model-control-note")).not.toBeInTheDocument();
+  });
+
+  it("says restart is vLLM-only in words rather than as a dead button", async () => {
+    const LMS_CONTROL = { ...PROVIDER, managed: true, capabilities: [...PROVIDER.capabilities, "model-control"] };
+    render(<WithShell provider={LMS_CONTROL} onNavigate={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("engine-swap")).toBeEnabled());
+    expect(screen.queryByTestId("engine-restart")).not.toBeInTheDocument();
+    expect(screen.getByTestId("engine-restart-not-offered")).toHaveTextContent(/vLLM-only/i);
+  });
+
+  it("retracts the control on a 404 instead of reporting a failure", async () => {
+    globalThis.fetch = mockFetch({ "/restart": "notfound" });
+    const onToast = vi.fn();
+    render(<WithShell provider={VLLM} onNavigate={vi.fn()} onToast={onToast} />);
+    await waitFor(() => expect(screen.getByTestId("engine-restart")).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId("engine-restart"));
+    fireEvent.click(screen.getByTestId("engine-restart-confirm"));
+
+    // 404 = "capability not available": the affordance was wrong, so it goes away
+    // and the reason is stated. No red toast about a healthy backend.
+    await waitFor(() => expect(screen.getByTestId("engine-model-control-note")).toBeInTheDocument());
+    expect(screen.queryByTestId("engine-restart")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("engine-swap")).not.toBeInTheDocument();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a 409 refusal verbatim, env var and all", async () => {
+    const REFUSAL =
+      "vLLM is external — Cockpit can't restart it. Set COCKPIT_MANAGED_VLLM=1 and restart Cockpit " +
+      "to let it own the container.";
+    globalThis.fetch = mockFetch({ "/restart": { status: 409, body: { error: REFUSAL, managed: false, env: "COCKPIT_MANAGED_VLLM" } } });
+    const onToast = vi.fn();
+    render(<WithShell provider={VLLM} onNavigate={vi.fn()} onToast={onToast} />);
+    await waitFor(() => expect(screen.getByTestId("engine-restart")).toBeEnabled());
+
+    fireEvent.click(screen.getByTestId("engine-restart"));
+    fireEvent.click(screen.getByTestId("engine-restart-confirm"));
+
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(REFUSAL, "error"));
+  });
+
+  it("labels the models list browse-only when discovery exists without control", async () => {
+    render(<WithShell provider={VLLM_EXTERNAL} tab="models" onNavigate={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("engine-models-card")).toBeInTheDocument());
+    expect(screen.getByTestId("models-browse-only-badge")).toHaveTextContent(/browse only/i);
+    const note = screen.getByTestId("models-browse-only-note");
+    expect(note).toHaveAttribute("role", "note");
+    expect(note).toHaveTextContent(/Browse only/);
+    expect(note).toHaveTextContent(/cannot switch to one/i);
+    // No per-row Load buttons, so the list cannot read as a picker.
+    expect(screen.queryByRole("button", { name: /^Load /i })).not.toBeInTheDocument();
   });
 
   it("confirm-gates Restart before touching the engine", async () => {
@@ -275,6 +381,30 @@ describe("EngineView frame", () => {
     await waitFor(() => expect(screen.getByTestId("queue-not-offered")).toBeInTheDocument());
     expect(screen.getByTestId("queue-not-offered")).toHaveTextContent(/does not expose a lane queue/i);
     expect(screen.getByTestId("spill-not-offered")).toBeInTheDocument();
+  });
+
+  it("treats a 404 from load as not-offered and retracts the row buttons", async () => {
+    globalThis.fetch = mockFetch({ "/models/qwen3-coder-30b-awq/unload": "notfound" });
+    const onToast = vi.fn();
+    render(<WithShell provider={VLLM} tab="models" onNavigate={vi.fn()} onToast={onToast} />);
+    const btn = await waitFor(() => screen.getByRole("button", { name: /^Unload qwen3-coder-30b-awq$/i }));
+    fireEvent.click(btn);
+
+    await waitFor(() => expect(screen.getByTestId("models-browse-only-note")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^Unload qwen3-coder-30b-awq$/i })).not.toBeInTheDocument();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it("passes a load refusal through verbatim rather than a generic message", async () => {
+    const REFUSAL = "lms CLI not found on PATH — install it or set COCKPIT_LMS_PATH.";
+    globalThis.fetch = mockFetch({
+      "/models/qwen3-coder-30b-awq/unload": { status: 409, body: { error: REFUSAL } },
+    });
+    const onToast = vi.fn();
+    render(<WithShell provider={VLLM} tab="models" onNavigate={vi.fn()} onToast={onToast} />);
+    const btn = await waitFor(() => screen.getByRole("button", { name: /^Unload qwen3-coder-30b-awq$/i }));
+    fireEvent.click(btn);
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(REFUSAL, "error"));
   });
 
   it("renders an honest empty state on the Logs tab and no fabricated lines", async () => {

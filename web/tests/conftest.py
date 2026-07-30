@@ -1,0 +1,48 @@
+"""Shared fixtures.
+
+Deliberately minimal: no autouse fixtures, no sys.path manipulation (every test
+module already inserts the parent dir itself), so adding this file cannot change
+the behaviour of any existing test.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import server as server_module
+
+
+@pytest.fixture()
+def vllm_ownership(monkeypatch):
+    """Set vLLM ownership (COCKPIT_MANAGED_VLLM + the external verdict) and
+    re-sync the "model-control" capability, restoring everything afterwards.
+
+    COCKPIT_MANAGED_VLLM is read from the env ONCE at import into a module
+    global, so a test cannot use monkeypatch.setenv — the switch is that global
+    plus server._refresh_vllm_model_control(), which is exactly the pair the
+    startup path uses. The capability list is mutable module state, so it is
+    snapshotted and restored rather than left as the test found it (a developer
+    running with COCKPIT_MANAGED_VLLM=1 in their own env would otherwise see
+    cross-test pollution).
+
+    Usage: `vllm_ownership("1")` for managed, `vllm_ownership("0")` for
+    external-by-config, `vllm_ownership("1", external=True)` for
+    opted-in-but-something-else-already-serving.
+    """
+    caps = server_module._PROVIDERS["vllm-local"]["capabilities"]
+    caps_snapshot = list(caps)
+    external_snapshot = server_module._MANAGED_VLLM.get("external", False)
+
+    def apply(value: str, external: bool = False):
+        monkeypatch.setattr(server_module, "COCKPIT_MANAGED_VLLM", value)
+        server_module._MANAGED_VLLM["external"] = external
+        server_module._refresh_vllm_model_control()
+
+    yield apply
+
+    caps[:] = caps_snapshot
+    server_module._MANAGED_VLLM["external"] = external_snapshot

@@ -281,12 +281,17 @@ async def test_status_offline(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_providers_list_shape_no_urls(client):
+async def test_providers_list_shape_no_urls(client, vllm_ownership):
+    # Pin the vLLM ownership state so the expected capability list does not
+    # depend on the developer's own COCKPIT_MANAGED_VLLM (read at import).
+    vllm_ownership("0")
     res = await client.get("/api/local/providers")
     assert res.status_code == 200
     body = res.json()
-    # LM Studio's "model-control" capability is present only when the `lms` CLI
-    # is on PATH (graceful degrade); vLLM's is always present (restart-based).
+    # Both "model-control" advertisements are CONDITIONAL: LM Studio's on the
+    # `lms` CLI being on PATH, vLLM's on Cockpit owning the container. With
+    # COCKPIT_MANAGED_VLLM=0 the restart route always refuses, so the capability
+    # must be absent rather than lying to the UI.
     lms_caps = ["queue", "metrics", "spill", "models", "traces", "health"]
     if server_module._LMS_CLI:
         lms_caps.append("model-control")
@@ -298,14 +303,16 @@ async def test_providers_list_shape_no_urls(client):
             "scope": "local",
             "capabilities": lms_caps,
             "endpoint_hint": "127.0.0.1:1234",
+            "managed": server_module._broker_is_managed(),
         },
         {
             "id": "vllm-local",
             "label": "vLLM (local)",
             "kind": "vllm",
             "scope": "local",
-            "capabilities": ["models", "health", "metrics", "model-discovery", "model-control"],
+            "capabilities": ["models", "health", "metrics", "model-discovery"],
             "endpoint_hint": "127.0.0.1:8001",
+            "managed": False,
         },
     ]
     dumped = str(body)

@@ -172,8 +172,10 @@ describe("Inspector — null/empty tolerances", () => {
         }}
       />
     );
-    // Context ring percent + counts.
-    expect(screen.getByText("n/a context")).toBeInTheDocument();
+    // Context ring percent + counts. A null percentage renders a dash, not
+    // "n/a" -- see the three-state note on ContextRing. With hasTurns unknown we
+    // cannot say whether zero is real, so nothing is asserted about turns here.
+    expect(screen.getByText("— context")).toBeInTheDocument();
     // "n/a" appears repeatedly (input/output, cache, cost); assert at least one
     // and assert no bare "0" token count rendered anywhere.
     expect(screen.getAllByText(/n\/a/).length).toBeGreaterThan(0);
@@ -182,7 +184,73 @@ describe("Inspector — null/empty tolerances", () => {
 
   it("usage=undefined (not even passed) also renders n/a, not 0/NaN", () => {
     render(<Inspector session={{ id: "s1", name: "S1", status: "idle" }} bridge={null} />);
-    expect(screen.getByText("n/a context")).toBeInTheDocument();
+    expect(screen.getByText("— context")).toBeInTheDocument();
+  });
+
+  // REGRESSION (v1.10.0 report): a session spawned seconds ago showed
+  // "n/a context / n/a / n/a" with 0/0 tokens while the status strip showed
+  // 271M tok / $211.75. Attribution was NOT broken -- the session simply had no
+  // assistant turn yet -- but "genuinely zero" and "lookup failed" rendered
+  // identically, so a working system looked broken. These three cases pin the
+  // states apart.
+  it("no turns recorded yet renders a true 0% plus an explicit 'no turns yet'", () => {
+    render(
+      <Inspector
+        session={{ id: "s1", name: "S1", status: "idle" }}
+        bridge={null}
+        usage={{
+          contextUsed: undefined,
+          contextMax: undefined,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          costUsd: 0,
+          hasTurns: false,
+        }}
+      />
+    );
+    expect(screen.getByText("0% context")).toBeInTheDocument();
+    expect(screen.getByText("no turns yet")).toBeInTheDocument();
+    expect(
+      screen.getByText(/No assistant turns recorded yet/i)
+    ).toBeInTheDocument();
+    // The zeros are real and must be shown as zeros, not laundered into n/a.
+    // Both rows (input/output and cache read/write) read "0 / 0".
+    expect(screen.getAllByText("0 / 0")).toHaveLength(2);
+    expect(screen.getByText("$0.00")).toBeInTheDocument();
+  });
+
+  it("turns exist but no context percentage says 'not reported', never a fake 0%", () => {
+    render(
+      <Inspector
+        session={{ id: "s1", name: "S1", status: "idle" }}
+        bridge={null}
+        usage={{
+          contextUsed: undefined,
+          contextMax: undefined,
+          inputTokens: 42,
+          outputTokens: 32110,
+          cacheRead: 10938350,
+          cacheWrite: 1563510,
+          costUsd: 16.0441,
+          hasTurns: true,
+        }}
+      />
+    );
+    // context_percent is scraped from PTY text and is usually absent; claiming
+    // 0% for a session that has burned 12M tokens would be a fabrication.
+    expect(screen.getByText("— context")).toBeInTheDocument();
+    expect(screen.getByText("not reported by the session")).toBeInTheDocument();
+    expect(screen.queryByText("0% context")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No assistant turns recorded yet/i)).toBeNull();
+  });
+
+  it("usage entirely absent renders the 'not available' note, distinct from zero", () => {
+    render(<Inspector session={{ id: "s1", name: "S1", status: "idle" }} bridge={null} />);
+    expect(screen.getByText(/Usage not available for this session yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No assistant turns recorded yet/i)).toBeNull();
+    expect(screen.queryByText("no turns yet")).toBeNull();
   });
 
   it("bridge=null renders no BridgeCard", () => {

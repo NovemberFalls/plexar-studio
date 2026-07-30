@@ -631,6 +631,38 @@ class UsageTracker:
 
     # -- summaries ------------------------------------------------------------
 
+    def latest_turn(self, terminal_id: str) -> dict | None:
+        """The MOST RECENT assistant turn recorded for one terminal.
+
+        Returns ``{"ts", "model", "input_tokens", "cache_read_tokens"}`` or
+        ``None`` when the terminal has no usage_events rows at all.
+
+        Additive read-only helper for the context ring: context occupancy is the
+        size of the CURRENT prompt (``input_tokens + cache_read_tokens`` of the
+        last turn), never a sum over turns — a sum measures cumulative traffic
+        and grows past any window forever. Deliberately does NOT touch cost or
+        pricing columns; it is not a summary and must not be used as one.
+
+        Ordering is ``ts DESC, rowid DESC``: ISO-8601 timestamps sort
+        lexicographically, and rowid breaks the tie when two turns share a
+        timestamp (the later-ingested row is the later turn).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT ts, model, input_tokens, cache_read_tokens "
+                "FROM usage_events WHERE terminal_id = ? "
+                "ORDER BY ts DESC, rowid DESC LIMIT 1",
+                (terminal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "ts": row["ts"],
+            "model": row["model"],
+            "input_tokens": row["input_tokens"] or 0,
+            "cache_read_tokens": row["cache_read_tokens"] or 0,
+        }
+
     def session_summary(self, terminal_id: str) -> dict:
         with self._lock:
             rows = self._conn.execute(

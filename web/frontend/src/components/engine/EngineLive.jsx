@@ -43,9 +43,38 @@ const RESTART_ONLY_VLLM =
   "Restart is vLLM-only: POST /api/local/{provider}/restart recreates the managed container. " +
   "This backend exposes no restart route.";
 
-const SWAP_UNAVAILABLE =
-  "This backend does not declare the model-control capability, so Cockpit has no load/unload or " +
-  "restart route to swap with.";
+/**
+ * Why there is no control here, said BEFORE the click.
+ *
+ * The bug this replaces: the buttons rendered regardless, the user clicked
+ * Restart on an external vLLM, and the server correctly refused with a red
+ * toast. A control that can NEVER work is the defect — the refusal was the
+ * symptom. `managed` (new on GET /api/local/providers) is the same determination
+ * the server refuses on, so the explanation and the refusal cannot disagree.
+ */
+function controlUnavailableReason(provider) {
+  const isVllm = provider?.kind === "vllm";
+  const managed = provider?.managed === true;
+  if (isVllm && !managed) {
+    return (
+      "vLLM has no model hot-swap API — one process serves the single model given to --model at " +
+      "launch, so changing model means restarting the process. This vLLM is running outside " +
+      "Cockpit (COCKPIT_MANAGED_VLLM is off), so Cockpit cannot restart it. Restart it where you " +
+      "started it, with the model you want."
+    );
+  }
+  if (isVllm) {
+    return (
+      "Cockpit owns this container, but the backend is not declaring the model-control capability " +
+      "right now, so there is no restart route to swap with."
+    );
+  }
+  return (
+    "This backend does not declare the model-control capability, so Cockpit has no load/unload or " +
+    "restart route to swap with. For LM Studio that usually means the lms CLI is not on the " +
+    "server's PATH."
+  );
+}
 
 /** Fields the broker's /config/spill echo carries (broker.py::_serve_spill_config). */
 function spillThreshold(spill, cls) {
@@ -81,6 +110,9 @@ function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
   const [target, setTarget] = useState("");
   const [confirm, setConfirm] = useState(null); // "swap" | "restart" | null
   const [busy, setBusy] = useState(false);
+  // A 404 from a write means "capability not available" — the affordance should
+  // not have been there. Correct the affordance instead of shouting an error.
+  const [controlLost, setControlLost] = useState(false);
 
   const list = Array.isArray(models?.models) ? models.models : [];
   const loadedName = loadedModelName(models, metrics);
@@ -89,8 +121,7 @@ function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
   const kvPct = typeof engine?.kv_cache_pct === "number" ? engine.kv_cache_pct : null;
 
   const isVllm = provider?.kind === "vllm";
-  const canControl = Boolean(caps?.has("model-control"));
-  const canRestart = canControl && isVllm;
+  const canControl = Boolean(caps?.has("model-control")) && !controlLost;
   const currentTarget = loaded ? loaded.container_path || loaded.id : "";
 
   const post = async (url, body) => {
@@ -102,7 +133,17 @@ function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
         body: body ? JSON.stringify(body) : undefined,
       });
       const payload = await res.json().catch(() => ({}));
+      // 404 = "capability not available". Not a failure to report: the control
+      // should never have been offered, so retract it and explain in place.
+      if (res.status === 404) {
+        setControlLost(true);
+        setSwapOpen(false);
+        setConfirm(null);
+        return false;
+      }
       if (!res.ok || payload?.ok === false) {
+        // 409 now carries actionable text (it names COCKPIT_MANAGED_VLLM and what
+        // to do). Surface it verbatim — a generic string would throw that away.
         onToast?.(payload?.error || "The engine refused that request", "error");
         return false;
       }
@@ -187,44 +228,59 @@ function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
         unknownNote="KV-cache utilisation comes from the engine's own /metrics; this backend is not reporting it."
       />
 
-      <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
-        <Btn
-          label="Swap model…"
-          testId="engine-swap"
-          disabled={!canControl || busy}
-          onClick={() => {
-            setTarget(currentTarget);
-            setSwapOpen((v) => !v);
-            setConfirm(null);
-          }}
-          title={canControl ? "Choose a different model for this backend" : SWAP_UNAVAILABLE}
-        />
-        {confirm === "restart" ? (
-          <>
+      {!canControl ? (
+        /* No control exists. Render the reason where the buttons would have been
+           rather than a button whose only outcome is a refusal toast. */
+        <Note testId="engine-model-control-note" token="var(--cc-waiting)" tinted>
+          {controlUnavailableReason(provider)}
+        </Note>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
             <Btn
-              label="Confirm restart"
-              accent
-              testId="engine-restart-confirm"
+              label="Swap model…"
+              testId="engine-swap"
               disabled={busy}
               onClick={() => {
+                setTarget(currentTarget);
+                setSwapOpen((v) => !v);
                 setConfirm(null);
-                doRestart(currentTarget);
               }}
-              title="Restart now — in-flight requests are lost"
+              title="Choose a different model for this backend"
             />
-            <Btn label="Cancel restart" testId="engine-restart-cancel" onClick={() => setConfirm(null)} />
-          </>
-        ) : (
-          <Btn
-            label="Restart"
-            icon={RefreshCw}
-            testId="engine-restart"
-            disabled={!canRestart || busy}
-            onClick={() => setConfirm("restart")}
-            title={canRestart ? "Recreate the engine with the current model" : RESTART_ONLY_VLLM}
-          />
-        )}
-      </div>
+            {!isVllm ? null : confirm === "restart" ? (
+              <>
+                <Btn
+                  label="Confirm restart"
+                  accent
+                  testId="engine-restart-confirm"
+                  disabled={busy}
+                  onClick={() => {
+                    setConfirm(null);
+                    doRestart(currentTarget);
+                  }}
+                  title="Restart now — in-flight requests are lost"
+                />
+                <Btn label="Cancel restart" testId="engine-restart-cancel" onClick={() => setConfirm(null)} />
+              </>
+            ) : (
+              <Btn
+                label="Restart"
+                icon={RefreshCw}
+                testId="engine-restart"
+                disabled={busy}
+                onClick={() => setConfirm("restart")}
+                title="Recreate the engine with the current model"
+              />
+            )}
+          </div>
+          {!isVllm && (
+            <Note testId="engine-restart-not-offered" token="var(--cc-waiting)">
+              {RESTART_ONLY_VLLM}
+            </Note>
+          )}
+        </>
+      )}
 
       {swapOpen && canControl && (
         <div style={{ marginTop: 10, display: "flex", gap: 6, alignItems: "center" }}>

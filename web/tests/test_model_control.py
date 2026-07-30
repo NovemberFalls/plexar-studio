@@ -92,10 +92,34 @@ async def test_load_capability_missing_404(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_on_vllm_returns_409(client):
+async def test_load_on_external_vllm_returns_404_no_capability(client, vllm_ownership):
+    """An external vLLM does not advertise model-control at all, so the request
+    is refused by the capability gate before any vLLM-specific branch."""
+    vllm_ownership("0")
+    async with client as c:
+        r = await c.post("/api/local/vllm-local/models/x/load")
+    assert r.status_code == 404
+    assert r.json() == {"error": "capability not available"}
+
+
+@pytest.mark.asyncio
+async def test_load_on_managed_vllm_returns_409_pointing_at_restart(client, vllm_ownership):
+    """Even when Cockpit owns the container there is no hot-load; the 409 has to
+    name the mechanism that DOES work."""
+    vllm_ownership("1")
     async with client as c:
         r = await c.post("/api/local/vllm-local/models/x/load")
     assert r.status_code == 409
+    assert "restart" in r.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_unload_on_managed_vllm_returns_409(client, vllm_ownership):
+    vllm_ownership("1")
+    async with client as c:
+        r = await c.post("/api/local/vllm-local/models/x/unload")
+    assert r.status_code == 409
+    assert "one model per process" in r.json()["error"]
 
 
 @pytest.mark.asyncio
@@ -132,8 +156,10 @@ async def test_unload_cli_failure_502(client, lms_available, monkeypatch):
 # ── vLLM restart ──────────────────────────────────────────
 
 @pytest.fixture()
-def managed_vllm(monkeypatch):
-    monkeypatch.setattr(server_module, "COCKPIT_MANAGED_VLLM", "1")
+def managed_vllm(monkeypatch, vllm_ownership):
+    # Ownership drives BOTH the capability and the route's refusal, so flip it
+    # through the same helper the startup path uses.
+    vllm_ownership("1")
     stops, starts = [], []
 
     async def fake_stop():
@@ -168,11 +194,28 @@ async def test_restart_managed_stops_then_starts_with_new_model(client, managed_
 
 
 @pytest.mark.asyncio
-async def test_restart_unmanaged_409(client, monkeypatch):
-    monkeypatch.setattr(server_module, "COCKPIT_MANAGED_VLLM", "0")
+async def test_restart_unmanaged_409(client, vllm_ownership):
+    vllm_ownership("0")
     async with client as c:
         r = await c.post("/api/local/vllm-local/restart", json={"model": "/models/x"})
     assert r.status_code == 409
+    body = r.json()
+    # The refusal must be ACTIONABLE: name the env var that enables it, say why
+    # a restart is the only mechanism, and say where to do it instead.
+    assert body["managed"] is False
+    assert "COCKPIT_MANAGED_VLLM" in body["error"]
+    assert "hot-swap" in body["error"]
+    assert "where you started it" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_restart_external_double_bind_409(client, vllm_ownership):
+    """Opted in via env but something else is already serving -> still refuse."""
+    vllm_ownership("1", external=True)
+    async with client as c:
+        r = await c.post("/api/local/vllm-local/restart", json={"model": "/models/x"})
+    assert r.status_code == 409
+    assert "COCKPIT_MANAGED_VLLM" in r.json()["error"]
 
 
 @pytest.mark.asyncio
