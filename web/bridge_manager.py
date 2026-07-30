@@ -120,6 +120,10 @@ class _BridgeRecord:
 
     state: str = "active"           # active | ended_user | ended_sentinel | ended_capped | errored
     turns_used: int = 0             # completed round-trips (min of per-side relay counts)
+    # Free-text detail for the terminal state. The state ENUM is deliberately not
+    # extended (the frontend switches on those five values); a spend-cap stop
+    # reuses ``ended_capped`` and explains itself here.
+    end_reason: Optional[str] = None
 
     # Per-side relay counters (each individual relay increments one side)
     _relays_from: int = field(default=0, repr=False)
@@ -145,6 +149,7 @@ class _BridgeRecord:
             "turns_used": self.turns_used,
             "max_turns": self.max_turns,
             "state": self.state,
+            "end_reason": self.end_reason,
         }
 
     def _update_turns(self) -> None:
@@ -472,6 +477,39 @@ def _relay_message(peer_name: str, text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Helper — spend guardrail check at a turn boundary
+# ---------------------------------------------------------------------------
+
+async def _spend_stop_reason() -> str | None:
+    """A reason string if the spend guard now blocks unattended relay work.
+
+    Called at TURN BOUNDARIES only — after an injection has fully completed and
+    its counter has been updated — so a cap can never interrupt a write that is
+    already in the PTY pipe. Returns None when ``spend.enforce_on.bridges`` is
+    off (the check then costs nothing), when no cap has tripped, or when the
+    guard downgraded the block to an alert.
+
+    Async gotcha: ``spend_guard.evaluate`` does synchronous sqlite reads against
+    the usage and pricing DBs. It runs via ``asyncio.to_thread`` so a slow disk
+    cannot stall the single event loop that also drives every session's
+    WebSocket and PTY I/O. Both stores are opened with ``check_same_thread=False``
+    and serialise their own statements under an internal lock, so a thread hop
+    is safe here.
+
+    Best-effort by contract: any failure returns None (bridge continues). A
+    guardrail that fails closed would silently end bridges on a transient DB
+    error, which is a worse failure than one missed stop.
+    """
+    try:
+        import spend_guard
+
+        return await asyncio.to_thread(spend_guard.block_reason, "bridges")
+    except Exception:
+        logger.warning("Spend guard check failed at turn boundary — continuing", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Relay task — watches one side and relays to the other
 # ---------------------------------------------------------------------------
 
@@ -591,6 +629,18 @@ async def _relay_task(
                 _end_bridge(record, "ended_capped")
                 return
 
+            # Spend guardrail: max_turns bounds TURNS, not dollars, and an
+            # autonomous bridge runs unattended. Re-check the cap here — the
+            # same termination path the turn cap uses, no second teardown.
+            spend_reason = await _spend_stop_reason()
+            if spend_reason:
+                logger.info(
+                    "[bridge %s] Spend cap reached — ending bridge: %s",
+                    record.bridge_id, spend_reason,
+                )
+                _end_bridge(record, "ended_capped", reason=f"spend cap: {spend_reason}")
+                return
+
     except asyncio.CancelledError:
         logger.debug("[bridge %s] Relay task cancelled", record.bridge_id)
         raise
@@ -603,16 +653,20 @@ async def _relay_task(
         _end_bridge(record, "errored")
 
 
-def _end_bridge(record: _BridgeRecord, new_state: str) -> None:
+def _end_bridge(record: _BridgeRecord, new_state: str, reason: str | None = None) -> None:
     """Transition a bridge to a terminal state if it is still active.
 
     Idempotent — only the first caller wins; subsequent calls are no-ops.
     Cancels peer relay tasks and sets the stop event so both sides wind down.
+
+    *reason* is optional free text stored on the record (surfaced as
+    ``end_reason``); the state enum itself is never extended.
     """
     if record.state != "active":
         return
 
     record.state = new_state
+    record.end_reason = reason
     record._ended_at = time.monotonic()
     record._stop_event.set()
 
@@ -965,6 +1019,8 @@ class _ChannelRecord:
 
     state: str = "active"           # active | ended_user | ended_sentinel | ended_capped | errored
     turns_used: int = 0             # total relays completed across all members
+    # See _BridgeRecord.end_reason — free-text detail, the enum is not extended.
+    end_reason: Optional[str] = None
     _tasks: list = field(default_factory=list, repr=False)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _ended_at: Optional[float] = field(default=None, repr=False)
@@ -984,6 +1040,7 @@ class _ChannelRecord:
             "turns_used": self.turns_used,
             "max_turns": self.max_turns,
             "state": self.state,
+            "end_reason": self.end_reason,
         }
 
 
@@ -991,16 +1048,19 @@ class _ChannelRecord:
 # Channel end helper
 # ---------------------------------------------------------------------------
 
-def _end_channel(record: _ChannelRecord, new_state: str) -> None:
+def _end_channel(record: _ChannelRecord, new_state: str, reason: str | None = None) -> None:
     """Transition a channel to a terminal state if it is still active.
 
     Idempotent — only the first caller wins; subsequent calls are no-ops.
     Cancels all relay tasks and sets the stop event so all sides wind down.
+
+    *reason* is optional free text stored as ``end_reason``.
     """
     if record.state != "active":
         return
 
     record.state = new_state
+    record.end_reason = reason
     record._ended_at = time.monotonic()
     record._stop_event.set()
 
@@ -1126,6 +1186,16 @@ async def _worker_relay_task(
                     record.channel_id, record.max_turns,
                 )
                 _end_channel(record, "ended_capped")
+                return
+
+            # Spend guardrail at the turn boundary — see _spend_stop_reason.
+            spend_reason = await _spend_stop_reason()
+            if spend_reason:
+                logger.info(
+                    "[channel %s] Spend cap reached — ending channel: %s",
+                    record.channel_id, spend_reason,
+                )
+                _end_channel(record, "ended_capped", reason=f"spend cap: {spend_reason}")
                 return
 
     except asyncio.CancelledError:
@@ -1300,6 +1370,16 @@ async def _lead_relay_task(record: _ChannelRecord, start_offset: int = 0) -> Non
                     record.channel_id, record.max_turns,
                 )
                 _end_channel(record, "ended_capped")
+                return
+
+            # Spend guardrail at the turn boundary — see _spend_stop_reason.
+            spend_reason = await _spend_stop_reason()
+            if spend_reason:
+                logger.info(
+                    "[channel %s] Spend cap reached — ending channel: %s",
+                    record.channel_id, spend_reason,
+                )
+                _end_channel(record, "ended_capped", reason=f"spend cap: {spend_reason}")
                 return
 
     except asyncio.CancelledError:

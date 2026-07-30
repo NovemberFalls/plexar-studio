@@ -19,6 +19,8 @@ import {
   REPORTS_TABS,
   buildDeltas,
   buildSessionsCsv,
+  costBasisSummary,
+  proportionPhrase,
   fmtCost,
   fmtCount,
   fmtInt,
@@ -288,6 +290,115 @@ describe("ReportsView — KPI row", () => {
     const card = screen.getByTestId("kpi-tool-calls");
     expect(card).toHaveAttribute("data-missing", "true");
     expect(card).toHaveTextContent("not reported");
+  });
+});
+
+// ── cost basis ────────────────────────────────────────────
+
+describe("ReportsView — cost basis", () => {
+  const withBasis = (cost_basis) => mockReport({ ...REPORT, cost_basis });
+
+  it("says how many events were priced retroactively, as a proportion", async () => {
+    withBasis({ exact: 0, backfilled: 29033, unpriced: 0 });
+    render(<ReportsView />);
+    await ready();
+    const note = screen.getByTestId("cost-basis-note");
+    expect(note).toHaveAttribute("role", "note");
+    // The owner's real shape: the WHOLE history is retroactive, and "all" says
+    // something a bare count does not.
+    expect(note).toHaveTextContent("all 29,033 API events in this range were priced retroactively");
+    expect(note).toHaveTextContent(/rate in force at the time is not recorded/i);
+    expect(note).toHaveTextContent(/best available estimate/i);
+  });
+
+  it("says 'N of M' when only part of the window is retroactive", async () => {
+    withBasis({ exact: 3988, backfilled: 12, unpriced: 0 });
+    render(<ReportsView />);
+    await ready();
+    const note = screen.getByTestId("cost-basis-note");
+    expect(note).toHaveTextContent("12 of 4,000 API events");
+    expect(note).not.toHaveTextContent(/^all /);
+  });
+
+  it("gives unpriced events their own clause: $0 for want of a price, not free work", async () => {
+    withBasis({ exact: 100, backfilled: 0, unpriced: 21 });
+    render(<ReportsView />);
+    await ready();
+    const note = screen.getByTestId("cost-basis-note");
+    expect(note).toHaveTextContent("21 of 121 events have no price on file");
+    expect(note).toHaveTextContent("$0 because the price is unknown, not because the work was free");
+    expect(note).toHaveTextContent(/understated/i);
+    // With nothing backfilled, the retroactive clause is not asserted.
+    expect(note).not.toHaveTextContent(/retroactively/i);
+  });
+
+  it("carries both clauses when both apply, matching the payload counts", async () => {
+    withBasis({ exact: 3, backfilled: 29033, unpriced: 21 });
+    render(<ReportsView />);
+    await ready();
+    const note = screen.getByTestId("cost-basis-note");
+    expect(note).toHaveTextContent("29,033 of 29,057 API events");
+    expect(note).toHaveTextContent("21 of 29,057 events have no price on file");
+  });
+
+  it("renders NOTHING when the whole window was priced at ingest", async () => {
+    withBasis({ exact: 4000, backfilled: 0, unpriced: 0 });
+    render(<ReportsView />);
+    await ready();
+    // A disclaimer that never retires is a disclaimer nobody reads, so an
+    // all-exact window must be silent.
+    expect(screen.queryByTestId("cost-basis-note")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing, and does not break, when cost_basis is absent or empty", async () => {
+    for (const basis of [undefined, null, {}, { exact: 0, backfilled: 0, unpriced: 0 }, "nonsense"]) {
+      withBasis(basis);
+      const { unmount } = render(<ReportsView />);
+      await ready();
+      expect(screen.queryByTestId("cost-basis-note")).not.toBeInTheDocument();
+      expect(screen.getByTestId("kpi-row")).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("repeats the note on Models, whose Cost column is the same money", async () => {
+    withBasis({ exact: 0, backfilled: 29033, unpriced: 21 });
+    render(<ReportsView initialTab="models" />);
+    await waitFor(() => expect(screen.getByTestId("models-table")).toBeInTheDocument());
+    expect(screen.getByTestId("cost-basis-note")).toHaveTextContent(/priced retroactively/i);
+  });
+
+  it("does not repeat the note on tabs it does not qualify", async () => {
+    withBasis({ exact: 0, backfilled: 29033, unpriced: 21 });
+    render(<ReportsView initialTab="tools" />);
+    await waitFor(() => expect(screen.getByTestId("tools-breakdown")).toBeInTheDocument());
+    expect(screen.queryByTestId("cost-basis-note")).not.toBeInTheDocument();
+  });
+
+  it("costBasisSummary reduces to the case worth saying", () => {
+    expect(costBasisSummary({ exact: 5, backfilled: 0, unpriced: 0 })).toBeNull();
+    expect(costBasisSummary(null)).toBeNull();
+    expect(costBasisSummary({})).toBeNull();
+    expect(costBasisSummary({ exact: 1, backfilled: 2, unpriced: 3 })).toEqual({
+      exact: 1,
+      backfilled: 2,
+      unpriced: 3,
+      total: 6,
+    });
+    // A missing sibling counts as zero rather than poisoning the total.
+    expect(costBasisSummary({ backfilled: 4 })).toEqual({
+      exact: 0,
+      backfilled: 4,
+      unpriced: 0,
+      total: 4,
+    });
+  });
+
+  it("proportionPhrase picks 'all' only when the count covers the total", () => {
+    expect(proportionPhrase(29033, 29033)).toBe("all 29,033");
+    expect(proportionPhrase(12, 4000)).toBe("12 of 4,000");
+    expect(proportionPhrase(5, 0)).toBe("5");
+    expect(proportionPhrase(null, 10)).toBe("—");
   });
 });
 

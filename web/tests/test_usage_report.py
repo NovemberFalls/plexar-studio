@@ -23,6 +23,7 @@ logging_config.setup("WARNING")
 
 import server as server_module
 from server import app
+from pricing_store import PricingStore
 from usage_tracker import UsageTracker, _row_cost
 
 
@@ -111,8 +112,8 @@ def test_range_report_accepts_valid_ranges(tracker, rng):
     report = tracker.range_report(rng)
     assert report["range"] == rng
     assert set(report) == {
-        "range", "generated_at", "kpis", "tool_events_since", "previous",
-        "by_day", "by_model", "by_tool", "sessions",
+        "range", "generated_at", "kpis", "cost_basis", "tool_events_since",
+        "previous", "by_day", "by_model", "by_tool", "sessions",
     }
 
 
@@ -510,3 +511,247 @@ async def test_endpoint_returns_503_on_tracker_failure(client, monkeypatch):
     res = await client.get("/api/usage/report?range=7d")
     assert res.status_code == 503
     assert res.json() == {"reachable": False}
+
+
+# -- cost is FROZEN at ingest (historical honesty) --------------------------
+#
+# Before this, _row_cost was called at QUERY time from CURRENT prices, so a
+# vendor price change silently re-priced every historical report. These tests
+# pin the new behaviour: cost is computed once, at ingest, from the price in
+# effect at the event's timestamp, and reports only ever SUM it.
+
+
+def _seed_row(model, inp, out):
+    return {
+        "model": model, "provider": "test",
+        "input_per_mtok": inp, "output_per_mtok": out,
+        "cache_read_per_mtok": None, "cache_write_per_mtok": None,
+    }
+
+
+@pytest.fixture()
+def priced(tmp_path):
+    """A tracker bound to an isolated, empty-ish price store we control."""
+    store = PricingStore(db_path=tmp_path / "prices.sqlite3")
+    t = UsageTracker(db_path=tmp_path / "usage.sqlite3", pricing=store)
+    yield t, store
+    t.close()
+    store.close()
+
+
+def test_cost_frozen_at_ingest_survives_a_later_price_change(priced, tmp_path):
+    tracker, store = priced
+    store.seed([_seed_row("brandx-1", 10.0, 0.0)], "default")
+
+    _ingest(tracker, tmp_path, [
+        _assistant_line("u1", model="brandx-1", input_tokens=1_000_000, output_tokens=0),
+    ], name="a.jsonl")
+
+    before = tracker.range_report("all")["kpis"]["cost"]
+    assert before == pytest.approx(10.0)
+
+    # The vendor triples its price today. History must not move.
+    store.record_snapshot([_seed_row("brandx-1", 30.0, 0.0)], "openrouter", _iso(0))
+
+    after = tracker.range_report("all")["kpis"]["cost"]
+    assert after == before, "a price change must NOT re-price already-ingested turns"
+    assert tracker.summary("lifetime")["cost_usd"] == pytest.approx(10.0)
+    assert tracker.session_summary("term-1")["est_cost_usd"] == pytest.approx(10.0)
+
+
+def test_new_turns_after_a_price_change_use_the_new_price(priced, tmp_path):
+    tracker, store = priced
+    store.seed([_seed_row("brandx-1", 10.0, 0.0)], "default")
+    _ingest(tracker, tmp_path, [
+        _assistant_line("old", model="brandx-1", input_tokens=1_000_000,
+                        output_tokens=0, ts=_iso(3)),
+    ], name="a.jsonl")
+
+    store.record_snapshot([_seed_row("brandx-1", 30.0, 0.0)], "openrouter", _iso(2))
+
+    _ingest(tracker, tmp_path, [
+        _assistant_line("new", model="brandx-1", input_tokens=1_000_000,
+                        output_tokens=0, ts=_iso(1)),
+    ], name="b.jsonl")
+
+    # 10.0 for the old turn (old rate) + 30.0 for the new turn (new rate).
+    assert tracker.range_report("all")["kpis"]["cost"] == pytest.approx(40.0)
+
+
+def test_cost_basis_counts_exact_rows(priced, tmp_path):
+    tracker, store = priced
+    store.seed([_seed_row("brandx-1", 10.0, 0.0)], "default")
+    _ingest(tracker, tmp_path, [
+        _assistant_line("u1", model="brandx-1"),
+        _assistant_line("u2", model="brandx-1"),
+    ], name="a.jsonl")
+    basis = tracker.range_report("all")["cost_basis"]
+    assert basis == {"exact": 2, "backfilled": 0, "unpriced": 0}
+
+
+def test_cost_basis_counts_unpriced_rows_and_keeps_their_tokens(priced, tmp_path):
+    tracker, _store = priced
+    _ingest(tracker, tmp_path, [
+        _assistant_line("u1", model="nobody-prices-me", input_tokens=500, output_tokens=250),
+    ], name="a.jsonl")
+    report = tracker.range_report("all")
+    assert report["cost_basis"] == {"exact": 0, "backfilled": 0, "unpriced": 1}
+    assert report["kpis"]["cost"] == 0.0
+    row = [m for m in report["by_model"] if m["model"] == "nobody-prices-me"][0]
+    assert row["tokens"] == 750, "an unpriced model must keep every token"
+    assert row["cost"] == 0.0
+    assert report["kpis"]["total_tokens"] == 750
+
+
+def test_cost_basis_is_empty_on_a_fresh_store(priced):
+    tracker, _store = priced
+    assert tracker.range_report("7d")["cost_basis"] == {
+        "exact": 0, "backfilled": 0, "unpriced": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_endpoint_exposes_cost_basis(client, priced, tmp_path, monkeypatch):
+    tracker, store = priced
+    store.seed([_seed_row("brandx-1", 10.0, 0.0)], "default")
+    _ingest(tracker, tmp_path, [_assistant_line("u1", model="brandx-1")], name="a.jsonl")
+    monkeypatch.setattr(server_module, "usage_tracker", tracker)
+    data = (await client.get("/api/usage/report?range=7d")).json()
+    assert data["cost_basis"] == {"exact": 1, "backfilled": 0, "unpriced": 0}
+
+
+# -- in-place migration + honest backfill labelling -------------------------
+
+
+_PRE_MIGRATION_SCHEMA = """
+CREATE TABLE usage_events (
+  id INTEGER PRIMARY KEY,
+  terminal_id TEXT NOT NULL,
+  jsonl_path TEXT NOT NULL,
+  message_uuid TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  workdir TEXT,
+  UNIQUE(jsonl_path, message_uuid)
+);
+"""
+
+
+def _make_pre_migration_db(path, rows):
+    """A usage DB as an OLDER build left it: no cost_usd / price_source."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    conn.executescript(_PRE_MIGRATION_SCHEMA)
+    conn.executemany(
+        "INSERT INTO usage_events (terminal_id, jsonl_path, message_uuid, ts, model, "
+        "input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, workdir) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_existing_pre_migration_db_upgrades_without_data_loss(tmp_path):
+    db = tmp_path / "usage.sqlite3"
+    _make_pre_migration_db(db, [
+        ("term-1", "old.jsonl", "u1", _iso(1), "claude-opus-4", 1000, 500, 0, 0, r"C:\Code\my-repo"),
+        ("term-1", "old.jsonl", "u2", _iso(2), "claude-sonnet-5", 2000, 100, 0, 0, r"C:\Code\my-repo"),
+    ])
+
+    t = UsageTracker(db_path=db)
+    try:
+        report = t.range_report("all")
+        assert report["kpis"]["turns"] == 2, "no pre-existing row may be lost"
+        assert report["kpis"]["total_tokens"] == 3600
+        # Columns exist now and carry values.
+        assert report["kpis"]["cost"] > 0
+    finally:
+        t.close()
+
+
+def test_backfilled_rows_are_labelled_backfill_not_exact(tmp_path):
+    db = tmp_path / "usage.sqlite3"
+    _make_pre_migration_db(db, [
+        ("term-1", "old.jsonl", "u1", _iso(1), "claude-opus-4", 1000, 500, 0, 0, None),
+    ])
+    t = UsageTracker(db_path=db)
+    try:
+        basis = t.range_report("all")["cost_basis"]
+        assert basis == {"exact": 0, "backfilled": 1, "unpriced": 0}, (
+            "a retroactively-priced row must never be reported as exact"
+        )
+    finally:
+        t.close()
+
+
+def test_backfill_is_a_one_time_pass_and_new_rows_are_exact(tmp_path):
+    db = tmp_path / "usage.sqlite3"
+    _make_pre_migration_db(db, [
+        ("term-1", "old.jsonl", "u1", _iso(1), "claude-opus-4", 1000, 500, 0, 0, None),
+    ])
+    t = UsageTracker(db_path=db)
+    try:
+        _ingest(t, tmp_path, [_assistant_line("u2", model="claude-opus-4")], name="new.jsonl")
+        assert t.range_report("all")["cost_basis"] == {
+            "exact": 1, "backfilled": 1, "unpriced": 0,
+        }
+    finally:
+        t.close()
+
+    # Reopening must not re-label the already-priced rows.
+    t2 = UsageTracker(db_path=db)
+    try:
+        assert t2.range_report("all")["cost_basis"] == {
+            "exact": 1, "backfilled": 1, "unpriced": 0,
+        }
+    finally:
+        t2.close()
+
+
+def test_backfill_of_an_unpriced_model_is_labelled_unpriced(tmp_path):
+    db = tmp_path / "usage.sqlite3"
+    _make_pre_migration_db(db, [
+        ("term-1", "old.jsonl", "u1", _iso(1), "who-knows-9000", 400, 100, 0, 0, None),
+    ])
+    t = UsageTracker(db_path=db)
+    try:
+        report = t.range_report("all")
+        assert report["cost_basis"] == {"exact": 0, "backfilled": 0, "unpriced": 1}
+        assert report["kpis"]["cost"] == 0.0
+        assert report["kpis"]["total_tokens"] == 500
+    finally:
+        t.close()
+
+
+def test_backfill_prices_at_the_rate_in_effect_when_one_exists(tmp_path):
+    """A pre-existing row whose event ts falls after a recorded price change
+    must be backfilled with the price that was in effect THEN, not the newest."""
+    prices = PricingStore(db_path=tmp_path / "prices.sqlite3")
+    prices.seed([_seed_row("brandx-1", 10.0, 0.0)], "default")
+    prices.record_snapshot([_seed_row("brandx-1", 30.0, 0.0)], "openrouter", _iso(0))
+
+    db = tmp_path / "usage.sqlite3"
+    _make_pre_migration_db(db, [
+        ("term-1", "old.jsonl", "u1", _iso(5), "brandx-1", 1_000_000, 0, 0, 0, None),
+    ])
+    t = UsageTracker(db_path=db, pricing=prices)
+    try:
+        assert t.range_report("all")["kpis"]["cost"] == pytest.approx(10.0)
+    finally:
+        t.close()
+        prices.close()
+
+
+def test_pricing_store_is_isolated_to_the_usage_db_directory(tmp_path):
+    """A custom usage db_path must NOT bind to the real user's price history."""
+    t = UsageTracker(db_path=tmp_path / "usage.sqlite3")
+    try:
+        assert t._pricing.db_path == tmp_path / "pricing.sqlite3"
+    finally:
+        t.close()

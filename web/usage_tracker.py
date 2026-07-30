@@ -15,6 +15,9 @@ import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import pricing_store as pricing_store_module
+from pricing_store import PricingStore
+
 _SUMMARY_WINDOWS = ("session", "24h", "7d", "lifetime")
 # Reports page ranges (range_report) -- deliberately distinct from the
 # dashboard's _SUMMARY_WINDOWS: calendar ranges, no per-process "session".
@@ -34,6 +37,15 @@ DEFAULT_PRICING = {"input": 5.0, "output": 25.0}
 
 _CACHE_WRITE_MULT = 1.25
 _CACHE_READ_MULT = 0.1
+
+
+# price_source values stored on every usage_events row. These are the ONLY
+# three values, and they map 1:1 onto the `cost_basis` counts reported by
+# range_report -- so the UI can never imply a retroactively-priced figure was
+# locked in at the time.
+PRICE_SOURCE_EXACT = "exact"        # priced at ingest with the rate in effect then
+PRICE_SOURCE_BACKFILL = "backfill"  # priced after the fact (pre-migration row)
+PRICE_SOURCE_UNPRICED = "unpriced"  # no price on file at all -> contributes $0
 
 
 def _pricing_for(model: str) -> dict:
@@ -69,12 +81,89 @@ def _row_cost(
     return total / 1_000_000
 
 
+def _cost_from_price(
+    price: dict | None,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int,
+    cache_read_tokens: int,
+) -> float:
+    """Cost in USD from a *specific* price snapshot row (see pricing_store).
+
+    ``price=None`` means "no price on file" and yields 0.0 -- we never invent a
+    rate, because a fabricated cost is worse than a visibly missing one (the
+    row is labelled ``unpriced`` and its tokens still appear).
+
+    A ``None`` cache rate means the vendor does not publish one, so it is
+    DERIVED from input at Anthropic's documented multipliers (write 1.25x, read
+    0.1x) -- the same math ``_row_cost`` has always used. A cache rate of 0.0 is
+    a real published "free" and is used as-is.
+    """
+    if price is None:
+        return 0.0
+    in_price = price.get("input_per_mtok")
+    out_price = price.get("output_per_mtok")
+    in_price = float(in_price) if in_price is not None else 0.0
+    out_price = float(out_price) if out_price is not None else 0.0
+
+    write_price = price.get("cache_write_per_mtok")
+    write_price = float(write_price) if write_price is not None else in_price * _CACHE_WRITE_MULT
+    read_price = price.get("cache_read_per_mtok")
+    read_price = float(read_price) if read_price is not None else in_price * _CACHE_READ_MULT
+
+    total = (
+        input_tokens * in_price
+        + output_tokens * out_price
+        + cache_creation_tokens * write_price
+        + cache_read_tokens * read_price
+    )
+    return total / 1_000_000
+
+
+def _pricing_table_seed_rows() -> list[dict]:
+    """The verified in-module PRICING table as pricing_store snapshot rows.
+
+    PRICING stays the single source of truth for Anthropic family rates; this
+    just projects it into the price store so ingest-time costing has something
+    to look up. Cache rates are left None so ``_cost_from_price`` derives them
+    with the same multipliers ``_row_cost`` uses -- the two paths agree to the
+    cent.
+    """
+    rows = [
+        {
+            "model": key,
+            "provider": "anthropic",
+            "input_per_mtok": float(rates["input"]),
+            "output_per_mtok": float(rates["output"]),
+            "cache_read_per_mtok": None,
+            "cache_write_per_mtok": None,
+        }
+        for key, rates in PRICING.items()
+    ]
+    return rows
+
+
 def _default_db_path() -> Path:
     return Path.home() / ".claude-cockpit" / "usage.sqlite3"
 
 
 class UsageTracker:
-    def __init__(self, db_path: Path | None = None):
+    def __init__(self, db_path: Path | None = None, pricing: PricingStore | None = None):
+        """Open (or create) the usage DB and bind a price store to it.
+
+        The price store is what makes cost historically honest: cost is frozen
+        onto each row at ingest using the rate that was in effect at the event's
+        timestamp, and every report SUMS those stored values instead of
+        recomputing from today's prices.
+
+        Binding rules, chosen so tests are automatically isolated:
+          * explicit ``pricing`` -> use it (caller owns its lifetime);
+          * default ``db_path`` -> the process-wide ``pricing_store`` singleton;
+          * custom ``db_path`` -> a PricingStore SIBLING of that file. A test
+            pointing the usage DB at tmp_path must never read or write the real
+            user's price history.
+        """
+        default_location = db_path is None
         if db_path is None:
             db_path = _default_db_path()
         self.db_path = Path(db_path)
@@ -91,7 +180,136 @@ class UsageTracker:
             self._conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.Error:
             logger.warning("Failed to set WAL mode on %s", self.db_path, exc_info=True)
+
+        if pricing is not None:
+            self._pricing = pricing
+            self._owns_pricing = False
+        elif default_location:
+            self._pricing = pricing_store_module.pricing_store
+            self._owns_pricing = False
+        else:
+            self._pricing = PricingStore(self.db_path.parent / "pricing.sqlite3")
+            self._owns_pricing = True
+
         self._init_schema()
+        self._seed_pricing()
+        self._backfill_costs()
+
+    # -- pricing ---------------------------------------------------------------
+
+    def _seed_pricing(self) -> None:
+        """Ensure baseline price snapshots exist (first run only, in effect).
+
+        Both seeds are appended with ``effective_from = EPOCH`` because these
+        are hand-maintained list prices with no known change date -- if they
+        were stamped "now", every already-ingested historical event would price
+        at $0. record_snapshot is change-only, so a second call writes nothing.
+        Best-effort: pricing problems must never stop usage tracking.
+        """
+        try:
+            written = self._pricing.seed(
+                pricing_store_module.load_json_seed_rows(), pricing_store_module.SOURCE_JSON
+            )
+            written += self._pricing.seed(
+                _pricing_table_seed_rows(), pricing_store_module.SOURCE_DEFAULT
+            )
+            if written:
+                logger.info("Seeded %d baseline model price snapshot(s)", written)
+        except Exception:
+            logger.error("Failed seeding baseline model prices", exc_info=True)
+
+    def _cost_for_event(
+        self, model: str, ts: str,
+        input_tokens: int, output_tokens: int,
+        cache_creation_tokens: int, cache_read_tokens: int,
+    ) -> tuple[float, str]:
+        """(cost_usd, price_source) for an event, priced AS OF its own timestamp.
+
+        This is the honesty fix: the rate used is the one that was in effect
+        when the turn happened, and the result is written onto the row. A later
+        vendor price change appends a new snapshot and cannot move this number.
+
+        An empty/absent timestamp is priced as of now -- we are observing the
+        event now, so "now" is the most defensible stand-in, and it keeps the
+        row labelled ``exact`` rather than pretending it was backfilled.
+        """
+        at = ts or datetime.now(timezone.utc).isoformat()
+        try:
+            price = self._pricing.price_for(model, at)
+        except Exception:
+            logger.error("Price lookup failed for %s @ %s", model, at, exc_info=True)
+            price = None
+        if price is None:
+            return 0.0, PRICE_SOURCE_UNPRICED
+        return _cost_from_price(
+            price, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
+        ), PRICE_SOURCE_EXACT
+
+    def _backfill_costs(self) -> int:
+        """One-time pass: price rows that predate cost-at-ingest.
+
+        These rows were written by a build that had no stored cost, so their
+        true at-the-time price is unknowable from the DB alone. We use the best
+        price available (the rate in effect at the event ts if we have one,
+        otherwise the newest rate on file) and label the row ``backfill`` --
+        NOT ``exact``. ``range_report`` surfaces those counts as
+        ``cost_basis.backfilled`` so the UI can say "part of this range was
+        priced retroactively" instead of implying every figure was locked in.
+
+        Rows for a model with no price on file at all become ``unpriced`` with
+        cost 0.0 and keep every token they had. Returns rows updated.
+        """
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT id, ts, model, input_tokens, output_tokens, "
+                    "cache_creation_tokens, cache_read_tokens "
+                    "FROM usage_events WHERE cost_usd IS NULL"
+                ).fetchall()
+        except sqlite3.Error:
+            logger.warning("Cost backfill: failed selecting unpriced rows", exc_info=True)
+            return 0
+
+        if not rows:
+            return 0
+
+        updates: list[tuple] = []
+        for r in rows:
+            model = r["model"] or ""
+            inp = r["input_tokens"] or 0
+            out = r["output_tokens"] or 0
+            cw = r["cache_creation_tokens"] or 0
+            cr = r["cache_read_tokens"] or 0
+            price = None
+            try:
+                if r["ts"]:
+                    price = self._pricing.price_for(model, r["ts"])
+                if price is None:
+                    price = self._pricing.latest_price(model)
+            except Exception:
+                logger.error("Cost backfill: price lookup failed for %s", model, exc_info=True)
+                price = None
+            if price is None:
+                updates.append((0.0, PRICE_SOURCE_UNPRICED, r["id"]))
+            else:
+                updates.append((
+                    _cost_from_price(price, inp, out, cw, cr),
+                    PRICE_SOURCE_BACKFILL,
+                    r["id"],
+                ))
+
+        with self._lock:
+            try:
+                self._conn.executemany(
+                    "UPDATE usage_events SET cost_usd = ?, price_source = ? WHERE id = ?",
+                    updates,
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.warning("Cost backfill: failed writing %d row(s)", len(updates), exc_info=True)
+                return 0
+        logger.info("Backfilled frozen cost onto %d pre-existing usage row(s)", len(updates))
+        return len(updates)
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -108,6 +326,14 @@ class UsageTracker:
                   output_tokens INTEGER NOT NULL DEFAULT 0,
                   cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                  /* Cost is FROZEN here at ingest, priced with the rate that
+                     was in effect at `ts`. Reports SUM this column and never
+                     recompute from current prices, so a vendor price change
+                     cannot retroactively move a past report. NULL only ever
+                     means "written by a build older than this column" and is
+                     resolved once by _backfill_costs(). */
+                  cost_usd REAL,
+                  price_source TEXT,
                   UNIQUE(jsonl_path, message_uuid)
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_terminal ON usage_events(terminal_id);
@@ -151,6 +377,11 @@ class UsageTracker:
             )
             self._conn.commit()
             self._migrate_add_column("usage_events", "workdir", "TEXT")
+            # An existing pre-migration DB gains these in place -- ALTER TABLE
+            # ADD COLUMN only, no table rewrite, so no row is lost. Existing
+            # rows read NULL until _backfill_costs() labels them.
+            self._migrate_add_column("usage_events", "cost_usd", "REAL")
+            self._migrate_add_column("usage_events", "price_source", "TEXT")
 
     def _migrate_add_column(self, table: str, column: str, coltype: str) -> None:
         """Add *column* to an existing *table* if it isn't already there.
@@ -264,8 +495,9 @@ class UsageTracker:
                         INSERT OR IGNORE INTO usage_events
                           (terminal_id, jsonl_path, message_uuid, ts, model,
                            input_tokens, output_tokens,
-                           cache_creation_tokens, cache_read_tokens, workdir)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           cache_creation_tokens, cache_read_tokens, workdir,
+                           cost_usd, price_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         rows,
                     )
@@ -326,6 +558,13 @@ class UsageTracker:
         ts = obj.get("timestamp") or ""
 
         usage_row = self._usage_row(terminal_id, jsonl_path, uuid, ts, model, msg, workdir)
+        if usage_row is not None:
+            # Freeze the cost onto the row NOW, at the rate in effect at `ts`.
+            # Indices 5..8 are input/output/cache_creation/cache_read.
+            cost, source = self._cost_for_event(
+                model, ts, usage_row[5], usage_row[6], usage_row[7], usage_row[8]
+            )
+            usage_row = usage_row + (cost, source)
         tool_rows = self._tool_rows(terminal_id, jsonl_path, uuid, ts, model, msg, workdir)
         return usage_row, tool_rows
 
@@ -396,7 +635,7 @@ class UsageTracker:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT model, input_tokens, output_tokens, "
-                "cache_creation_tokens, cache_read_tokens, ts "
+                "cache_creation_tokens, cache_read_tokens, ts, cost_usd "
                 "FROM usage_events WHERE terminal_id = ?",
                 (terminal_id,),
             ).fetchall()
@@ -410,10 +649,9 @@ class UsageTracker:
             out += r["output_tokens"]
             cc += r["cache_creation_tokens"]
             cr += r["cache_read_tokens"]
-            cost += _row_cost(
-                r["model"], r["input_tokens"], r["output_tokens"],
-                r["cache_creation_tokens"], r["cache_read_tokens"],
-            )
+            # Stored (frozen-at-ingest) cost -- never recomputed from current
+            # prices, so this figure cannot drift when a rate changes.
+            cost += r["cost_usd"] or 0.0
             m = r["model"]
             if m and m not in models:
                 models.append(m)
@@ -442,7 +680,7 @@ class UsageTracker:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT terminal_id, model, input_tokens, output_tokens, "
-                "cache_creation_tokens, cache_read_tokens "
+                "cache_creation_tokens, cache_read_tokens, cost_usd "
                 "FROM usage_events WHERE substr(ts, 1, 10) = ?",
                 (day,),
             ).fetchall()
@@ -452,10 +690,7 @@ class UsageTracker:
         by_model: dict[str, dict] = {}
         by_terminal: dict[str, float] = {}
         for r in rows:
-            row_cost = _row_cost(
-                r["model"], r["input_tokens"], r["output_tokens"],
-                r["cache_creation_tokens"], r["cache_read_tokens"],
-            )
+            row_cost = r["cost_usd"] or 0.0
             inp += r["input_tokens"]
             out += r["output_tokens"]
             cc += r["cache_creation_tokens"]
@@ -494,8 +729,9 @@ class UsageTracker:
 
         `window` in {'session','24h','7d','lifetime'}. Aggregates the same
         usage_events store as session_summary/daily_summary, filtered by ts.
-        Cost is computed exclusively via the existing verified _row_cost /
-        _pricing_for path — no reimplementation of token x rate here.
+        Cost is the SUM of each row's frozen-at-ingest `cost_usd` — never
+        recomputed from current prices, so a vendor rate change cannot move a
+        past window's total.
 
         The store does not carry TTFT or wall-clock timing, so ttft_ms and
         wall_ms are always emitted as null (per-percentile). errors_total is
@@ -516,12 +752,12 @@ class UsageTracker:
             if cutoff is None:
                 rows = self._conn.execute(
                     "SELECT model, input_tokens, output_tokens, "
-                    "cache_creation_tokens, cache_read_tokens FROM usage_events"
+                    "cache_creation_tokens, cache_read_tokens, cost_usd FROM usage_events"
                 ).fetchall()
             else:
                 rows = self._conn.execute(
                     "SELECT model, input_tokens, output_tokens, "
-                    "cache_creation_tokens, cache_read_tokens "
+                    "cache_creation_tokens, cache_read_tokens, cost_usd "
                     "FROM usage_events WHERE ts >= ?",
                     (cutoff,),
                 ).fetchall()
@@ -530,10 +766,7 @@ class UsageTracker:
         cost = 0.0
         by_model: dict[str, dict] = {}
         for r in rows:
-            row_cost = _row_cost(
-                r["model"], r["input_tokens"], r["output_tokens"],
-                r["cache_creation_tokens"], r["cache_read_tokens"],
-            )
+            row_cost = r["cost_usd"] or 0.0
             prompt_tokens += r["input_tokens"]
             completion_tokens += r["output_tokens"]
             cost += row_cost
@@ -617,7 +850,7 @@ class UsageTracker:
             if cutoff is None:
                 anthro_rows = self._conn.execute(
                     "SELECT model, input_tokens, output_tokens, "
-                    "cache_creation_tokens, cache_read_tokens, workdir "
+                    "cache_creation_tokens, cache_read_tokens, workdir, cost_usd "
                     "FROM usage_events"
                 ).fetchall()
                 local_rows = self._conn.execute(
@@ -627,7 +860,7 @@ class UsageTracker:
             else:
                 anthro_rows = self._conn.execute(
                     "SELECT model, input_tokens, output_tokens, "
-                    "cache_creation_tokens, cache_read_tokens, workdir "
+                    "cache_creation_tokens, cache_read_tokens, workdir, cost_usd "
                     "FROM usage_events WHERE ts >= ?",
                     (cutoff,),
                 ).fetchall()
@@ -661,10 +894,7 @@ class UsageTracker:
             entry["tokens"] += row_tokens
             if row_tokens:
                 entry["_has_real_tokens"] = True
-            entry["cost_usd"] += _row_cost(
-                model, r["input_tokens"], r["output_tokens"],
-                r["cache_creation_tokens"], r["cache_read_tokens"],
-            )
+            entry["cost_usd"] += r["cost_usd"] or 0.0
             repo = self._repo_from_workdir(r["workdir"])
             entry["_repo_runs"][repo] = entry["_repo_runs"].get(repo, 0) + 1
             entry["_repo_tokens"][repo] = entry["_repo_tokens"].get(repo, 0) + row_tokens
@@ -790,7 +1020,8 @@ class UsageTracker:
         with self._lock:
             api_rows = self._conn.execute(
                 "SELECT terminal_id, ts, model, input_tokens, output_tokens, "
-                "cache_creation_tokens, cache_read_tokens, workdir "
+                "cache_creation_tokens, cache_read_tokens, workdir, "
+                "cost_usd, price_source "
                 "FROM usage_events" + where,
                 tuple(params),
             ).fetchall()
@@ -821,7 +1052,10 @@ class UsageTracker:
             tot_out += out
             tot_cw += cw
             tot_cr += cr
-            tot_cost += _row_cost(r["model"] or "", inp, out, cw, cr)
+            # Frozen-at-ingest cost. Deliberately NOT recomputed here: this is
+            # the single point where a retroactive re-price would have leaked
+            # into both the current and the prior period.
+            tot_cost += r["cost_usd"] or 0.0
         for r in local_rows:
             tot_local += (r["input_tokens"] or 0) + (r["output_tokens"] or 0)
 
@@ -879,14 +1113,26 @@ class UsageTracker:
         the route can 400 rather than silently serving the wrong window.
 
         Formulas (single source of truth -- the UI must not recompute these):
-          * cost            -- API-EQUIVALENT cost, derived from the verified
-                               PRICING table (same $/1M rates as
-                               web/pricing_models.json) via _row_cost. This is
-                               NOT a subscription bill; it is what the same
-                               token volume would have cost at list API rates.
-                               A model with no pricing entry falls back to
-                               DEFAULT_PRICING; local-provider runs are costed
-                               at $0.00 and never contribute to `cost`.
+          * cost            -- API-EQUIVALENT cost: the SUM of each event's
+                               `cost_usd`, which was FROZEN at ingest using the
+                               price in effect at that event's timestamp. It is
+                               never recomputed from current prices, so a vendor
+                               rate change appends a new price snapshot and
+                               leaves every past report exactly where it was.
+                               This is NOT a subscription bill; it is what the
+                               same token volume would have cost at the list API
+                               rates in effect at the time. A model with no
+                               price on file contributes $0.00 but keeps all its
+                               tokens; local-provider runs are costed at $0.00
+                               and never contribute to `cost`.
+          * cost_basis      -- {exact, backfilled, unpriced} counts of API
+                               events in the window. `exact` = priced at ingest
+                               with the then-current rate. `backfilled` = priced
+                               after the fact (rows written before cost-at-
+                               ingest existed) -- the UI must say part of the
+                               range was priced retroactively rather than imply
+                               those figures were locked in. `unpriced` = no
+                               price on file; tokens counted, cost 0.
           * cache_hit_rate  = cache_read / (cache_read + input)   [0.0 when the
                                denominator is 0]
           * local_share     = local_tokens / total_tokens         [0.0 when
@@ -924,6 +1170,10 @@ class UsageTracker:
         by_day: dict[str, dict] = {}
         by_model: dict[tuple, dict] = {}
         sessions: dict[str, dict] = {}
+        # How each API event in this window got its price. See range_report's
+        # docstring -- this is what lets the UI avoid implying that a
+        # retroactively-priced figure was locked in at the time.
+        cost_basis = {"exact": 0, "backfilled": 0, "unpriced": 0}
 
         def _day_bucket(day: str) -> dict:
             return by_day.setdefault(day, {
@@ -952,7 +1202,17 @@ class UsageTracker:
             cr = r["cache_read_tokens"] or 0
             row_total = inp + out + cw + cr
             model = r["model"] or ""
-            row_cost = _row_cost(model, inp, out, cw, cr)
+            row_cost = r["cost_usd"] or 0.0
+            source = r["price_source"] or ""
+            if source == PRICE_SOURCE_EXACT:
+                cost_basis["exact"] += 1
+            elif source == PRICE_SOURCE_BACKFILL:
+                cost_basis["backfilled"] += 1
+            else:
+                # Includes NULL (a row a build older than the cost columns
+                # wrote and that backfill has not yet touched) -- counted as
+                # unpriced rather than quietly claimed as exact.
+                cost_basis["unpriced"] += 1
 
             day = (r["ts"] or "")[:10] or now.date().isoformat()
             d = _day_bucket(day)
@@ -1106,6 +1366,7 @@ class UsageTracker:
             "range": range_key,
             "generated_at": now.isoformat(),
             "kpis": kpis,
+            "cost_basis": cost_basis,
             "tool_events_since": self._tool_events_since(),
             "previous": self._previous_period(range_key, now),
             "by_day": series,
@@ -1120,6 +1381,10 @@ class UsageTracker:
                 self._conn.close()
             except sqlite3.Error:
                 logger.warning("Failed closing usage DB", exc_info=True)
+        # Only close a price store we created ourselves; the process-wide
+        # singleton (and any caller-supplied store) outlives this tracker.
+        if self._owns_pricing:
+            self._pricing.close()
 
 
 # Module-level singleton.

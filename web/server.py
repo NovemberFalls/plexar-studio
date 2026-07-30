@@ -42,6 +42,9 @@ from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  #
 from bridge_manager import _wait_for_idle_simple, _wrap  # noqa: E402
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
 from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other local-module imports above
+import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the other local-module imports above
+from pricing_store import pricing_store  # noqa: E402
+import spend_guard  # noqa: E402 -- reads settings_store/usage_tracker lazily; the sole spend-decision module
 
 START_TIME = _time.time()
 
@@ -157,6 +160,12 @@ async def lifespan(app: FastAPI):
     # so the in-app History view is derived from Cockpit alone (no Prometheus).
     app.state.fleet_history_task = asyncio.create_task(_fleet_history_loop())
 
+    # Daily model-price refresh. Prices are only ever APPENDED (pricing_store),
+    # so a refresh updates what NEW events cost and can never re-price history.
+    # Best-effort, same posture as the managed broker: never blocks startup,
+    # cancelled cleanly on shutdown.
+    app.state.pricing_refresh_task = asyncio.create_task(_pricing_refresh_loop())
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
     yield
@@ -187,6 +196,14 @@ async def lifespan(app: FastAPI):
         vllm_sampler.cancel()
         try:
             await vllm_sampler
+        except asyncio.CancelledError:
+            pass
+
+    pricing_task = getattr(app.state, "pricing_refresh_task", None)
+    if pricing_task:
+        pricing_task.cancel()
+        try:
+            await pricing_task
         except asyncio.CancelledError:
             pass
 
@@ -840,6 +857,18 @@ async def create_terminal(request: Request):
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
 
+    # Spend guardrail (spend.enforce_on.new_sessions, default OFF). Cheap to
+    # honour here: the check happens BEFORE the spawn, so nothing has to be torn
+    # down, and it returns immediately without a DB read when the flag is off.
+    # Note this bounds NEW sessions only — an already-running session's
+    # interactive typing is never blocked.
+    spend = await _spend_refusal("new_sessions")
+    if spend is not None:
+        return JSONResponse(
+            {"error": _spend_error_text(spend), "spend": spend},
+            status_code=409,
+        )
+
     try:
         session = pty_manager.create_terminal(
             name=name,
@@ -1439,6 +1468,43 @@ def get_daily_usage(day: str | None = None):
     return usage_tracker.daily_summary(day)
 
 
+# ── Spend guardrails ─────────────────────────────────────
+#
+# spend_guard owns every decision; these are only the enforcement points.
+# Interactive typing is NEVER blocked — out of scope by design.
+
+
+async def _spend_refusal(scope: str):
+    """The spend_guard payload if *scope* must be refused, else None.
+
+    Async gotcha: the guard does synchronous sqlite reads (usage + pricing DBs),
+    so it runs in a worker thread rather than on the event loop that also serves
+    every terminal WebSocket. Both stores are opened check_same_thread=False and
+    serialise their own statements, so the hop is safe.
+    """
+    return await asyncio.to_thread(spend_guard.check_start, scope)
+
+
+def _spend_error_text(spend: dict) -> str:
+    """A one-line human reason for a spend refusal, taken from the payload."""
+    reasons = spend.get("reasons") or []
+    if reasons:
+        return "Spend cap reached: " + "; ".join(str(r) for r in reasons)
+    return "Spend cap reached"
+
+
+@app.get("/api/spend/status")
+async def get_spend_status():
+    """Current spend posture: window, per-class spend vs cap, and whether
+    Cockpit is blocking.
+
+    ALWAYS 200. This is a status read the Settings page renders inline; failing
+    it would blank the panel and teach the user to ignore it. spend_guard.evaluate
+    never raises and reports its own gaps via ``caveats``.
+    """
+    return JSONResponse(await asyncio.to_thread(spend_guard.evaluate))
+
+
 @app.post("/api/bridge/manual")
 async def bridge_manual(request: Request):
     """One-shot relay: inject a message from one session's latest output into another session."""
@@ -1515,6 +1581,16 @@ async def bridge_auto(request: Request):
             {"ok": False, "error": "One or both sessions already in an active bridge or channel"},
             status_code=409,
         )
+    # Spend guardrail: an autonomous bridge runs unattended and max_turns bounds
+    # turns, not dollars. Refuse with the same 409 conflict idiom the guards above
+    # use, and hand back the whole evaluate() payload so the UI can name the exact
+    # cap that tripped instead of guessing.
+    spend = await _spend_refusal("bridges")
+    if spend is not None:
+        return JSONResponse(
+            {"ok": False, "error": _spend_error_text(spend), "spend": spend},
+            status_code=409,
+        )
     result = await bridge_manager.start_auto(from_id, to_id, kickoff, max_turns)
     status = 200 if result.get("ok") else 400
     return JSONResponse(result, status_code=status)
@@ -1570,6 +1646,14 @@ async def channel_start(request: Request):
     if overlap:
         return JSONResponse(
             {"ok": False, "error": f"Sessions already in an active bridge or channel: {sorted(overlap)}"},
+            status_code=409,
+        )
+
+    # Spend guardrail — same refusal as /api/bridge/auto (see there).
+    spend = await _spend_refusal("bridges")
+    if spend is not None:
+        return JSONResponse(
+            {"ok": False, "error": _spend_error_text(spend), "spend": spend},
             status_code=409,
         )
 
@@ -4568,10 +4652,18 @@ async def get_usage_report(range: str = "7d"):
     per-model spend + per-tool calls + sessions table + prior-period KPIs).
     See usage_tracker.range_report for the exact formulas; the important ones:
 
-      * cost is API-EQUIVALENT (list $/1M rates from the verified pricing
-        table), NOT a subscription bill. Local-provider tokens are costed at
-        $0 and never inflate cost; they are counted separately and surface via
-        kpis.local_share.
+      * cost is API-EQUIVALENT (list $/1M rates), NOT a subscription bill. It
+        is the SUM of per-event costs FROZEN at ingest using the price in
+        effect at that event's timestamp -- it is never recomputed from current
+        prices, so a vendor price change cannot move a past report.
+        Local-provider tokens are costed at $0 and never inflate cost; they are
+        counted separately and surface via kpis.local_share.
+      * cost_basis = {exact, backfilled, unpriced} counts of API events in the
+        range. `backfilled` rows were priced retroactively (they predate
+        cost-at-ingest), so the UI must say part of the range was priced after
+        the fact rather than implying every figure was locked in at the time.
+        `unpriced` rows have no price on file: their tokens count, their cost
+        is 0.
       * cache_hit_rate = cache_read / (cache_read + input), 0.0 when the
         denominator is 0.
       * by_day is gap-filled -- every day in the range is present, zeroed
@@ -4663,6 +4755,95 @@ async def get_pricing_models():
     except Exception:
         logger.debug("pricing_models.json unreadable, falling back to default pricing", exc_info=True)
         return JSONResponse(_DEFAULT_PRICING_MODELS)
+
+
+# ── Live model prices (append-only snapshots + daily OpenRouter poll) ──
+#
+# The store is APPEND-ONLY: a price change writes a NEW row with a later
+# effective_from and never touches the old one. usage_tracker freezes each
+# event's cost at ingest from the rate in effect at that moment, so refreshing
+# prices changes what FUTURE turns cost and can never re-price history.
+
+# The loop wakes often but only polls when the cadence
+# (COCKPIT_PRICING_REFRESH_HOURS, default 24h) has actually elapsed. Short ticks
+# instead of one 24h sleep so a long-running desktop app that was suspended
+# mid-sleep still refreshes promptly after waking.
+_PRICING_LOOP_TICK_SECONDS = 900
+
+
+async def _pricing_refresh_loop() -> None:
+    """Poll OpenRouter for current prices on a cadence. Best-effort.
+
+    Runs the blocking urllib fetch via ``asyncio.to_thread`` so the event loop
+    is never blocked. A network failure logs a warning and changes nothing --
+    the loop keeps going, and Cockpit keeps serving with the prices it already
+    has.
+    """
+    try:
+        while True:
+            try:
+                due = await asyncio.to_thread(
+                    pricing_store.refresh_due, pricing_store_module.SOURCE_OPENROUTER
+                )
+                if due:
+                    await asyncio.to_thread(pricing_store.refresh_openrouter)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error("Pricing refresh loop iteration failed", exc_info=True)
+            await asyncio.sleep(_PRICING_LOOP_TICK_SECONDS)
+    except asyncio.CancelledError:
+        pass
+
+
+def _pricing_payload() -> dict:
+    return {
+        "models": pricing_store.latest_prices(),
+        "last_refresh": {
+            "openrouter": pricing_store.last_refresh(pricing_store_module.SOURCE_OPENROUTER),
+            "json": pricing_store.last_refresh(pricing_store_module.SOURCE_JSON),
+        },
+        "next_refresh": pricing_store.next_refresh(pricing_store_module.SOURCE_OPENROUTER),
+        "refresh_hours": pricing_store_module.refresh_hours(),
+    }
+
+
+@app.get("/api/pricing")
+async def get_pricing():
+    """Current effective price per model, plus refresh bookkeeping.
+
+    `models` is the NEWEST snapshot per model (`$/1M tokens`, with null meaning
+    "the vendor did not publish this rate" -- distinct from 0.0, which means
+    genuinely free). Older snapshots are retained but not returned here; they
+    exist so historical costs stay pinned to the rate that was in effect.
+    """
+    try:
+        return JSONResponse(_pricing_payload())
+    except Exception:
+        logger.error("Failed building pricing payload", exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+
+
+@app.post("/api/pricing/refresh")
+async def post_pricing_refresh():
+    """Manually poll OpenRouter now, ignoring the cadence.
+
+    Always returns 200 with the refresh outcome (`ok`, `models_seen`,
+    `rows_written`, `error`) plus the resulting pricing payload -- a failed poll
+    is a reportable result, not a server error, and it leaves prices untouched.
+    """
+    try:
+        result = await asyncio.to_thread(pricing_store.refresh_openrouter)
+    except Exception:
+        logger.error("Manual pricing refresh failed", exc_info=True)
+        result = {"ok": False, "source": pricing_store_module.SOURCE_OPENROUTER,
+                  "models_seen": 0, "rows_written": 0, "error": "refresh failed"}
+    payload = {"refresh": result}
+    try:
+        payload.update(_pricing_payload())
+    except Exception:
+        logger.error("Failed building pricing payload after refresh", exc_info=True)
+    return JSONResponse(payload)
 
 
 # Legacy routes: delegate to the default provider so old clients keep working.

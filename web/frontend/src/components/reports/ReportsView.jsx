@@ -66,6 +66,8 @@ import {
   fmtCount,
   fmtPct,
   fmtSinceDate,
+  costBasisSummary,
+  proportionPhrase,
   toolCoverage,
   tokensUnreported,
 } from "./format.js";
@@ -122,6 +124,75 @@ function coverageNoteText(coverage) {
     );
   }
   return null;
+}
+
+/**
+ * How the cost figures on this screen were arrived at — rendered only when some
+ * of them were NOT priced at the time the work happened.
+ *
+ * Two clauses, because they are two different problems. Retroactive pricing
+ * makes a figure an estimate: the rate that actually applied is not in the
+ * database, so today's rate stands in for it. Unpriced events make the total an
+ * UNDERSTATEMENT: they are $0 because no rate is known, not because the work was
+ * free. That is the same null-versus-zero distinction this page enforces for
+ * token totals and tool calls, and it is the trap this note exists to close.
+ *
+ * `basis` is the already-reduced costBasisSummary(); a null caller-side means
+ * the window is wholly exact and nothing is rendered.
+ */
+/** Tone by PROPORTION, not by presence. When retroactive pricing covers the whole
+ *  window the headline figure IS an estimate — that is a material qualification of
+ *  the number, not a footnote on it, so it carries --cc-waiting weight. When it is
+ *  a small slice, a muted note is honest and proportionate; shouting at every range
+ *  teaches the reader to skip the warning that matters. */
+function costBasisTone(basis) {
+  if (!basis) return false;
+  const affected = (basis.backfilled || 0) + (basis.unpriced || 0);
+  const total = basis.total || 0;
+  return total > 0 && affected >= total; // the entire window is qualified
+}
+
+function CostBasisNote({ basis, style }) {
+  if (!basis) return null;
+  const { backfilled, unpriced, total } = basis;
+  const material = costBasisTone(basis);
+  const toned = material
+    ? {
+        ...(style || NOTE),
+        color: "var(--cc-waiting)",
+        border: "1px solid color-mix(in srgb, var(--cc-waiting) 35%, transparent)",
+        background: "color-mix(in srgb, var(--cc-waiting) 8%, transparent)",
+        borderRadius: 9,
+        padding: 10,
+      }
+    : style || NOTE;
+  return (
+    <div
+      role="note"
+      data-testid="cost-basis-note"
+      data-material={material ? "true" : "false"}
+      style={toned}
+    >
+      {backfilled > 0 ? (
+        <>
+          {proportionPhrase(backfilled, total)}{" "}
+          {backfilled === 1 ? "API event" : "API events"} in this range{" "}
+          {backfilled === 1 ? "was" : "were"} priced <strong>retroactively</strong>. The rate in
+          force at the time is not recorded, so {backfilled === 1 ? "it is" : "they are"} costed at
+          today&rsquo;s rates — a best available estimate, not the amount that would have been
+          billed then.{" "}
+        </>
+      ) : null}
+      {unpriced > 0 ? (
+        <>
+          {proportionPhrase(unpriced, total)} {unpriced === 1 ? "event has" : "events have"} no price
+          on file for their model. Their tokens are counted but they contribute{" "}
+          <strong>$0 because the price is unknown, not because the work was free</strong>, so the
+          cost shown is understated by whatever they actually cost.
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 // ── header primitives ─────────────────────────────────────
@@ -360,8 +431,14 @@ function ErrorPanel({ message, onRetry }) {
   );
 }
 
-/** The Models tab: a fuller table of the same by_model rows the bar card uses. */
-function ModelsPanel({ byModel }) {
+/**
+ * The Models tab: a fuller table of the same by_model rows the bar card uses.
+ *
+ * This is the one other tab that carries the cost-basis note, because its Cost
+ * column is the same money the note qualifies. The remaining tabs do not repeat
+ * it — restating a caveat everywhere is how it stops being read.
+ */
+function ModelsPanel({ byModel, basis }) {
   const rows = Array.isArray(byModel) ? byModel : [];
   const TH = {
     fontSize: 9,
@@ -461,6 +538,16 @@ function ModelsPanel({ byModel }) {
         Costs are API-equivalent, priced from pricing_models.json — not your subscription bill.
         Local tokens are costed at $0 and counted separately.
       </div>
+      <CostBasisNote
+        basis={basis}
+        style={{
+          padding: "9px 16px",
+          borderTop: "1px solid var(--cc-line)",
+          fontSize: 10,
+          lineHeight: 1.5,
+          color: "var(--cc-muted)",
+        }}
+      />
     </div>
   );
 }
@@ -588,6 +675,11 @@ export default function ReportsView({
     [data, reportRange]
   );
 
+  // null when every event in the window was priced at ingest — see
+  // costBasisSummary(). Also null when the field is absent or malformed, so an
+  // older server simply renders the page as it did before.
+  const costBasis = useMemo(() => costBasisSummary(data?.cost_basis), [data]);
+
   const projects = useMemo(() => filterOptions(sessions, "project"), [sessions]);
   const models = useMemo(() => filterOptions(sessions, "model"), [sessions]);
 
@@ -654,7 +746,7 @@ export default function ReportsView({
     body = (
       <>
         {filtersActive && <FilterScopeNote />}
-        <ModelsPanel byModel={filteredModels} />
+        <ModelsPanel byModel={filteredModels} basis={costBasis} />
       </>
     );
   } else if (tab === "sessions") {
@@ -689,6 +781,7 @@ export default function ReportsView({
               {coverageNote}
             </div>
           ) : null}
+          <CostBasisNote basis={costBasis} />
           {tokensUnreported(data?.kpis, sessions) ? (
             <div role="note" data-testid="tokens-unreported-note" style={NOTE}>
               Turns were recorded in this range but the token totals came back as zero, so these

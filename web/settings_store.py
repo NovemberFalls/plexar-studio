@@ -179,6 +179,29 @@ DEFAULT_SETTINGS = {
         "token_overrides": {}, "user_palettes": {},
     },
     "data": {"retention_days": 90},
+    # Spend guardrails. These paths are the contract the Settings UI
+    # (components/settings/SpendGuardrails.jsx) writes and spend_guard.py reads --
+    # do not rename a leaf without changing both sides.
+    #
+    # Two caps, deliberately asymmetric:
+    #   caps.real_usd       -- money actually billed (OpenRouter, direct API).
+    #   caps.equivalent_usd -- includes subscription-covered Claude turns, whose
+    #                          marginal cost is zero. spend_guard REFUSES to
+    #                          enforce a block on this class while
+    #                          mode == "subscription", regardless of block.equivalent
+    #                          -- the UI interlock is not a security boundary.
+    # A cap of null means "no cap"; a cap of 0 is rejected at validation because
+    # it is indistinguishable from a mistyped "off" while meaning "block all".
+    "spend": {
+        "mode": "subscription",           # "subscription" | "api"
+        "period": "monthly",              # "daily" | "weekly" | "monthly"
+        "monthly_reset_day": 1,           # 1..28 -- a subscription resets on the
+                                          # signup anniversary, not the 1st
+        "caps": {"real_usd": None, "equivalent_usd": None},
+        "alert_at_percent": 80,           # 1..100
+        "block": {"real": False, "equivalent": False},
+        "enforce_on": {"bridges": True, "new_sessions": False},
+    },
     "system": {"keybindings": {}},
 }
 
@@ -194,7 +217,26 @@ _NUMERIC_BOUNDS = {
     "appearance.glow_size": (0, 48),
     "sessions.max_sessions": (1, 16),
     "data.retention_days": (1, 3650),
+    "spend.monthly_reset_day": (1, 28),
+    "spend.alert_at_percent": (1, 100),
 }
+
+# Dotted key -> allowed values. A value outside the set is rejected rather than
+# stored: spend_guard branches on these strings, and an unknown mode would make
+# the "never block equivalent under a subscription" refusal undecidable.
+_ENUM_VALUES = {
+    "spend.mode": ("subscription", "api"),
+    "spend.period": ("daily", "weekly", "monthly"),
+}
+
+# Dotted keys whose value must be null (= no cap) or a number STRICTLY greater
+# than zero. Zero is rejected on purpose: a $0 cap means "block everything", and
+# accepting it would turn a slipped keystroke into a total work stoppage. "Off"
+# already has an unambiguous representation -- null.
+_POSITIVE_OR_NULL_LEAVES = frozenset({
+    "spend.caps.real_usd",
+    "spend.caps.equivalent_usd",
+})
 
 
 def settings_path() -> str:
@@ -278,6 +320,21 @@ def _validate_patch(patch, defaults, prefix: str) -> None:
                 raise ValueError(
                     f"'{dotted}' must be {type(default).__name__} or null"
                 )
+            if dotted in _ENUM_VALUES and value is not None:
+                allowed = _ENUM_VALUES[dotted]
+                if value not in allowed:
+                    raise ValueError(
+                        f"'{dotted}' must be one of {', '.join(allowed)}"
+                    )
+            if dotted in _POSITIVE_OR_NULL_LEAVES and value is not None:
+                # The default for these leaves is None, so _same_json_type above
+                # accepts anything -- the type check has to happen here.
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"'{dotted}' must be a number or null")
+                if value <= 0:
+                    raise ValueError(
+                        f"'{dotted}' must be greater than 0, or null for no cap"
+                    )
             if dotted in _NUMERIC_BOUNDS and value is not None:
                 low, high = _NUMERIC_BOUNDS[dotted]
                 if not (low <= value <= high):

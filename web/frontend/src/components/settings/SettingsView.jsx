@@ -11,9 +11,13 @@
  *
  * Settings is INTENT: this frame owns the single useSettings() instance and
  * hands `get` / `setField` / `isDirty` down to whichever content page is
- * mounted. Only `providers` has a real page today; every other section renders
- * an honest "Not built yet" panel that names what will live there and where the
+ * mounted. Four sections have real pages: `providers`, `tokens`, `reporting`
+ * (spend guardrails) and `pricing` (read-only). Every other section renders an
+ * honest "Not built yet" panel that names what will live there and where the
  * setting lives TODAY. Nothing here fakes a control.
+ *
+ * `pricing` takes no draft props on purpose — it owns no editable state, and
+ * handing it `setField` would imply an editor that has no endpoint behind it.
  */
 import { useState } from "react";
 import { FolderOpen } from "lucide-react";
@@ -24,6 +28,8 @@ import SettingsNav, {
 } from "./SettingsNav.jsx";
 import ProvidersSettings from "./ProvidersSettings.jsx";
 import TokensSettings from "./TokensSettings.jsx";
+import SpendGuardrails from "./SpendGuardrails.jsx";
+import PricingSettings from "./PricingSettings.jsx";
 
 /** Page title + one-line description per section id (11px description line). */
 const PAGE_META = {
@@ -126,18 +132,10 @@ const NOT_BUILT = {
     will: "Palette choice, dark/light variant, and glow size as a first-class setting.",
     today: "the palette popover in the rail.",
   },
-  tokens: {
-    will: "A live editor for the --cc-* design tokens with a reset-to-theme action.",
-    today: null,
-  },
-  reporting: {
-    will: "Usage retention window, what is recorded per run, and a purge action for the local usage database.",
-    today: "the Engine view's reporting dashboard, which is read-only.",
-  },
-  pricing: {
-    will: "An editable per-model price table so cost figures match your actual billing.",
-    today: "a built-in table on the server; overrides are not possible.",
-  },
+  /* `tokens`, `reporting` and `pricing` are BUILT — their entries were removed
+     rather than left here as unreachable copy. Note the old `pricing` entry
+     promised "an editable per-model price table"; there is no price-editing
+     endpoint, so the real page states plainly that it is read-only. */
   keybindings: {
     will: "A remappable list of every Cockpit shortcut with conflict detection.",
     today: null,
@@ -473,6 +471,10 @@ export default function SettingsView({
               isDirty={isDirty}
               deleteField={deleteField}
             />
+          ) : current === "pricing" ? (
+            <PricingSettings />
+          ) : current === "reporting" ? (
+            <SpendGuardrails get={get} setField={setField} isDirty={isDirty} />
           ) : (
             <NotBuiltPanel sectionId={current} />
           )}

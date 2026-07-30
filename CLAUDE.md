@@ -217,6 +217,33 @@ Tool calls ARE available in Claude Code's JSONL — `jsonl_watcher.py` parses `t
 
 `RoutingReportingView.jsx` and the whole `components/localReporting/` tree were deleted in a follow-up sweep (16 files); `fmtInt` moved into `components/reports/format.js`. Two casualties worth knowing: `assembleReportingMetrics`'s cross-provider local totals no longer exist anywhere (`EngineLive` is single-provider by design), and `/api/reporting/models` now has **no frontend consumer** — it is only listed as a row in the Engine ▸ API explorer. Also note `components/reports/format.js` and `components/engine/ui.jsx` both export a `fmtInt` with **different behavior** (thousands separators + em dash vs. bare rounding) — deliberate, not an accident; do not "helpfully" dedupe them without deciding which rendering each surface should have.
 
+## Pricing — append-only snapshots, cost frozen at ingest
+
+**Cost must NEVER be recomputed from current prices.** It used to be: `_row_cost`/`_pricing_for` ran at *query* time, so any price change silently re-priced all of history. Owner directive: poll daily, never update history.
+
+- **`pricing_store.py`** owns `~/.claude-cockpit/pricing.sqlite3`. `model_prices` is **append-only** — PK `(model, effective_from)`, `INSERT OR IGNORE` only, **no UPDATE or DELETE anywhere in the module**. A price change is a NEW row with a later `effective_from`. That is the whole mechanism: `price_for(model, at)` filtered by `effective_from <= at` over a monotonically-growing table cannot change its answer for a fixed `at`.
+- **`refresh_log`** (source, last_attempt, last_success, …) exists because an unchanged daily poll writes **zero** price rows by design — so `MAX(effective_from)` cannot answer "did we poll today" and the poller would re-poll on every startup forever. It holds no rates, so mutating it cannot move a figure.
+- **Daily poll:** `GET https://openrouter.ai/api/v1/models`, `COCKPIT_PRICING_REFRESH_HOURS` (default 24), refreshed at startup only if stale. Best-effort, never blocks startup, cancelled on shutdown. Prices are per-**token** strings → per-Mtok floats. **`"0"` is genuinely free; a missing field is `None`/unknown; a negative is OpenRouter's variable-pricing sentinel → `None`.** Collapsing those into `0.0` either fabricates a cost or hides one. `None` and `0.0` are treated as *different* by the change check, so unknown→free appends a row.
+- **Seeds are EPOCH-effective** (`pricing_models.json`, and a projection of `usage_tracker.PRICING`). Stamping them "now" would leave every already-ingested event unpriced at $0. **The first OpenRouter snapshot is "now"-effective, deliberately** — we do not know what OpenRouter charged last month, and back-dating manufactures false precision. Pre-existing OpenRouter turns therefore stay `unpriced` (tokens kept, $0).
+- **`usage_events.cost_usd` + `price_source`** are written AT INGEST via `price_for(model, event_ts)`. All six read paths (`session_summary`, `daily_summary`, `summary`, `model_report`, `_compute_kpis`, `range_report`) SUM the stored column. `_compute_kpis` was the sharpest one — it feeds current AND prior period, so a re-price leaked into deltas too.
+- **`price_source` ∈ `exact | backfill | unpriced`**, surfaced as `cost_basis: {exact, backfilled, unpriced}` on `/api/usage/report`. `backfill` = priced after the fact (the true rate is unknowable from the DB); `unpriced` = $0 **because no price is known, not because the work was free**. The Reports note is conditional on `backfilled|unpriced > 0` and **tones by proportion** — `--cc-waiting` when the whole window is qualified (the headline figure IS an estimate), muted for a slice.
+- Routes: `GET /api/pricing`, `POST /api/pricing/refresh`.
+
+## Spend guardrails (`spend_guard.py`)
+
+Display and enforcement are **separate concepts**. Reports always shows API-equivalent cost; enforcement keys on **real** money only.
+
+- **`spend.*` in `settings.json`:** `mode` (`subscription|api`), `period` (`daily|weekly|monthly`), `monthly_reset_day` 1..28, `caps.{real_usd,equivalent_usd}` (`None` = no cap; `0` is **rejected** — it means "block everything" and is indistinguishable from a mistyped off), `alert_at_percent` 1..100, `block.{real,equivalent}` (opt-in, default off), `enforce_on.{bridges,new_sessions}` (true/false).
+- **`real` = OpenRouter always + native Anthropic ONLY when `mode == "api"`.** Under a subscription an Anthropic turn is not money billed, so it lands in `equivalent` alone. Flipping the mode changes what the real cap *covers*, not just whether it enforces. Local is $0 and counts toward neither.
+- **`monthly` resets on `monthly_reset_day`, not the 1st** — a Claude subscription resets on the signup anniversary while API billing is calendar-month. Day is capped at 28 so February always honours it.
+- **Three refusal rules — the point of the module:**
+  1. The UI interlock is **not** a security boundary. The server independently refuses an equivalent block whenever `mode == "subscription"`, even if `settings.json` carries `block.equivalent: true` from an API-billing period.
+  2. **Never hard-block on a number we made up.** Untrustworthy pricing (no `openrouter` snapshot at all, or a window that is ≤50% `exact`) DOWNGRADES a block to an alert.
+  3. A `None` cap never blocks; `block.*` with no cap is incoherent → caveat, no block.
+- **INVARIANT:** if a class's `enforcement_available` is `false`, `caveats` contains a line naming that class and the reason. Enforced by a property test over mode × block × cap × trust × spend, because hand-written cases do not catch the next branch added. `enforcement_available` means "a block the user CONFIGURED cannot fire" — it is `True` when the switch is off, so the UI never paints a warning over a setting nobody made. The raw signal is the separate per-class `pricing_trusted`. **The UI must key its NOT-ENFORCING marker off `enforcement_available`, never `pricing_trusted`.**
+- **Enforcement points:** bridge/channel start → **409** with the full `evaluate()` payload; each V2/V3 turn boundary → ends via the EXISTING `_end_bridge`/`_end_channel` termination path (never a second teardown, never mid-write); session create when `enforce_on.new_sessions`. **Interactive typing is never blocked, by design.** Guards **fail open** — a transient DB error must not masquerade as a spend cap.
+- `GET /api/spend/status` returns `evaluate(now)`, always 200.
+
 ## Settings (`settings.json`) — persistence contract
 
 Server-backed store for every tunable value, added in the facelift's Phase 4. **The UI is not allowed to keep a setting only in `localStorage`** — each field maps to one key in `settings.json`.

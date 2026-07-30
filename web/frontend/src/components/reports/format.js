@@ -218,6 +218,52 @@ export function tokensUnreported(kpis, sessions) {
   return (turns !== null && turns > 0) || rows > 0;
 }
 
+// ── cost basis ────────────────────────────────────────────
+
+/**
+ * Reduce `cost_basis` to the case that needs saying, or null for silence.
+ *
+ * `exact` rows were priced at ingest with the rate in force at that moment and
+ * are frozen. `backfilled` rows were priced after the fact, so they carry
+ * TODAY's rates rather than the rates that actually applied — an approximation,
+ * not a historical fact. `unpriced` rows have no rate on file and contribute $0
+ * with their tokens retained, which is an unknown price rather than free work.
+ *
+ * Returns null when the window is entirely `exact`, when the counts are all
+ * zero, and when the field is absent or malformed. A wholly-exact window has
+ * nothing to qualify, and a disclaimer that never goes away is a disclaimer
+ * users learn to skip — which would waste it for the ranges that need it. As
+ * new turns are priced at ingest this note retires itself.
+ */
+export function costBasisSummary(basis) {
+  if (!basis || typeof basis !== "object") return null;
+  const exact = num(basis.exact);
+  const backfilled = num(basis.backfilled);
+  const unpriced = num(basis.unpriced);
+  if (exact === null && backfilled === null && unpriced === null) return null;
+  const e = Math.max(0, exact || 0);
+  const b = Math.max(0, backfilled || 0);
+  const u = Math.max(0, unpriced || 0);
+  if (b === 0 && u === 0) return null;
+  return { exact: e, backfilled: b, unpriced: u, total: e + b + u };
+}
+
+/**
+ * "all 29,033" vs "29 of 4,000" — proportion, not a bare count.
+ *
+ * The difference matters more than the number: a handful of approximated events
+ * in a large window is a footnote, whereas a whole history priced retroactively
+ * changes what the headline figure means.
+ */
+export function proportionPhrase(count, total) {
+  const c = num(count);
+  const t = num(total);
+  if (c === null) return DASH;
+  if (t !== null && t > 0 && c >= t) return `all ${fmtCount(c)}`;
+  if (t === null || t <= 0) return fmtCount(c);
+  return `${fmtCount(c)} of ${fmtCount(t)}`;
+}
+
 // ── period-over-period deltas ─────────────────────────────
 
 /**
