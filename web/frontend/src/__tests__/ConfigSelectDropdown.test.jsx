@@ -71,6 +71,21 @@ describe("ConfigSelect — every option is reachable", () => {
     expect(trigger.parentElement.contains(panel)).toBe(false);
   });
 
+  it("stacks above the modal backdrop it is portalled out of", () => {
+    // Regression: portalling made the panel a SIBLING of `.cc-modal-backdrop`
+    // (z-index 60), so the class-based z-50 drew it BEHIND the backdrop's
+    // rgba(0,0,0,.55) + blur(4px) — visible, but dimmed and blurred. Any value
+    // here must beat 60; the scrim must sit between the modal and the panel.
+    const { trigger } = renderEffort();
+    fireEvent.click(trigger);
+    const panel = screen.getByTestId("config-select-panel-effort");
+    const panelZ = Number(panel.style.zIndex);
+    expect(panelZ).toBeGreaterThan(60);
+    const scrim = document.querySelector('[aria-hidden="true"].fixed.inset-0');
+    expect(Number(scrim.style.zIndex)).toBeGreaterThan(60);
+    expect(panelZ).toBeGreaterThan(Number(scrim.style.zIndex));
+  });
+
   it("bounds the panel height and scrolls when the option list is long", () => {
     const long = Array.from({ length: 60 }, (_, i) => ({ id: `m${i}`, label: `Model ${i}` }));
     render(<ConfigSelect label="Model" value="m0" options={long} onChange={vi.fn()} />);

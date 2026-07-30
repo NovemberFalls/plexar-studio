@@ -214,14 +214,28 @@ export function ConfigSelect({ label, value, options, onChange }) {
       {open &&
         createPortal(
           <>
-            <div className="fixed inset-0 z-40" onClick={() => close(false)} aria-hidden="true" />
+            {/*
+              The panel is portalled to document.body, so it is a SIBLING of
+              `.cc-modal-backdrop` (z-index 60), not a descendant. Tailwind's
+              z-50 therefore put it BEHIND the backdrop's rgba(0,0,0,.55) +
+              blur(4px) — the dropdown was drawn, then dimmed and blurred by the
+              modal it belongs to. Hence explicit z-indexes above 60 here; a
+              class-based z-* cannot be reasoned about across a portal boundary.
+            */}
+            <div
+              className="fixed inset-0"
+              style={{ zIndex: 70 }}
+              onClick={() => close(false)}
+              aria-hidden="true"
+            />
             <div
               data-testid={`config-select-panel-${label.toLowerCase()}`}
               data-placement={pos?.placement || "down"}
               aria-label={`${label} options`}
-              className="z-50 rounded-lg"
+              className="rounded-lg"
               style={{
                 ...(pos?.style || { position: "fixed", top: 0, left: 0, maxHeight: PANEL_MAX }),
+                zIndex: 71,
                 // Bounded height + scrolling is what guarantees the first and
                 // last options are reachable no matter how long the list is.
                 overflowY: "auto",
