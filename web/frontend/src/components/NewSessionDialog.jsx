@@ -26,7 +26,8 @@
  * never rendered as clean.
  */
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   X,
   FolderOpen,
@@ -44,6 +45,7 @@ import FolderBrowser from "./FolderBrowser";
 import { PERMISSION_MODES, EFFORT_OPTIONS } from "../sessionVocabulary";
 import { useModelCatalog } from "../modelCatalog";
 import { normPath, baseName, parentOf } from "./folderPath";
+import { computeSelectPlacement, PANEL_MAX } from "./selectPlacement";
 
 const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
 
@@ -66,21 +68,134 @@ const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`
  */
 const PERMISSION_OPTIONS = PERMISSION_MODES;
 
-function ConfigSelect({ label, value, options, onChange }) {
+/**
+ * ConfigSelect — a listbox-ish dropdown that is reachable in every position.
+ *
+ * Three things were wrong and all three are fixed here:
+ *   1. it always opened upward regardless of available space;
+ *   2. it had no max-height and no scrolling, so a six-option list overflowed;
+ *   3. it was CLIPPED by an ancestor — the confirm block sets `overflowY: auto`
+ *      (and the modal + form both set `overflow: hidden`), all of which the
+ *      layout genuinely needs. So the panel is PORTALLED to document.body and
+ *      positioned from the trigger's rect; no ancestor can clip it, and
+ *      flipping direction becomes trivial.
+ *
+ * The options stay `<button>` elements rather than `role="option"` inside a
+ * `role="listbox"`: the dialog's existing regression suite addresses them by
+ * button role, and swapping the role would break those assertions for a purely
+ * nominal gain. Selection is conveyed with `aria-current`, which is valid on a
+ * button (`aria-selected` is not).
+ */
+export function ConfigSelect({ label, value, options, onChange }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const triggerRef = useRef(null);
+  const optionRefs = useRef([]);
   // The model options now come from the shared catalog rather than a literal, so
   // an empty list is reachable (a caller supplying an empty catalog). Falling
   // back to a placeholder keeps the dialog open instead of crashing it on
   // `current.label` — this modal is the only way to create a session.
   const current = options.find((o) => o.id === value) || options[0] || { id: "", label: "—" };
+
+  const measure = useCallback(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setPos(computeSelectPlacement(rect, window.innerHeight || 0));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    measure();
+    // A portalled panel that stayed put while the page moved would float
+    // detached from its trigger, so movement closes it rather than lying.
+    const close = () => setOpen(false);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [open, measure]);
+
+  // Roving focus: whatever option is active owns the DOM focus, so screen
+  // readers announce it and Enter lands on the right row.
+  useEffect(() => {
+    if (!open || activeIndex < 0) return;
+    optionRefs.current[activeIndex]?.focus();
+  }, [open, activeIndex, pos]);
+
+  const close = (refocus = true) => {
+    setOpen(false);
+    setActiveIndex(-1);
+    if (refocus) triggerRef.current?.focus();
+  };
+
+  const openAt = (index) => {
+    if (options.length === 0) return;
+    setOpen(true);
+    setActiveIndex(Math.max(0, Math.min(options.length - 1, index)));
+  };
+
+  const onTriggerKeyDown = (e) => {
+    if (e.key === "Escape" && open) {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (open) setActiveIndex((i) => (e.key === "ArrowDown" ? Math.min(options.length - 1, i + 1) : Math.max(0, i - 1)));
+      else openAt(e.key === "ArrowDown" ? 0 : options.length - 1);
+    }
+  };
+
+  const onOptionKeyDown = (e, index) => {
+    // The panel is portalled, but React events still bubble up the REACT tree —
+    // straight into the dialog's Escape-cancels handler. Stop them here or
+    // closing the menu would close the whole New session dialog.
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      setActiveIndex(Math.min(options.length - 1, index + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      setActiveIndex(Math.max(0, index - 1));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setActiveIndex(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setActiveIndex(options.length - 1);
+    } else if (e.key === "Tab") {
+      close(false);
+    }
+  };
+
+  const select = (id) => {
+    onChange(id);
+    close();
+  };
+
   return (
     <div className="flex flex-col gap-1 flex-1 relative">
       <span className="cc-label" style={{ paddingLeft: 2 }}>{label}</span>
       <button
+        ref={triggerRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => (open ? close(false) : openAt(Math.max(0, options.findIndex((o) => o.id === value))))}
+        onKeyDown={onTriggerKeyDown}
         aria-label={label}
         aria-expanded={open}
+        aria-haspopup="listbox"
         className="flex items-center justify-between rounded-lg"
         style={{
           height: 34,
@@ -96,43 +211,54 @@ function ConfigSelect({ label, value, options, onChange }) {
         {current.label}
         <ChevronDown size={10} style={{ color: "var(--cc-muted)" }} />
       </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden="true" />
-          <div
-            className="absolute z-50 rounded-lg overflow-hidden"
-            style={{
-              bottom: "100%",
-              left: 0,
-              right: 0,
-              marginBottom: 4,
-              background: "var(--cc-elev)",
-              border: "1px solid var(--cc-border)",
-              boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-            }}
-          >
-            {options.map((o) => (
-              <button
-                key={o.id}
-                type="button"
-                onClick={() => { onChange(o.id); setOpen(false); }}
-                className="w-full text-left"
-                style={{
-                  fontSize: 12,
-                  fontWeight: o.id === value ? 600 : 400,
-                  padding: "6px 11px",
-                  color: o.id === value ? "var(--cc-accent)" : "var(--cc-dim)",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                }}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
+      {open &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => close(false)} aria-hidden="true" />
+            <div
+              data-testid={`config-select-panel-${label.toLowerCase()}`}
+              data-placement={pos?.placement || "down"}
+              aria-label={`${label} options`}
+              className="z-50 rounded-lg"
+              style={{
+                ...(pos?.style || { position: "fixed", top: 0, left: 0, maxHeight: PANEL_MAX }),
+                // Bounded height + scrolling is what guarantees the first and
+                // last options are reachable no matter how long the list is.
+                overflowY: "auto",
+                overflowX: "hidden",
+                background: "var(--cc-elev)",
+                border: "1px solid var(--cc-border)",
+                boxShadow: `0 8px 24px ${tint("var(--cc-bg)", 70)}`,
+              }}
+            >
+              {options.map((o, i) => (
+                <button
+                  key={o.id}
+                  ref={(el) => { optionRefs.current[i] = el; }}
+                  type="button"
+                  onClick={() => select(o.id)}
+                  onKeyDown={(e) => onOptionKeyDown(e, i)}
+                  onFocus={() => setActiveIndex(i)}
+                  aria-current={o.id === value ? "true" : undefined}
+                  className="w-full text-left hover-bg-surface"
+                  style={{
+                    fontSize: 12,
+                    fontWeight: o.id === value ? 600 : 400,
+                    padding: "6px 11px",
+                    color: o.id === value ? "var(--cc-accent)" : "var(--cc-dim)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </>,
+          document.body
+        )}
     </div>
   );
 }

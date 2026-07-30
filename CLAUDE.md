@@ -79,6 +79,17 @@ cd web/frontend && npm run lint
 - **Startup cleanup:** Orphaned claude.exe processes killed via psutil, PID file for crash detection, session reconciliation with frontend.
 - **Graceful shutdown:** Terminate sessions → cleanup uploads → delete PID → log.
 
+## Featured cell vs focus (3/5/7 layouts)
+
+`featuredIndex` and `focusedIndex` are **separate on purpose**. They used to be one variable, and because `focusedIndex` is set by `onMouseDownCapture`, **clicking into a terminal to type reshuffled the grid** — the owner reported it as "whatever we click becomes the primary". Re-deriving `paneOrder` from `focusedIndex` would silently reintroduce that; a test pins the separation.
+
+- `focusedIndex` — set by click/focus, drives the **Inspector** only ("follows focus"). Unchanged behaviour.
+- `featuredIndex` — a **slot** index (not a session), changed only by an explicit act: dropping a pane into the featured cell, or `Make featured` in the pane `Ellipsis` menu (the keyboard-reachable path). Persisted to `cockpit-featured-slot` beside `cockpit-layout`/`cockpit-flip`, since those three together are one "how my grid is arranged" decision — restoring two of the three is a partial restore, which is more confusing than restoring none.
+- **Three index spaces, and conflating any two is the trap:** *slot* = position in `activeIds`; *cell* = position in `gridLayout.areas` (`areas[0]` is the big one); `paneOrder` lists **slots in cell order**, so a slot's cell index is `paneOrder.indexOf(slot)` and `paneOrder[0]` is by definition the featured slot. Slot 0 is featured ONLY when `featuredIndex === 0` — the drop-overlay predicate is `cellIndex === 0`, never `idx === 0`, and the tests use `featured = 1` so they cannot pass on that coincidence.
+- **A drop writes no featured state.** `swapPanes` moves the session into the target *slot*; when that slot is the featured one the dragged session is now featured and `featuredIndex` never moves. Moving `featuredIndex` to the drop target instead would relocate the big cell and reshuffle every other pane — the bug in a new costume.
+- **`paneOrder` is read exactly ONCE in the render body**, for the grid placement style. The loop still iterates fixed slots keyed on `session.id`, so a featured change is CSS-only and cannot remount a terminal (which would drop live scrollback). A refactor to `paneOrder.map(...)` *would* remount; a test counts the occurrences to catch it.
+- Closing the featured session leaves the big cell as an empty drop target rather than auto-promoting a neighbour — auto-promotion is a reshuffle the user did not ask for. `removeSession` nulls the slot and never compacts, so slot indices are stable across a close and need no clamp there; a test pins that.
+
 ## Drag-and-Drop Architecture
 
 Two independent DnD systems share the same drop targets — be careful not to let one swallow the other:

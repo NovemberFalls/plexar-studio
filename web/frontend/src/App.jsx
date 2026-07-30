@@ -24,6 +24,7 @@ import SettingsView from "./components/settings/SettingsView";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneLive, predictedWaitSeconds, pressureFraction } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
+import { FEATURED_LAYOUTS, clampFeatured, computePaneOrder, swapSlots } from "./utils/paneLayout";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -36,6 +37,7 @@ const EFFORT_KEY = "cockpit-effort";
 const FAST_KEY = "cockpit-fast";
 const LAYOUT_KEY = "cockpit-layout";
 const FLIP_KEY = "cockpit-flip";
+const FEATURED_KEY = "cockpit-featured-slot";
 
 /** Canonical key for a working directory in path-keyed maps (`gitStatuses`).
  *  Backslash-normalized with any trailing separator stripped. Both the writer
@@ -116,9 +118,6 @@ function computeLayout(n, flip) {
     }
   }
 }
-
-/** Layouts with a distinct featured cell that flip supports. */
-const FEATURED_LAYOUTS = new Set([3, 5, 7]);
 
 /** Safe localStorage helpers — silently swallow quota/security errors */
 function lsLoad(key, fallback = []) {
@@ -215,8 +214,26 @@ export default function App() {
   useEffect(() => { lsSave(LAYOUT_KEY, layout); }, [layout]);
   const [flipLayout, setFlipLayout] = useState(() => lsLoad(FLIP_KEY, false) === true);
   useEffect(() => { lsSave(FLIP_KEY, flipLayout); }, [flipLayout]);
-  // Featured pane = currently-focused pane index (drives 3/5/7 featured slot)
+  // Focus: which pane the user last clicked into. Drives the Inspector
+  // ("INSPECTOR · follows focus") and nothing about grid geometry.
   const [focusedIndex, setFocusedIndex] = useState(0);
+  // Featured: which SLOT occupies the big cell in the 3/5/7 layouts. Separate
+  // from focus on purpose — see computePaneOrder. Persisted alongside
+  // layout/flipLayout because it is part of the same "how my grid is arranged"
+  // decision: those two already survive a restart, and restoring a 3-pane
+  // layout whose big cell silently jumped back to slot 0 would be a partial,
+  // more confusing restore than restoring none of it.
+  const [featuredIndex, setFeaturedIndex] = useState(() =>
+    clampFeatured(lsLoad(FEATURED_KEY, 0), lsLoad(LAYOUT_KEY, 4)),
+  );
+  useEffect(() => { lsSave(FEATURED_KEY, featuredIndex); }, [featuredIndex]);
+  // Keep the featured slot inside the layout. Shrinking 7 -> 3 with slot 5
+  // featured must not leave a dangling index: clamp to 0 (which always exists).
+  // Reads are clamped too (computePaneOrder), so this only stops the value from
+  // "springing back" to the old slot if the user later grows the layout again.
+  useEffect(() => {
+    setFeaturedIndex((prev) => clampFeatured(prev, layout));
+  }, [layout]);
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);
   const [backendError, setBackendError] = useState(false);
@@ -1530,30 +1547,20 @@ export default function App() {
   }, [zoomIn, zoomOut]);
 
   const swapPanes = useCallback((fromIdx, toIdx) => {
-    setActiveIds((prev) => {
-      const next = [...prev];
-      while (next.length <= Math.max(fromIdx, toIdx)) next.push(null);
-      const tmp = next[fromIdx];
-      next[fromIdx] = next[toIdx];
-      next[toIdx] = tmp;
-      return next;
-    });
+    setActiveIds((prev) => swapSlots(prev, fromIdx, toIdx));
   }, []);
 
   const gridLayout = computeLayout(layout, flipLayout);
-  // Featured layouts (3/5/7) put the focused pane in the featured cell.
-  // Build a slot-render order: featured slot first, then the rest in order.
-  const paneOrder = useMemo(() => {
-    const order = [];
-    if (FEATURED_LAYOUTS.has(layout)) {
-      const f = focusedIndex >= 0 && focusedIndex < layout ? focusedIndex : 0;
-      order.push(f);
-      for (let i = 0; i < layout; i++) if (i !== f) order.push(i);
-    } else {
-      for (let i = 0; i < layout; i++) order.push(i);
-    }
-    return order;
-  }, [layout, focusedIndex]);
+  // Featured layouts (3/5/7) put the FEATURED slot in the featured cell.
+  // NOTE: featured is deliberately NOT focus. Focus moves on every click (the
+  // Inspector follows it); if it also drove this, typing into a pane would
+  // reshuffle the grid under the user. Featured only moves on an explicit
+  // gesture — a drop into the featured cell, or "Make featured" in the pane
+  // actions menu.
+  const paneOrder = useMemo(
+    () => computePaneOrder(layout, featuredIndex),
+    [layout, featuredIndex],
+  );
 
   // ── Shell derivations ─────────────────────────────────────────────────────
   // Everything the redesigned chrome renders is DERIVED from state that already
@@ -2080,10 +2087,18 @@ export default function App() {
               {Array.from({ length: layout }).map((_, idx) => {
                 const sessionId = idx < activeIds.length ? activeIds[idx] : null;
                 const session = sessionId != null ? sessions.find((s) => s.id === sessionId) : null;
-                // Grid placement from the adaptive layout engine. In featured
-                // layouts (3/5/7) the focused pane takes the featured cell.
-                const area = gridLayout.areas[paneOrder.indexOf(idx)] || gridLayout.areas[idx] || { col: "auto", row: "auto" };
+                // Grid placement from the adaptive layout engine. `paneOrder`
+                // lists SLOTS in CELL order, so this slot's cell index is its
+                // position in paneOrder; cell 0 is the big featured cell in
+                // 3/5/7. Hence "featured cell" === "slot paneOrder[0]".
+                const cellIndex = paneOrder.indexOf(idx);
+                const area = gridLayout.areas[cellIndex] || gridLayout.areas[idx] || { col: "auto", row: "auto" };
                 const slotPlacement = { gridColumn: area.col, gridRow: area.row };
+                // Dropping a pane onto this slot moves that session INTO the
+                // slot (swapPanes/placeSession act on slots), so when this is
+                // the featured slot the dragged pane lands in the big cell —
+                // "it should be whatever we drag", with no extra state write.
+                const isFeaturedSlot = FEATURED_LAYOUTS.has(layout) && cellIndex === 0;
 
                 // Shared drop handlers for all slots
                 const dndHandlers = {
@@ -2137,7 +2152,9 @@ export default function App() {
                         boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
                       }}
                     >
-                      {dragSource != null ? "Drop to swap" : "Drop here"}
+                      {isFeaturedSlot
+                        ? "Drop to feature"
+                        : dragSource != null ? "Drop to swap" : "Drop here"}
                     </span>
                   </div>
                 );
@@ -2225,6 +2242,11 @@ export default function App() {
                           onClose={() => removeSession(session.id)}
                           paneIndex={idx}
                           onSwap={layout > 1 ? swapPanes : undefined}
+                          onMakeFeatured={
+                            FEATURED_LAYOUTS.has(layout) && !isFeaturedSlot
+                              ? () => setFeaturedIndex(idx)
+                              : undefined
+                          }
                           onDragSourceChange={layout > 1 ? setDragSource : undefined}
                           terminalZoom={terminalZoom}
                           toast={toast}

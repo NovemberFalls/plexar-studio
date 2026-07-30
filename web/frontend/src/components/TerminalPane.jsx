@@ -21,6 +21,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
   onDragSourceChange, // (paneIndex | null) => void — notify parent of drag start/end
+  onMakeFeatured,  // () => void | undefined — promote this pane into the featured cell (3/5/7 layouts only; undefined when already featured or the layout has no featured cell)
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
   onFork,          // () => void — fork session (new session, same workdir)
@@ -1017,6 +1018,7 @@ const TerminalPane = forwardRef(function TerminalPane({
                   actionsMenuBtnRef.current?.focus();
                 }}
                 onStartRename={startRename}
+                onMakeFeatured={onMakeFeatured}
               />
             )}
           </div>

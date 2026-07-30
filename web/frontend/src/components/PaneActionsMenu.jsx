@@ -1,12 +1,12 @@
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
-import { Pencil, PackageMinus, Eraser, Download, Cpu, Zap, ChevronRight, ChevronDown } from "lucide-react";
+import { Pencil, PackageMinus, Eraser, Download, Cpu, Zap, ChevronRight, ChevronDown, Maximize2 } from "lucide-react";
 import { useModelCatalog, isOpusModel } from "../modelCatalog";
 
 const BUSY_TITLE = "Session is busy — try again when it's idle.";
 
 /** A single row in the popover — icon + label, disabled state with title tooltip. */
 const MenuButton = forwardRef(function MenuButton(
-  { icon: Icon, label, onClick, disabled, title, danger },
+  { icon: Icon, label, onClick, disabled, title, danger, ariaLabel },
   ref
 ) {
   return (
@@ -16,6 +16,7 @@ const MenuButton = forwardRef(function MenuButton(
       role="menuitem"
       disabled={disabled}
       title={title}
+      aria-label={ariaLabel}
       onClick={onClick}
       className="flex items-center gap-2 w-full text-left px-3 py-1.5 text-xs transition-colors hover-bg-surface"
       style={{
@@ -56,8 +57,12 @@ const MenuButton = forwardRef(function MenuButton(
  *   onClose        — () => void, called on outside click / Escape / after an action
  *   onStartRename  — () => void, tells the parent pane to switch its header
  *                     name into an inline rename input
+ *   onMakeFeatured — () => void | undefined, promotes this pane into the
+ *                     featured (large) cell of the 3/5/7 layouts. Undefined —
+ *                     and the row hidden — when the layout has no featured cell
+ *                     or this pane already occupies it.
  */
-export default function PaneActionsMenu({ session, busy, toast, onClose, onStartRename }) {
+export default function PaneActionsMenu({ session, busy, toast, onClose, onStartRename, onMakeFeatured }) {
   const menuRef = useRef(null);
   const firstItemRef = useRef(null);
   const [clearConfirm, setClearConfirm] = useState(false);
@@ -152,6 +157,24 @@ export default function PaneActionsMenu({ session, busy, toast, onClose, onStart
             onClose();
           }}
         />
+
+        {/* Layout action, not a session command — so it is NOT busy-gated and
+            sends nothing to the PTY. Only rendered when the parent supplies a
+            handler, i.e. in a 3/5/7 layout where this pane is not already the
+            featured one. It is the keyboard-reachable equivalent of dragging a
+            pane into the big cell. */}
+        {onMakeFeatured && (
+          <MenuButton
+            icon={Maximize2}
+            label="Make featured"
+            ariaLabel={`Make "${session.name}" the featured pane`}
+            title="Move this pane into the large cell of the current layout"
+            onClick={() => {
+              onMakeFeatured();
+              onClose();
+            }}
+          />
+        )}
 
         <MenuButton
           icon={PackageMinus}
