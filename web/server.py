@@ -489,9 +489,132 @@ async def clear_upload_dir(keep: int = 10):
 # ── Directory Browse ─────────────────────────────────────
 
 
+# Directories we deliberately never walk: huge and/or pure noise. They are
+# still LISTED (with skipped=true) so the UI can show them greyed out.
+_BROWSE_SKIP_DIRS = frozenset({
+    "node_modules", ".git", "venv", ".venv", "__pycache__",
+    "dist", "build", ".next", "target",
+})
+
+# git status --porcelain hard timeout (seconds). A slow repo must degrade to
+# dirty=null, never to a false "clean".
+_GIT_STATUS_TIMEOUT = 3.0
+
+
+def _git_branch_from_head(dir_path: str) -> tuple[bool, str | None]:
+    """(is_git, branch) for *dir_path*, from a plain read of .git/HEAD.
+
+    No subprocess -- this runs once per row in a 60-folder listing, so a
+    `git` fork per entry is off the table. Handles both a .git DIRECTORY and
+    a .git FILE (worktrees / submodules use `gitdir: <path>`). A detached HEAD
+    yields the 7-char short sha. Returns (git, None) when HEAD is unreadable.
+    """
+    dot_git = os.path.join(dir_path, ".git")
+    try:
+        if os.path.isdir(dot_git):
+            head_path = os.path.join(dot_git, "HEAD")
+        elif os.path.isfile(dot_git):
+            with open(dot_git, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read().strip()
+            if not content.lower().startswith("gitdir:"):
+                return True, None
+            gitdir = content.split(":", 1)[1].strip()
+            if not os.path.isabs(gitdir):
+                gitdir = os.path.normpath(os.path.join(dir_path, gitdir))
+            head_path = os.path.join(gitdir, "HEAD")
+        else:
+            return False, None
+    except OSError:
+        logger.debug("browse: .git probe failed for %s", dir_path, exc_info=True)
+        return False, None
+
+    try:
+        with open(head_path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read().strip()
+    except OSError:
+        logger.debug("browse: unreadable HEAD at %s", head_path, exc_info=True)
+        return True, None
+
+    if head.startswith("ref:"):
+        ref = head.split(":", 1)[1].strip()
+        prefix = "refs/heads/"
+        return True, (ref[len(prefix):] if ref.startswith(prefix) else ref) or None
+    if head:
+        return True, head[:7]
+    return True, None
+
+
+def _live_session_count_under(dir_path: str) -> int:
+    """Live sessions whose working_dir is at or under *dir_path*."""
+    try:
+        base = os.path.normcase(os.path.normpath(dir_path))
+    except (TypeError, ValueError):
+        return 0
+    count = 0
+    for session in list(pty_manager.sessions.values()):
+        wd = getattr(session, "working_dir", "") or ""
+        if not wd:
+            continue
+        try:
+            norm = os.path.normcase(os.path.normpath(wd))
+        except (TypeError, ValueError):
+            continue
+        if norm == base or norm.startswith(base + os.sep):
+            count += 1
+    return count
+
+
+def _browse_entry(dir_path: str) -> dict:
+    """Per-row metadata for one directory. Never raises -- an unreadable
+    directory yields nulls for the fields it could not source, so one bad
+    folder can never fail the whole listing.
+
+    `dirty` is ALWAYS null here: it needs `git status`, which is far too slow
+    to run per row. The UI fetches it for the selected row only, via
+    GET /api/browse/git.
+    """
+    name = os.path.basename(dir_path.rstrip("\\/")) or dir_path
+    entry = {
+        "name": name, "path": dir_path, "git": False, "branch": None,
+        "dirty": None, "session_count": 0, "entry_count": None, "skipped": False,
+    }
+    if name in _BROWSE_SKIP_DIRS:
+        entry["skipped"] = True
+        return entry
+    try:
+        entry["git"], entry["branch"] = _git_branch_from_head(dir_path)
+    except Exception:
+        logger.debug("browse: git metadata failed for %s", dir_path, exc_info=True)
+    try:
+        entry["session_count"] = _live_session_count_under(dir_path)
+    except Exception:
+        logger.debug("browse: session count failed for %s", dir_path, exc_info=True)
+    try:
+        with os.scandir(dir_path) as it:
+            entry["entry_count"] = sum(1 for _ in it)
+    except PermissionError:
+        logger.debug("browse: permission denied counting %s", dir_path, exc_info=True)
+    except OSError:
+        logger.debug("browse: scandir failed for %s", dir_path, exc_info=True)
+    return entry
+
+
+def _browse_entries(dirs: list[str]) -> list[dict]:
+    """`entries` list parallel to (same order as) *dirs*."""
+    return [_browse_entry(d) for d in dirs]
+
+
 @app.get("/api/browse")
 async def browse_directories(path: str = ""):
-    """List subdirectories of the given path for folder autocomplete."""
+    """List subdirectories of the given path for folder autocomplete.
+
+    Returns `dirs` (list of absolute path strings -- unchanged legacy shape,
+    still consumed by NewSessionDialog) plus a parallel `entries` list carrying
+    per-row metadata: git/branch (read straight from .git/HEAD, no subprocess),
+    live session_count, entry_count (one scandir; null on PermissionError),
+    and skipped=true for heavy dirs we refuse to walk. `dirty` is always null
+    in the listing -- use GET /api/browse/git for the selected row.
+    """
     if not path:
         if sys.platform == "win32":
             # Return drive roots on Windows
@@ -501,9 +624,9 @@ async def browse_directories(path: str = ""):
                 drive = f"{letter}:\\"
                 if os.path.isdir(drive):
                     drives.append(drive)
-            return JSONResponse({"dirs": drives, "parent": ""})
+            return JSONResponse({"dirs": drives, "parent": "", "entries": _browse_entries(drives)})
         else:
-            return JSONResponse({"dirs": ["/"], "parent": ""})
+            return JSONResponse({"dirs": ["/"], "parent": "", "entries": _browse_entries(["/"])})
 
     target = Path(path)
     if not target.is_dir():
@@ -521,10 +644,10 @@ async def browse_directories(path: str = ""):
                         and not p.name.startswith(".")
                     ]
                 )[:20]
-                return JSONResponse({"dirs": dirs, "parent": str(parent)})
+                return JSONResponse({"dirs": dirs, "parent": str(parent), "entries": _browse_entries(dirs)})
             except PermissionError:
-                return JSONResponse({"dirs": [], "parent": str(parent)})
-        return JSONResponse({"dirs": [], "parent": ""})
+                return JSONResponse({"dirs": [], "parent": str(parent), "entries": []})
+        return JSONResponse({"dirs": [], "parent": "", "entries": []})
 
     try:
         dirs = sorted(
@@ -534,9 +657,50 @@ async def browse_directories(path: str = ""):
                 if p.is_dir() and not p.name.startswith(".")
             ]
         )[:50]
-        return JSONResponse({"dirs": dirs, "parent": str(target)})
+        return JSONResponse({"dirs": dirs, "parent": str(target), "entries": _browse_entries(dirs)})
     except PermissionError:
-        return JSONResponse({"dirs": [], "parent": str(target)})
+        return JSONResponse({"dirs": [], "parent": str(target), "entries": []})
+
+
+@app.get("/api/browse/git")
+async def browse_git_detail(path: str):
+    """Full git detail for ONE directory (the row the user selected).
+
+    This is the only place a `git status` runs -- deliberately not in the
+    listing, where 60 subprocess forks would stall the request. Hard 3s
+    timeout; on timeout/failure/absent git, dirty and changed are null rather
+    than a misleading false/0. subprocess is invoked with list argv (never
+    shell=True).
+    """
+    target = Path(path)
+    if not target.is_dir():
+        return JSONResponse({"git": False, "branch": None, "dirty": None, "changed": None})
+
+    is_git, branch = _git_branch_from_head(str(target))
+    if not is_git:
+        return JSONResponse({"git": False, "branch": None, "dirty": None, "changed": None})
+
+    dirty = None
+    changed = None
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "status", "--porcelain"],
+            cwd=str(target), capture_output=True, text=True,
+            timeout=_GIT_STATUS_TIMEOUT,
+        )
+        if result.returncode == 0:
+            lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+            changed = len(lines)
+            dirty = changed > 0
+        else:
+            logger.debug("browse/git: git status rc=%s for %s", result.returncode, path)
+    except subprocess.TimeoutExpired:
+        logger.debug("browse/git: git status timed out for %s", path, exc_info=True)
+    except (OSError, ValueError):
+        logger.debug("browse/git: git status failed for %s", path, exc_info=True)
+
+    return JSONResponse({"git": True, "branch": branch, "dirty": dirty, "changed": changed})
 
 
 # ── Git Status ────────────────────────────────────────────
@@ -4392,6 +4556,59 @@ async def get_usage_summary(window: str = "lifetime"):
     except Exception:
         logger.debug("usage_tracker.summary(%s) failed", window, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
+_USAGE_REPORT_RANGES = ("24h", "7d", "30d", "all")
+
+
+@app.get("/api/usage/report")
+async def get_usage_report(range: str = "7d"):
+    """Everything the Reports page renders, in ONE call (KPIs + day series +
+    per-model spend + sessions table). See usage_tracker.range_report for the
+    exact formulas; the important ones:
+
+      * cost is API-EQUIVALENT (list $/1M rates from the verified pricing
+        table), NOT a subscription bill. Local-provider tokens are costed at
+        $0 and never inflate cost; they are counted separately and surface via
+        kpis.local_share.
+      * cache_hit_rate = cache_read / (cache_read + input), 0.0 when the
+        denominator is 0.
+      * by_day is gap-filled -- every day in the range is present, zeroed
+        where there was no activity.
+      * kpis.tool_calls and sessions[].tool_calls are ALWAYS null: tool
+        invocations are not persisted in the usage store, so any number here
+        would be fabricated.
+
+    Live session display names are attached where the terminal is still
+    running; historical rows keep name=null.
+    """
+    if range not in _USAGE_REPORT_RANGES:
+        return JSONResponse(
+            {"error": f"range must be one of {list(_USAGE_REPORT_RANGES)}"},
+            status_code=400,
+        )
+    try:
+        data = usage_tracker.range_report(range)
+    except ValueError:
+        return JSONResponse(
+            {"error": f"range must be one of {list(_USAGE_REPORT_RANGES)}"},
+            status_code=400,
+        )
+    except Exception:
+        logger.error("usage_tracker.range_report(%s) failed", range, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+
+    # Best-effort name enrichment from the live session registry.
+    try:
+        live = pty_manager.sessions
+        for row in data.get("sessions", []):
+            s = live.get(row.get("terminal_id"))
+            if s is not None and getattr(s, "name", None):
+                row["name"] = s.name
+    except Exception:
+        logger.debug("usage report: session name enrichment failed", exc_info=True)
+
     return JSONResponse(data)
 
 

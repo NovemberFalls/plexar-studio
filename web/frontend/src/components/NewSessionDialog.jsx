@@ -1,9 +1,46 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { X, FolderOpen, Folder, ShieldOff, Plus, ArrowRight, ChevronDown } from "lucide-react";
+/**
+ * NewSessionDialog — Phase 9 (screen 3b): the typed-path field is replaced by a
+ * real folder browser, but every capability of the previous dialog survives.
+ *
+ * WHAT DID NOT CHANGE (drop-in for App.jsx, which is untouched):
+ *   · props: { recentLocations, savedLocations, onConfirm, onCancel }
+ *   · callback: onConfirm(name.trim(), workdir.trim(), bypassPermissions)
+ *   · Escape cancels; backdrop click cancels.
+ *   · Typing a path STILL WORKS — the working-directory summary bar holds a live
+ *     editable path input (Enter navigates the browser there), and the browser's
+ *     filter box also accepts path-like text and offers a jump.
+ *   · Bypass still resolves from savedLocations by normalised path, with the
+ *     same one-way `manualBypassOverride` latch: once the user flips the toggle
+ *     themselves, folder changes no longer overwrite their choice.
+ *   · Model / Permission / Effort selects remain display-only (App.jsx applies
+ *     the global TopBar settings) — deliberately NOT wired into onConfirm so the
+ *     contract stays byte-identical.
+ *   · The CLAUDE_CLI_PATH escape-hatch note is retained.
+ *
+ * WHAT CHANGED: the dialog is 880px, hosts <FolderBrowser/>, and the bypass
+ * control now reads "Bypass inherited from folder" when the selected folder is a
+ * saved location that carries bypass — presentation only, identical behaviour.
+ *
+ * Validation for the SELECTED folder only (per the pinned contract): existence
+ * via /api/browse and git state via /api/browse/git. `dirty: null` is UNKNOWN,
+ * never rendered as clean.
+ */
 
-function normPath(dir) {
-  return dir.replace(/\//g, "\\").replace(/\\$/, "");
-}
+import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  X,
+  FolderOpen,
+  ShieldOff,
+  ArrowRight,
+  ChevronDown,
+  Check,
+  TriangleAlert,
+  GitBranch,
+} from "lucide-react";
+import FolderBrowser from "./FolderBrowser";
+import { normPath, baseName, parentOf } from "./folderPath";
+
+const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
 
 // Mirrors TopBar.jsx's MODEL_GROUPS / PERMISSION_MODES / EFFORT_OPTIONS values —
 // display-only defaults here; the actual per-session model/permission/effort are
@@ -38,6 +75,8 @@ function ConfigSelect({ label, value, options, onChange }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-label={label}
+        aria-expanded={open}
         className="flex items-center justify-between rounded-lg"
         style={{
           height: 34,
@@ -59,10 +98,10 @@ function ConfigSelect({ label, value, options, onChange }) {
           <div
             className="absolute z-50 rounded-lg overflow-hidden"
             style={{
-              top: "100%",
+              bottom: "100%",
               left: 0,
               right: 0,
-              marginTop: 4,
+              marginBottom: 4,
               background: "var(--cc-elev)",
               border: "1px solid var(--cc-border)",
               boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
@@ -95,151 +134,115 @@ function ConfigSelect({ label, value, options, onChange }) {
 }
 
 export default function NewSessionDialog({
-  recentLocations,
+  recentLocations = [],
   savedLocations = [],
   onConfirm,
   onCancel,
 }) {
   const initialDir = recentLocations[0] || "C:\\Code";
   const [workdir, setWorkdir] = useState(initialDir);
+  const [browsePath, setBrowsePath] = useState(() => parentOf(initialDir) || initialDir);
+  const [pathDraft, setPathDraft] = useState(initialDir);
   const [name, setName] = useState("");
-  const initialBypass = savedLocations.find((l) => normPath(l.path) === normPath(initialDir))?.bypassPermissions || false;
+  const initialBypass =
+    savedLocations.find((l) => normPath(l.path) === normPath(initialDir))?.bypassPermissions || false;
   const [bypassPermissions, setBypassPermissions] = useState(initialBypass);
   const [manualBypassOverride, setManualBypassOverride] = useState(false);
-  const [suggestions, setSuggestions] = useState([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [highlightIdx, setHighlightIdx] = useState(-1);
+  const [nameFocused, setNameFocused] = useState(false);
   const [modelSel, setModelSel] = useState(MODEL_OPTIONS[0].id);
   const [permissionSel, setPermissionSel] = useState(PERMISSION_OPTIONS[0].id);
   const [effortSel, setEffortSel] = useState(EFFORT_OPTIONS[0].id);
-  const inputRef = useRef(null);
-  const dirRef = useRef(null);
-  const suggestionsRef = useRef(null);
-  const debounceRef = useRef(null);
+  const [validation, setValidation] = useState({ state: "unknown", error: "" });
+  const [git, setGit] = useState(null);
+  const pathInputRef = useRef(null);
+  const valReqRef = useRef(0);
 
+  const savedMatch = savedLocations.find((l) => normPath(l.path) === normPath(workdir));
+  const inheritedBypass = !!savedMatch?.bypassPermissions;
+
+  // Keep the editable path field in step with the selection.
+  useEffect(() => { setPathDraft(workdir); }, [workdir]);
+
+  /**
+   * Bypass follows the folder unless the user has taken manual control —
+   * identical to the pre-Phase-9 behaviour, just driven by the selected folder
+   * instead of the typed field.
+   */
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
-  // Sync bypass checkbox when changing to a directory with a saved bypass setting
-  const syncBypassForDir = useCallback((dir) => {
     if (manualBypassOverride) return;
-    const match = savedLocations.find(
-      (l) => normPath(l.path) === normPath(dir.trim())
-    );
-    if (match) setBypassPermissions(match.bypassPermissions);
-  }, [savedLocations, manualBypassOverride]);
+    const match = savedLocations.find((l) => normPath(l.path) === normPath(workdir));
+    if (match) setBypassPermissions(!!match.bypassPermissions);
+  }, [workdir, savedLocations, manualBypassOverride]);
 
-  // Close suggestions on outside click
+  // Validate + read git state for the SELECTED folder only.
   useEffect(() => {
-    const handler = (e) => {
-      if (
-        suggestionsRef.current &&
-        !suggestionsRef.current.contains(e.target) &&
-        dirRef.current &&
-        !dirRef.current.contains(e.target)
-      ) {
-        setShowSuggestions(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const fetchSuggestions = useCallback((path) => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
+    const target = workdir.trim();
+    if (!target) {
+      setValidation({ state: "invalid", error: "Pick a folder first." });
+      setGit(null);
+      return;
+    }
+    const req = ++valReqRef.current;
+    const timer = setTimeout(async () => {
       try {
-        const url = `/api/browse?path=${encodeURIComponent(path)}`;
-        const res = await fetch(url);
-        const data = await res.json();
-        setSuggestions(data.dirs || []);
-        setShowSuggestions((data.dirs || []).length > 0);
-        setHighlightIdx(-1);
+        const res = await fetch(`/api/browse?path=${encodeURIComponent(target)}`);
+        if (valReqRef.current !== req) return;
+        if (!res.ok) {
+          setValidation({ state: "invalid", error: "That folder can't be read." });
+          setGit(null);
+          return;
+        }
+        setValidation({ state: "valid", error: "" });
       } catch {
-        setSuggestions([]);
+        if (valReqRef.current !== req) return;
+        setValidation({ state: "invalid", error: "That folder can't be read." });
+        setGit(null);
+        return;
       }
-    }, 150);
-  }, []);
-
-  const handleDirChange = (e) => {
-    const val = e.target.value;
-    setWorkdir(val);
-    syncBypassForDir(val);
-    if (val.length >= 2) {
-      fetchSuggestions(val);
-    } else {
-      setSuggestions([]);
-      setShowSuggestions(false);
-    }
-  };
-
-  const handleDirFocus = () => {
-    if (workdir.length >= 2) {
-      fetchSuggestions(workdir);
-    }
-  };
-
-  const selectSuggestion = (dir) => {
-    setWorkdir(dir);
-    syncBypassForDir(dir);
-    setShowSuggestions(false);
-    setHighlightIdx(-1);
-    // Fetch children of selected dir
-    fetchSuggestions(dir + "\\");
-    dirRef.current?.focus();
-  };
-
-  const handleDirKeyDown = (e) => {
-    if (!showSuggestions || suggestions.length === 0) return;
-
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setHighlightIdx((i) => Math.min(i + 1, suggestions.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setHighlightIdx((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Tab" || e.key === "Enter") {
-      if (highlightIdx >= 0 && highlightIdx < suggestions.length) {
-        e.preventDefault();
-        selectSuggestion(suggestions[highlightIdx]);
-      } else if (e.key === "Tab" && suggestions.length > 0) {
-        e.preventDefault();
-        selectSuggestion(suggestions[0]);
+      try {
+        const gres = await fetch(`/api/browse/git?path=${encodeURIComponent(target)}`);
+        if (valReqRef.current !== req) return;
+        setGit(gres.ok ? await gres.json() : null);
+      } catch {
+        if (valReqRef.current === req) setGit(null);
       }
-    } else if (e.key === "Escape") {
-      setShowSuggestions(false);
-    }
-  };
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [workdir]);
 
-  // Scroll highlighted item into view
-  useEffect(() => {
-    if (highlightIdx >= 0 && suggestionsRef.current) {
-      const el = suggestionsRef.current.children[highlightIdx];
-      el?.scrollIntoView({ block: "nearest" });
-    }
-  }, [highlightIdx]);
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    setShowSuggestions(false);
-    onConfirm(name.trim(), workdir.trim(), bypassPermissions);
-  };
+  const handleSubmit = useCallback(
+    (e) => {
+      e?.preventDefault?.();
+      onConfirm(name.trim(), workdir.trim(), bypassPermissions);
+    },
+    [bypassPermissions, name, onConfirm, workdir]
+  );
 
   const handleKeyDown = (e) => {
-    if (e.key === "Escape" && !showSuggestions) onCancel();
+    if (e.key === "Escape") onCancel();
   };
 
-  // Extract just the folder name for display
-  const folderName = (fullPath) => {
-    const parts = fullPath.replace(/\//g, "\\").split("\\");
-    return parts[parts.length - 1] || fullPath;
+  const commitPathDraft = () => {
+    const next = pathDraft.trim();
+    if (!next) return;
+    setWorkdir(next);
+    setBrowsePath(next);
   };
 
   const toggleBypass = () => {
     setBypassPermissions((v) => !v);
     setManualBypassOverride(true);
   };
+
+  const focusPathInput = () => {
+    pathInputRef.current?.focus();
+    pathInputRef.current?.select();
+  };
+
+  const ok = validation.state === "valid";
+  const isRepo = git?.git === true;
+  // dirty === null is UNKNOWN (timed out / failed), never "clean".
+  const dirtyKnown = git?.dirty === true;
 
   return (
     <div
@@ -249,227 +252,157 @@ export default function NewSessionDialog({
     >
       <div
         className="cc-modal cc-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="New session"
         style={{
-          width: 520,
-          maxHeight: "90vh",
+          width: 880,
+          maxWidth: "94vw",
+          maxHeight: "92vh",
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
-          boxShadow: "0 40px 120px rgba(0,0,0,.6), 0 0 0 1px color-mix(in srgb, var(--cc-accent) 22%, transparent)",
+          boxShadow: "0 24px 64px rgba(0,0,0,.55)",
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* header */}
+        {/* ── header 46px ── */}
         <div
           className="flex items-center justify-between"
-          style={{ padding: "16px 18px", borderBottom: "1px solid var(--cc-line)" }}
+          style={{ height: 46, padding: "0 14px", borderBottom: "1px solid var(--cc-line)", flexShrink: 0 }}
         >
-          <div className="flex items-center gap-2.5">
-            <div
-              className="flex items-center justify-center rounded-lg"
-              style={{
-                width: 28,
-                height: 28,
-                background: "color-mix(in srgb, var(--cc-accent) 15%, transparent)",
-                border: "1px solid color-mix(in srgb, var(--cc-accent) 35%, transparent)",
-                color: "var(--cc-accent)",
-              }}
-            >
-              <Plus size={15} strokeWidth={2.5} />
-            </div>
-            <div className="flex flex-col" style={{ lineHeight: 1.15 }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: "var(--cc-fg)" }}>New session</span>
-              <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>Launch a Claude Code shell in a project</span>
-            </div>
+          <div className="flex items-center gap-2">
+            <FolderOpen size={14} style={{ color: "var(--cc-accent)" }} aria-hidden="true" />
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--cc-fg)" }}>New session</span>
           </div>
           <button
             type="button"
             onClick={onCancel}
-            className="flex rounded-lg"
-            style={{ padding: 6, color: "var(--cc-muted)", background: "none", border: "none", cursor: "pointer" }}
+            className="hover-bg-surface flex rounded-lg"
+            style={{ padding: 5, color: "var(--cc-muted)", background: "none", border: "none", cursor: "pointer" }}
             aria-label="Close"
           >
-            <X size={16} />
+            <X size={14} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <div className="flex flex-col gap-4.5" style={{ padding: 18, overflowY: "auto", gap: 18 }}>
-            {/* Working directory */}
-            <div className="flex flex-col gap-2">
-              <label className="cc-label flex items-center gap-1.5">
-                <FolderOpen size={11} />
-                Working directory
-              </label>
-              <div className="relative">
-                <div
-                  className="flex items-center gap-2"
-                  style={{
-                    height: 38,
-                    padding: "0 12px",
-                    borderRadius: 9,
-                    background: "var(--cc-term)",
-                    border: `1px solid ${showSuggestions ? "color-mix(in srgb, var(--cc-accent) 40%, transparent)" : "var(--cc-border)"}`,
-                  }}
-                >
-                  <FolderOpen size={14} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
-                  <input
-                    ref={(el) => { inputRef.current = el; dirRef.current = el; }}
-                    type="text"
-                    value={workdir}
-                    onChange={handleDirChange}
-                    onFocus={handleDirFocus}
-                    onKeyDown={handleDirKeyDown}
-                    placeholder="C:\Code"
-                    className="flex-1 outline-none"
-                    style={{
-                      background: "none",
-                      border: "none",
-                      color: "var(--cc-fg)",
-                      fontSize: 13,
-                      fontFamily: "inherit",
-                    }}
-                  />
-                </div>
+        <form
+          onSubmit={handleSubmit}
+          style={{ display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}
+        >
+          <FolderBrowser
+            path={browsePath}
+            onPathChange={setBrowsePath}
+            selectedPath={workdir}
+            onSelectPath={setWorkdir}
+            onCreateHere={handleSubmit}
+            recentLocations={recentLocations}
+            savedLocations={savedLocations}
+            selectedGit={git}
+            onPastePath={focusPathInput}
+          />
 
-                {showSuggestions && suggestions.length > 0 && (
-                  <div
-                    ref={suggestionsRef}
-                    className="absolute z-10 left-0 right-0 mt-1 rounded-lg overflow-hidden"
-                    style={{
-                      background: "var(--cc-elev)",
-                      border: "1px solid var(--cc-border)",
-                      maxHeight: 200,
-                      overflowY: "auto",
-                      boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-                    }}
-                  >
-                    {suggestions.map((dir, idx) => (
-                      <button
-                        key={dir}
-                        type="button"
-                        onClick={() => selectSuggestion(dir)}
-                        className="w-full text-left flex items-center gap-2"
-                        style={{
-                          padding: "7px 10px",
-                          fontSize: 12,
-                          color: idx === highlightIdx ? "var(--cc-fg)" : "var(--cc-dim)",
-                          background: idx === highlightIdx ? "var(--cc-surface)" : "transparent",
-                          border: "none",
-                          cursor: "pointer",
-                        }}
-                        onMouseEnter={() => setHighlightIdx(idx)}
-                      >
-                        <Folder size={12} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
-                        <span className="truncate">{folderName(dir)}</span>
-                        <span
-                          className="ml-auto truncate"
-                          style={{ maxWidth: "50%", fontSize: 10, color: "var(--cc-muted)" }}
-                        >
-                          {dir}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Recent locations */}
-              {!showSuggestions && recentLocations.length > 0 && (
-                <div className="flex flex-col gap-1" style={{ marginTop: 2 }}>
-                  <span className="cc-label" style={{ padding: "2px 2px 4px" }}>Recent</span>
-                  <div className="flex flex-col gap-0.5" style={{ maxHeight: 128, overflowY: "auto" }}>
-                    {recentLocations.map((loc) => {
-                      const sel = workdir === loc;
-                      return (
-                        <button
-                          key={loc}
-                          type="button"
-                          onClick={() => { setWorkdir(loc); syncBypassForDir(loc); }}
-                          className="flex items-center gap-2 text-left"
-                          style={{
-                            padding: "7px 10px",
-                            borderRadius: 8,
-                            background: sel ? "color-mix(in srgb, var(--cc-accent) 10%, transparent)" : "transparent",
-                            border: `1px solid ${sel ? "color-mix(in srgb, var(--cc-accent) 30%, transparent)" : "var(--cc-line)"}`,
-                            borderLeft: `2px solid ${sel ? "var(--cc-accent)" : "transparent"}`,
-                            cursor: "pointer",
-                          }}
-                        >
-                          <Folder size={13} style={{ color: sel ? "var(--cc-accent)" : "var(--cc-muted)", flexShrink: 0 }} />
-                          <span style={{ fontSize: 12, fontWeight: 600, color: sel ? "var(--cc-fg)" : "var(--cc-dim)", flexShrink: 0 }}>
-                            {folderName(loc)}
-                          </span>
-                          <span
-                            className="flex-1 truncate"
-                            style={{ fontSize: 11, color: "var(--cc-muted)" }}
-                          >
-                            {loc}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+          {/* ── confirm block ── */}
+          <div className="flex flex-col" style={{ padding: 14, gap: 12, overflowY: "auto" }}>
+            {/* working-dir summary bar */}
+            <div
+              className="flex items-center gap-2"
+              style={{
+                minHeight: 38,
+                padding: "0 11px",
+                borderRadius: 9,
+                background: "var(--cc-elev)",
+                border: `1px solid ${ok ? "var(--cc-border)" : tint("var(--cc-error)", 45)}`,
+              }}
+            >
+              <FolderOpen size={13} style={{ color: "var(--cc-accent)", flexShrink: 0 }} aria-hidden="true" />
+              <input
+                ref={pathInputRef}
+                type="text"
+                value={pathDraft}
+                onChange={(e) => setPathDraft(e.target.value)}
+                onBlur={commitPathDraft}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    commitPathDraft();
+                  }
+                }}
+                aria-label="Working directory"
+                placeholder="C:\Code"
+                className="flex-1 outline-none"
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--cc-fg)",
+                  fontSize: 12,
+                  fontFamily: "inherit",
+                  minWidth: 0,
+                }}
+              />
+              {ok ? (
+                <span className="flex items-center gap-1" style={{ flexShrink: 0, color: "var(--cc-ok)", fontSize: 11 }}>
+                  <Check size={11} aria-hidden="true" />
+                  exists{isRepo ? " · git repo" : ""}
+                </span>
+              ) : validation.state === "invalid" ? (
+                <span className="flex items-center gap-1" style={{ flexShrink: 0, color: "var(--cc-error)", fontSize: 11 }}>
+                  <TriangleAlert size={11} aria-hidden="true" />
+                  {validation.error}
+                </span>
+              ) : null}
+              {isRepo && git?.branch && (
+                <span className="flex items-center gap-1" style={{ flexShrink: 0, fontSize: 10, color: "var(--cc-muted)" }}>
+                  <GitBranch size={10} aria-hidden="true" />
+                  {git.branch}
+                </span>
+              )}
+              {dirtyKnown && (
+                <span
+                  data-testid="summary-dirty-dot"
+                  aria-label="uncommitted changes"
+                  style={{ width: 5, height: 5, borderRadius: 999, background: "var(--cc-waiting)", flexShrink: 0 }}
+                />
               )}
             </div>
 
-            {/* Session name */}
-            <div className="flex flex-col gap-2">
-              <label className="cc-label">
-                Session name <span style={{ fontWeight: 400, opacity: 0.7 }}>— optional</span>
-              </label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder={`${folderName(workdir)} session`}
-                style={{
-                  height: 38,
-                  padding: "0 12px",
-                  borderRadius: 9,
-                  background: "var(--cc-term)",
-                  color: "var(--cc-fg)",
-                  border: "1px solid var(--cc-border)",
-                  outline: "none",
-                  fontFamily: "inherit",
-                  fontSize: 13,
-                }}
-              />
-            </div>
-
-            {/* Configuration */}
-            <div className="flex flex-col gap-2">
-              <label className="cc-label">Configuration</label>
-              <div className="flex gap-2">
-                <ConfigSelect label="Model" value={modelSel} options={MODEL_OPTIONS} onChange={setModelSel} />
-                <ConfigSelect label="Permission" value={permissionSel} options={PERMISSION_OPTIONS} onChange={setPermissionSel} />
-                <ConfigSelect label="Effort" value={effortSel} options={EFFORT_OPTIONS} onChange={setEffortSel} />
-              </div>
-            </div>
-
-            {/* Bypass permissions toggle */}
+            {/* bypass — inherited from the folder when the folder is saved with it */}
             <button
               type="button"
               onClick={toggleBypass}
-              className="flex items-center gap-3 text-left"
+              className="flex items-center gap-2.5 text-left"
+              aria-pressed={bypassPermissions}
+              aria-label={inheritedBypass ? "Bypass inherited from folder" : "Bypass permissions"}
               title="Skip all permission prompts (--dangerously-skip-permissions)"
               style={{
-                padding: "12px 14px",
-                borderRadius: 10,
-                background: bypassPermissions ? "color-mix(in srgb, var(--cc-waiting) 8%, transparent)" : "var(--cc-term)",
-                border: `1px solid ${bypassPermissions ? "color-mix(in srgb, var(--cc-waiting) 45%, transparent)" : "var(--cc-border)"}`,
+                padding: "9px 11px",
+                borderRadius: 9,
+                background: bypassPermissions ? tint("var(--cc-waiting)", 8) : "var(--cc-elev)",
+                border: `1px solid ${bypassPermissions ? tint("var(--cc-waiting)", 45) : "var(--cc-border)"}`,
                 cursor: "pointer",
                 fontFamily: "inherit",
               }}
             >
-              <ShieldOff size={17} style={{ color: bypassPermissions ? "var(--cc-waiting)" : "var(--cc-muted)", flexShrink: 0 }} />
+              <ShieldOff
+                size={15}
+                style={{ color: bypassPermissions ? "var(--cc-waiting)" : "var(--cc-muted)", flexShrink: 0 }}
+                aria-hidden="true"
+              />
               <div className="flex-1 flex flex-col" style={{ gap: 1 }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: bypassPermissions ? "var(--cc-waiting)" : "var(--cc-fg)" }}>
-                  Bypass permissions
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: bypassPermissions ? "var(--cc-waiting)" : "var(--cc-fg)",
+                  }}
+                >
+                  {inheritedBypass ? "Bypass inherited from folder" : "Bypass permissions"}
                 </span>
                 <span style={{ fontSize: 10, color: "var(--cc-muted)" }}>
-                  Claude runs fully autonomously — no approval prompts
+                  {inheritedBypass
+                    ? `${baseName(workdir)} is saved with bypass on — Claude runs without approval prompts.`
+                    : "Claude runs fully autonomously — no approval prompts"}
                 </span>
               </div>
               <div
@@ -477,7 +410,7 @@ export default function NewSessionDialog({
                   width: 38,
                   height: 22,
                   borderRadius: 999,
-                  background: bypassPermissions ? "var(--cc-waiting)" : "color-mix(in srgb, var(--cc-fg) 20%, transparent)",
+                  background: bypassPermissions ? "var(--cc-waiting)" : tint("var(--cc-fg)", 20),
                   position: "relative",
                   transition: "background .15s",
                   flexShrink: 0,
@@ -491,73 +424,107 @@ export default function NewSessionDialog({
                     width: 18,
                     height: 18,
                     borderRadius: 999,
-                    background: "#fff",
+                    background: "var(--cc-surface)",
                     transition: "left .15s",
                   }}
                 />
               </div>
             </button>
-          </div>
 
-          {/* footer */}
-          <div
-            className="flex items-center justify-between gap-2.5"
-            style={{
-              padding: "14px 18px",
-              borderTop: "1px solid var(--cc-line)",
-              background: "color-mix(in srgb, var(--cc-bg) 40%, transparent)",
-            }}
-          >
-            {/* CLI-path callout: the `claude` binary is discovered off PATH.
-                If it lives somewhere nonstandard, CLAUDE_CLI_PATH overrides —
-                surfaced here so users learn the escape hatch before a spawn
-                fails (the spawn error names it too). */}
-            <span
-              style={{ fontSize: 10, color: "var(--cc-muted)", lineHeight: 1.4, maxWidth: 230 }}
-            >
-              Can&apos;t find <code style={{ fontFamily: "var(--cc-mono, monospace)" }}>claude</code>? Set{" "}
-              <code style={{ fontFamily: "var(--cc-mono, monospace)", color: "var(--cc-dim)" }}>CLAUDE_CLI_PATH</code>{" "}
-              before launching Cockpit.
-            </span>
-            <div className="flex items-center gap-2.5">
-            <button
-              type="button"
-              onClick={onCancel}
-              style={{
-                height: 38,
-                padding: "0 18px",
-                borderRadius: 9,
-                fontSize: 13,
-                fontWeight: 600,
-                fontFamily: "inherit",
-                color: "var(--cc-dim)",
-                background: "none",
-                border: "1px solid var(--cc-border)",
-                cursor: "pointer",
-              }}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="flex items-center gap-2"
-              style={{
-                height: 38,
-                padding: "0 20px",
-                borderRadius: 9,
-                fontSize: 13,
-                fontWeight: 700,
-                fontFamily: "inherit",
-                color: "#0f1216",
-                background: "var(--cc-accent)",
-                border: "none",
-                cursor: "pointer",
-                boxShadow: "0 6px 18px color-mix(in srgb, var(--cc-accent) 35%, transparent)",
-              }}
-            >
-              Open session
-              <ArrowRight size={15} strokeWidth={2.5} />
-            </button>
+            {/* name + config */}
+            <div className="flex items-end gap-2">
+              <div className="flex flex-col gap-1" style={{ flex: 1, minWidth: 0 }}>
+                <span className="cc-label" style={{ paddingLeft: 2 }}>
+                  Name <span style={{ fontWeight: 400, opacity: 0.7 }}>— optional</span>
+                </span>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  onFocus={() => setNameFocused(true)}
+                  onBlur={() => setNameFocused(false)}
+                  aria-label="Session name"
+                  placeholder={`${baseName(workdir)} session`}
+                  style={{
+                    height: 34,
+                    padding: "0 11px",
+                    borderRadius: 9,
+                    background: "var(--cc-elev)",
+                    color: "var(--cc-fg)",
+                    border: `1px solid ${nameFocused ? "var(--cc-accent)" : "var(--cc-border)"}`,
+                    outline: "none",
+                    fontFamily: "inherit",
+                    fontSize: 12,
+                  }}
+                />
+              </div>
+              <ConfigSelect label="Model" value={modelSel} options={MODEL_OPTIONS} onChange={setModelSel} />
+              <ConfigSelect
+                label="Permission"
+                value={permissionSel}
+                options={PERMISSION_OPTIONS}
+                onChange={setPermissionSel}
+              />
+              <ConfigSelect label="Effort" value={effortSel} options={EFFORT_OPTIONS} onChange={setEffortSel} />
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col" style={{ gap: 3 }}>
+                <span role="note" style={{ fontSize: 10, color: "var(--cc-muted)" }}>
+                  Opens in the next free pane.
+                </span>
+                {/* CLI-path callout: the `claude` binary is discovered off PATH.
+                    If it lives somewhere nonstandard, CLAUDE_CLI_PATH overrides —
+                    surfaced here so users learn the escape hatch before a spawn
+                    fails (the spawn error names it too). */}
+                <span role="note" style={{ fontSize: 10, color: "var(--cc-muted)", lineHeight: 1.4 }}>
+                  Can&apos;t find <code style={{ fontFamily: "var(--cc-mono, monospace)" }}>claude</code>? Set{" "}
+                  <code style={{ fontFamily: "var(--cc-mono, monospace)", color: "var(--cc-dim)" }}>CLAUDE_CLI_PATH</code>{" "}
+                  before launching Cockpit.
+                </span>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  aria-label="Cancel"
+                  className="hover-bg-surface"
+                  style={{
+                    height: 34,
+                    padding: "0 15px",
+                    borderRadius: 9,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    fontFamily: "inherit",
+                    color: "var(--cc-dim)",
+                    background: "none",
+                    border: "1px solid var(--cc-border)",
+                    cursor: "pointer",
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  aria-label="Create session"
+                  className="flex items-center gap-2"
+                  style={{
+                    height: 34,
+                    padding: "0 17px",
+                    borderRadius: 9,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    fontFamily: "inherit",
+                    color: "#0f1216",
+                    background: "var(--cc-accent)",
+                    border: "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  Create
+                  <ArrowRight size={13} strokeWidth={2.5} />
+                </button>
+              </div>
             </div>
           </div>
         </form>

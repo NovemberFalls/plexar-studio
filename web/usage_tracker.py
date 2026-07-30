@@ -16,6 +16,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 _SUMMARY_WINDOWS = ("session", "24h", "7d", "lifetime")
+# Reports page ranges (range_report) -- deliberately distinct from the
+# dashboard's _SUMMARY_WINDOWS: calendar ranges, no per-process "session".
+_RANGE_KEYS = ("24h", "7d", "30d", "all")
 
 logger = logging.getLogger("cockpit.usage")
 
@@ -650,6 +653,263 @@ class UsageTracker:
                 "tokens": total_tokens if any_real_tokens else None,
                 "cost_usd": round(total_cost, 4) if any_cost else None,
             },
+        }
+
+    # -- Reports page: one-shot range report -----------------------------------
+
+    def range_report(self, range_key: str = "7d") -> dict:
+        """Everything the Reports page renders, in one query pass.
+
+        `range_key` in {'24h','7d','30d','all'}; raises ValueError otherwise so
+        the route can 400 rather than silently serving the wrong window.
+
+        Formulas (single source of truth -- the UI must not recompute these):
+          * cost            -- API-EQUIVALENT cost, derived from the verified
+                               PRICING table (same $/1M rates as
+                               web/pricing_models.json) via _row_cost. This is
+                               NOT a subscription bill; it is what the same
+                               token volume would have cost at list API rates.
+                               A model with no pricing entry falls back to
+                               DEFAULT_PRICING; local-provider runs are costed
+                               at $0.00 and never contribute to `cost`.
+          * cache_hit_rate  = cache_read / (cache_read + input)   [0.0 when the
+                               denominator is 0]
+          * local_share     = local_tokens / total_tokens         [0.0 when
+                               total_tokens is 0]
+          * by_model.share  = model_tokens / total_tokens         [0.0 when
+                               total_tokens is 0]
+          * total_tokens    = input + output + cache_read + cache_write
+                               (+ local input/output)
+          * turns           = one row per assistant turn (usage_events) plus one
+                               per recorded local run (local_runs)
+
+        `by_day` is gap-filled: every calendar day (UTC) in the range is
+        present, zero-valued where there was no activity, so a chart cannot
+        misread a gap as the end of the data.
+
+        `tool_calls` is always None: Cockpit's usage store records token usage
+        per assistant turn only -- tool invocations are not persisted anywhere
+        in this schema, so a number here would be fabricated.
+        """
+        if range_key not in _RANGE_KEYS:
+            raise ValueError(f"range must be one of {_RANGE_KEYS}")
+
+        now = datetime.now(timezone.utc)
+        cutoff: str | None = None
+        if range_key == "24h":
+            cutoff = (now - timedelta(hours=24)).isoformat()
+        elif range_key == "7d":
+            cutoff = (now - timedelta(days=7)).isoformat()
+        elif range_key == "30d":
+            cutoff = (now - timedelta(days=30)).isoformat()
+
+        with self._lock:
+            if cutoff is None:
+                api_rows = self._conn.execute(
+                    "SELECT terminal_id, ts, model, input_tokens, output_tokens, "
+                    "cache_creation_tokens, cache_read_tokens, workdir FROM usage_events"
+                ).fetchall()
+                local_rows = self._conn.execute(
+                    "SELECT terminal_id, ts, provider_id, model, input_tokens, "
+                    "output_tokens, workdir FROM local_runs"
+                ).fetchall()
+            else:
+                api_rows = self._conn.execute(
+                    "SELECT terminal_id, ts, model, input_tokens, output_tokens, "
+                    "cache_creation_tokens, cache_read_tokens, workdir "
+                    "FROM usage_events WHERE ts >= ?",
+                    (cutoff,),
+                ).fetchall()
+                local_rows = self._conn.execute(
+                    "SELECT terminal_id, ts, provider_id, model, input_tokens, "
+                    "output_tokens, workdir FROM local_runs WHERE ts >= ?",
+                    (cutoff,),
+                ).fetchall()
+
+        tot_in = tot_out = tot_cw = tot_cr = tot_local = 0
+        tot_cost = 0.0
+        turns = 0
+        by_day: dict[str, dict] = {}
+        by_model: dict[tuple, dict] = {}
+        sessions: dict[str, dict] = {}
+
+        def _day_bucket(day: str) -> dict:
+            return by_day.setdefault(day, {
+                "day": day, "input": 0, "output": 0, "cache_read": 0,
+                "cache_write": 0, "local": 0, "total": 0, "cost": 0.0,
+            })
+
+        def _session_bucket(tid: str, workdir) -> dict:
+            b = sessions.get(tid)
+            if b is None:
+                b = sessions[tid] = {
+                    "terminal_id": tid, "name": None,
+                    "project": self._repo_from_workdir(workdir),
+                    "model": None, "input": 0, "output": 0, "cache_read": 0,
+                    "cache_write": 0, "local": 0, "total": 0, "turns": 0,
+                    "cost": 0.0, "tool_calls": None, "_models": {},
+                }
+            elif b["project"] == "unknown" and workdir:
+                b["project"] = self._repo_from_workdir(workdir)
+            return b
+
+        for r in api_rows:
+            inp = r["input_tokens"] or 0
+            out = r["output_tokens"] or 0
+            cw = r["cache_creation_tokens"] or 0
+            cr = r["cache_read_tokens"] or 0
+            row_total = inp + out + cw + cr
+            model = r["model"] or ""
+            row_cost = _row_cost(model, inp, out, cw, cr)
+
+            tot_in += inp
+            tot_out += out
+            tot_cw += cw
+            tot_cr += cr
+            tot_cost += row_cost
+            turns += 1
+
+            day = (r["ts"] or "")[:10] or now.date().isoformat()
+            d = _day_bucket(day)
+            d["input"] += inp
+            d["output"] += out
+            d["cache_read"] += cr
+            d["cache_write"] += cw
+            d["total"] += row_total
+            d["cost"] += row_cost
+
+            provider, _family = self._classify_anthropic_side(model)
+            key = (provider, model)
+            m = by_model.setdefault(key, {
+                "model": model, "provider": provider, "tokens": 0,
+                "cost": 0.0, "share": 0.0, "is_local": False,
+            })
+            m["tokens"] += row_total
+            m["cost"] += row_cost
+
+            s = _session_bucket(r["terminal_id"], r["workdir"])
+            s["input"] += inp
+            s["output"] += out
+            s["cache_read"] += cr
+            s["cache_write"] += cw
+            s["total"] += row_total
+            s["turns"] += 1
+            s["cost"] += row_cost
+            if model:
+                s["_models"][model] = s["_models"].get(model, 0) + row_total
+
+        for r in local_rows:
+            inp = r["input_tokens"] or 0
+            out = r["output_tokens"] or 0
+            row_total = inp + out
+            model = r["model"] or ""
+            tot_local += row_total
+            turns += 1
+
+            day = (r["ts"] or "")[:10] or now.date().isoformat()
+            d = _day_bucket(day)
+            d["local"] += row_total
+            d["total"] += row_total
+
+            key = ("local", model)
+            m = by_model.setdefault(key, {
+                "model": model, "provider": r["provider_id"] or "local",
+                "tokens": 0, "cost": 0.0, "share": 0.0, "is_local": True,
+            })
+            m["tokens"] += row_total
+
+            tid = r["terminal_id"]
+            if tid:
+                s = _session_bucket(tid, r["workdir"])
+                s["local"] += row_total
+                s["total"] += row_total
+                s["turns"] += 1
+                if model:
+                    s["_models"][model] = s["_models"].get(model, 0) + row_total
+
+        total_tokens = tot_in + tot_out + tot_cw + tot_cr + tot_local
+        cache_denom = tot_cr + tot_in
+        cache_hit_rate = (tot_cr / cache_denom) if cache_denom else 0.0
+        local_share = (tot_local / total_tokens) if total_tokens else 0.0
+
+        # -- gap-fill the day series ------------------------------------------
+        if range_key == "all":
+            start_day = min(by_day) if by_day else now.date().isoformat()
+        else:
+            days_back = {"24h": 1, "7d": 7, "30d": 30}[range_key]
+            start_day = (now.date() - timedelta(days=days_back - 1)).isoformat()
+        end_day = now.date().isoformat()
+        if by_day:
+            start_day = min(start_day, min(by_day))
+            end_day = max(end_day, max(by_day))
+
+        series: list[dict] = []
+        try:
+            cursor = date.fromisoformat(start_day)
+            last = date.fromisoformat(end_day)
+        except ValueError:
+            logger.debug("range_report: unparsable day bounds %s..%s", start_day, end_day, exc_info=True)
+            cursor = last = None
+        if cursor is not None:
+            while cursor <= last:
+                key = cursor.isoformat()
+                b = by_day.get(key) or {
+                    "day": key, "input": 0, "output": 0, "cache_read": 0,
+                    "cache_write": 0, "local": 0, "total": 0, "cost": 0.0,
+                }
+                series.append({**b, "cost": round(b["cost"], 4)})
+                cursor += timedelta(days=1)
+        else:
+            series = [{**b, "cost": round(b["cost"], 4)} for b in sorted(by_day.values(), key=lambda x: x["day"])]
+
+        models_out = []
+        for m in by_model.values():
+            models_out.append({
+                "model": m["model"],
+                "provider": m["provider"],
+                "tokens": m["tokens"],
+                "cost": round(m["cost"], 4),
+                "share": round(m["tokens"] / total_tokens, 6) if total_tokens else 0.0,
+                "is_local": m["is_local"],
+            })
+        models_out.sort(key=lambda m: (m["tokens"], m["model"] or ""), reverse=True)
+
+        sessions_out = []
+        for s in sessions.values():
+            picked = None
+            if s["_models"]:
+                picked = max(s["_models"].items(), key=lambda kv: kv[1])[0]
+            sessions_out.append({
+                "terminal_id": s["terminal_id"],
+                "name": s["name"],
+                "project": s["project"],
+                "model": picked,
+                "input": s["input"],
+                "output": s["output"],
+                "cache_read": s["cache_read"],
+                "cache_write": s["cache_write"],
+                "local": s["local"],
+                "total": s["total"],
+                "turns": s["turns"],
+                "cost": round(s["cost"], 4),
+                "tool_calls": s["tool_calls"],
+            })
+        sessions_out.sort(key=lambda s: (s["total"], s["turns"]), reverse=True)
+
+        return {
+            "range": range_key,
+            "generated_at": now.isoformat(),
+            "kpis": {
+                "total_tokens": total_tokens,
+                "cost": round(tot_cost, 4),
+                "cache_hit_rate": round(cache_hit_rate, 6),
+                "local_share": round(local_share, 6),
+                "turns": turns,
+                "tool_calls": None,
+            },
+            "by_day": series,
+            "by_model": models_out,
+            "sessions": sessions_out,
         }
 
     def close(self) -> None:

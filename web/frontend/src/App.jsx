@@ -10,9 +10,8 @@ import OnboardingModal from "./components/OnboardingModal";
 import BridgeModal from "./components/BridgeModal";
 import FleetView from "./components/FleetView";
 import ProviderPicker from "./components/ProviderPicker";
-import LocalModelsPanel from "./components/LocalModelsPanel";
-import TracesPanel from "./components/TracesPanel";
-import LocalBrokerView from "./components/LocalBrokerView.jsx";
+import EngineView from "./components/engine/EngineView";
+import ReportsView from "./components/reports/ReportsView";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
 import { computeEndEvents, formatEndEventToast, buildBusyTerminalIds, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 // Redesigned shell chrome (design handoff "Workspace — the approved shell").
@@ -252,6 +251,20 @@ export default function App() {
   // command-palette deep link ("go to Settings > Design tokens") can set it.
   const [settingsSection, setSettingsSection] = useState(DEFAULT_SETTINGS_SECTION);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  // Engine's selected tab (Live|Models|Requests|API|Logs). Held here so it
+  // survives leaving and re-entering the section.
+  const [engineTab, setEngineTab] = useState("live");
+  // terminal_id → live activity state, so Reports can put a state dot on rows
+  // for sessions that are still running. Historical rows have no live state and
+  // are left undotted rather than shown as idle — "not running now" and "idle"
+  // are different facts.
+  const reportsStatusByTerminal = useMemo(() => {
+    const map = {};
+    for (const s of sessions) {
+      if (s.terminalId) map[s.terminalId] = s.activityState || s.status || null;
+    }
+    return map;
+  }, [sessions]);
   // Last pane slot each session occupied, so activating a session from
   // Projects/Fleet/palette focuses its own pane instead of reshuffling the grid.
   const [paneSlotBySession, setPaneSlotBySession] = useState(() => new Map());
@@ -276,7 +289,6 @@ export default function App() {
   // per-capability polling and panel rendering).
   const [selectedProvider, setSelectedProvider] = useState(null); // {id,label,kind,scope,capabilities} | null
   const [localModels, setLocalModels] = useState(null); // GET /api/local/{id}/models
-  const [localTraces, setLocalTraces] = useState(null); // GET /api/local/{id}/traces
   const [localBusyModelId, setLocalBusyModelId] = useState(null); // model id loading/unloading, or null
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
@@ -1064,13 +1076,14 @@ export default function App() {
     };
   }, [backendReady, localEnabled, selectedProvider, metricsWindow]);
 
-  // Poll the selected provider's models + traces every 10s — only when the
-  // capability is present (mirrors the queue/metrics gating above). Renders
-  // nothing (panel omitted) when the capability is absent for this provider.
+  // Poll the selected provider's models every 10s — only when the `models`
+  // capability is present (mirrors the queue/metrics gating above). The sole
+  // consumer is the busy-marker effect below, which needs the model's `state`
+  // to know when a TopBar-initiated load has settled. Panels fetch their own
+  // copies (EngineModels / EngineRequests).
   useEffect(() => {
     if (!backendReady || !localEnabled || !selectedProvider) {
       setLocalModels(null);
-      setLocalTraces(null);
       return;
     }
     const providerId = selectedProvider.id;
@@ -1078,33 +1091,23 @@ export default function App() {
     const controller = new AbortController();
     const { signal } = controller;
 
-    const fetchModelsAndTraces = async () => {
-      if (caps.includes("models")) {
-        try {
-          const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models`, { signal });
-          setLocalModels(res.ok ? await res.json() : { reachable: false });
-        } catch (_) {
-          // swallow — best-effort
-        }
-      } else {
+    const fetchLocalModels = async () => {
+      if (!caps.includes("models")) {
         setLocalModels(null);
+        return;
       }
-      if (caps.includes("traces")) {
-        try {
-          const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/traces`, { signal });
-          setLocalTraces(res.ok ? await res.json() : { reachable: false });
-        } catch (_) {
-          // swallow — best-effort
-        }
-      } else {
-        setLocalTraces(null);
+      try {
+        const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models`, { signal });
+        setLocalModels(res.ok ? await res.json() : { reachable: false });
+      } catch (_) {
+        // swallow — best-effort
       }
     };
 
-    fetchModelsAndTraces();
-    // Poll fast (2s) while a load/unload is in flight so the progress bar
-    // resolves promptly once the model's state flips; back to 10s when idle.
-    const id = setInterval(fetchModelsAndTraces, localBusyModelId ? 2000 : 10000);
+    fetchLocalModels();
+    // Poll fast (2s) while a load is in flight so the TopBar spinner resolves
+    // promptly once the model's state flips; back to 10s when idle.
+    const id = setInterval(fetchLocalModels, localBusyModelId ? 2000 : 10000);
     return () => {
       clearInterval(id);
       controller.abort();
@@ -1122,28 +1125,8 @@ export default function App() {
     if (m && m.state === "loaded") setLocalBusyModelId(null);
   }, [localModels, localBusyModelId]);
 
-  // Load / unload a local model (LM Studio hot-swap via the model-control API).
-  const loadLocalModel = useCallback(async (modelId) => {
-    if (!selectedProvider) return;
-    setLocalBusyModelId(modelId);
-    try {
-      const res = await fetch(
-        `/api/local/${encodeURIComponent(selectedProvider.id)}/models/${encodeURIComponent(modelId)}/load`,
-        { method: "POST" },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        toast(data.error || "Could not load model", "error");
-        setLocalBusyModelId(null);
-      }
-    } catch (_) {
-      toast("Provider unreachable — model not loaded", "error");
-      setLocalBusyModelId(null);
-    }
-  }, [toast, selectedProvider]);
-
   // Load a local model from the TopBar picker, where the target provider may
-  // differ from the LocalBrokerView's currently `selectedProvider`. Dispatches
+  // differ from the currently `selectedProvider`. Dispatches
   // by API behavior rather than needing a fetched provider-capability lookup:
   // LM Studio's /load endpoint succeeds directly; vLLM's /load 409s (it can
   // only serve one model per container), so a 409 falls through to /restart.
@@ -1178,25 +1161,6 @@ export default function App() {
       setLocalBusyModelId(null);
     }
   }, [toast]);
-
-  const unloadLocalModel = useCallback(async (modelId) => {
-    if (!selectedProvider) return;
-    setLocalBusyModelId(modelId);
-    try {
-      const res = await fetch(
-        `/api/local/${encodeURIComponent(selectedProvider.id)}/models/${encodeURIComponent(modelId)}/unload`,
-        { method: "POST" },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) toast(data.error || "Could not unload model", "error");
-    } catch (_) {
-      toast("Provider unreachable — model not unloaded", "error");
-    } finally {
-      // An unload has no "loaded" target for the effect above to key on, so
-      // clear the marker here once the request settles; the next poll refreshes state.
-      setLocalBusyModelId(null);
-    }
-  }, [toast, selectedProvider]);
 
   // Commit a single lane-class spill threshold (seconds, or null to disable),
   // scoped to the selected provider. PUTs the partial map and applies the
@@ -2104,36 +2068,42 @@ export default function App() {
                 onClose={() => setActiveSection("work")}
               />
             )}
+            {/* ENGINE owns "now" (Phase 6). Replaces LocalBrokerView, whose
+                config moved to Settings and whose reporting moved to Reports.
+                The ProviderPicker rides ABOVE the view on purpose: it used to
+                live inside the broker view, and it is the only thing that sets
+                `selectedProvider` — dropping it would silently kill every
+                /api/local poll in App. "Which provider am I looking at" is a
+                machine-now question, so Engine is its right home. */}
             {showLocalBroker && (
-              <LocalBrokerView
-                localEnabled={localEnabled}
-                setLocalEnabled={setLocalEnabled}
-                localStatus={localStatus}
-                localQueue={localQueue}
-                selectedProvider={selectedProvider}
-                localModels={localModels}
-                onSpillChange={commitSpill}
-                onToast={toast}
-                onModelsRefresh={setLocalModels}
-                onClose={() => setActiveSection("work")}
-              >
-                {/* Provider panels render inside the view's Provider card —
-                    each renders nothing when its capability is absent. */}
-                <ProviderPicker enabled={localEnabled} onSelect={setSelectedProvider} />
-                {selectedProvider?.capabilities?.includes("models") && (
-                  <LocalModelsPanel
-                    models={localModels}
-                    providerKind={selectedProvider?.kind}
-                    controlEnabled={selectedProvider?.capabilities?.includes("model-control")}
-                    busyModelId={localBusyModelId}
-                    onLoad={loadLocalModel}
-                    onUnload={unloadLocalModel}
-                  />
-                )}
-                {selectedProvider?.capabilities?.includes("traces") && (
-                  <TracesPanel traces={localTraces} providerId={selectedProvider.id} />
-                )}
-              </LocalBrokerView>
+              <div className="flex-1 min-w-0 flex flex-col" style={{ background: "var(--cc-bg)" }}>
+                <div
+                  style={{
+                    height: 34,
+                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    padding: "0 18px",
+                    borderBottom: "1px solid var(--cc-line)",
+                  }}
+                >
+                  <ProviderPicker enabled={localEnabled} onSelect={setSelectedProvider} />
+                </div>
+                <EngineView
+                  active={showLocalBroker}
+                  provider={selectedProvider}
+                  status={localStatus}
+                  tab={engineTab}
+                  onSelectTab={setEngineTab}
+                  localEnabled={localEnabled}
+                  setLocalEnabled={setLocalEnabled}
+                  onToast={toast}
+                  /* Engine hands off rather than dead-ending. The second arg is
+                     Engine's own idea of a subsection; Reports names its tabs
+                     differently, so it is intentionally ignored here. */
+                  onNavigate={(section) => setActiveSection(section)}
+                />
+              </div>
             )}
 
             {/* Pane grid — always mounted, terminals never unmount. Hidden
@@ -2403,21 +2373,19 @@ export default function App() {
               />
             )}
 
+            {/* REPORTS owns "the past" (Phase 7). Clicking a session row obeys
+                the handoff's navigation rule — go to Workspace and focus that
+                session — rather than opening a trace view that does not exist. */}
             {activeSection === "reports" && (
-              <div
-                className="flex-1 min-w-0 flex items-center justify-center"
-                style={{ background: "var(--cc-bg)", padding: 24 }}
-              >
-                <div style={{ textAlign: "center", maxWidth: 420 }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: "var(--cc-fg)", marginBottom: 8 }}>
-                    {SECTION_TITLES.reports} is not built yet
-                  </div>
-                  <p style={{ fontSize: 12, lineHeight: 1.6, color: "var(--cc-muted)" }}>
-                    Token and cost accounting down to individual traces. Until this lands, per-model
-                    reporting lives in Engine.
-                  </p>
-                </div>
-              </div>
+              <ReportsView
+                statusByTerminalId={reportsStatusByTerminal}
+                onOpenTrace={(terminalId) => {
+                  const s = sessions.find((x) => x.terminalId === terminalId);
+                  if (!s) return;
+                  setActiveSection("work");
+                  selectSession(s.id);
+                }}
+              />
             )}
 
             {/* Inspector follows pane focus. Only in Workspace — the full-area
