@@ -13,6 +13,8 @@ import {
   useModelCatalog,
   isOpusModel,
   getModelProvider,
+  isUnservedSelection,
+  UNSERVED_ROW_TAG,
 } from "../modelCatalog";
 // Lane math lives in utils/laneMath.js so the Workspace lane pressure meter,
 // this quick-glance pill, Engine > Live and the spill-policy control all read
@@ -82,6 +84,10 @@ export default function TopBar({
   const currentModel = modelList.find((m) => m.id === model) || modelList[0];
   const currentPermission = PERMISSION_MODES.find((p) => p.id === permissionMode) || PERMISSION_MODES[0];
   const currentEffort = EFFORT_OPTIONS.find((e) => e.id === effort) || EFFORT_OPTIONS[0];
+  // The selected default names a local model the engine is not serving. Any
+  // session spawned on it fails at request time, so the pill has to say so
+  // where the selection lives — a neutral "· not loaded" suffix reads as trivia.
+  const selectionUnserved = isUnservedSelection(currentModel);
   const modelProvider = getModelProvider(model);
   const isOpenRouterModel = modelProvider === "openrouter";
   const fastEligible = isOpusModel(model) && !isOpenRouterModel;
@@ -376,11 +382,22 @@ export default function TopBar({
             onClick={() => { closeAll(); setModelOpen((v) => !v); }}
             className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
             style={{
-              color: "var(--text-secondary)",
-              border: "1px solid var(--border-color)",
-              backgroundColor: "var(--bg-surface)",
+              color: selectionUnserved ? "var(--cc-waiting, var(--text-secondary))" : "var(--text-secondary)",
+              border: `1px solid ${selectionUnserved ? "var(--cc-waiting, var(--border-color))" : "var(--border-color)"}`,
+              backgroundColor: selectionUnserved
+                ? "color-mix(in srgb, var(--cc-waiting, #0f1216) 12%, var(--bg-surface))"
+                : "var(--bg-surface)",
             }}
-            aria-label={`Model: ${currentModel.label}`}
+            aria-label={
+              selectionUnserved
+                ? `Model: ${currentModel.label} — not being served, sessions will fail`
+                : `Model: ${currentModel.label}`
+            }
+            title={
+              selectionUnserved
+                ? "The engine is not serving this model — a new session on it will fail. Pick the served model, or restart the engine with this one."
+                : undefined
+            }
             aria-expanded={modelOpen}
             aria-haspopup="listbox"
           >
@@ -427,6 +444,7 @@ export default function TopBar({
                       </div>
                       {groupHint && (
                         <div
+                          role="note"
                           className="text-[10px] px-3 pb-1"
                           style={{ color: "var(--text-muted)", fontStyle: "italic" }}
                         >
@@ -434,9 +452,24 @@ export default function TopBar({
                         </div>
                       )}
                       {group.models.map((m) => {
-                        const disabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localLaunchEnabled);
-                        const showLoad = isLocalGroup && localLaunchEnabled && m.loaded === false && onLoadLocalModel;
+                        // A local model the engine is not serving, on a provider
+                        // Cockpit cannot load into. Picking it would point the
+                        // session at something unservable — so it is not
+                        // pickable at all. It stays VISIBLE (the list doubles as
+                        // "what is on disk"), just never selectable.
+                        const unservable = isLocalGroup && m.selectable === false;
+                        const disabled =
+                          (isOpenRouterGroup && !openRouterConfigured) ||
+                          (isLocalGroup && !localLaunchEnabled) ||
+                          unservable;
+                        const showLoad =
+                          isLocalGroup &&
+                          localLaunchEnabled &&
+                          m.loaded === false &&
+                          m.canLoad !== false &&
+                          onLoadLocalModel;
                         const loading = showLoad && localBusyModelId === m.localModelId;
+                        const rowReason = unservable ? m.unavailableReason || groupHint : groupHint;
                         return (
                           <div
                             key={m.id}
@@ -458,10 +491,29 @@ export default function TopBar({
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                               }}
-                              title={groupHint || undefined}
+                              title={rowReason || undefined}
                             >
                               {m.label}
                             </button>
+                            {unservable && (
+                              <span
+                                role="note"
+                                aria-label={`${m.localModelId}: ${m.unavailableReason || UNSERVED_ROW_TAG}`}
+                                title={m.unavailableReason || undefined}
+                                className="text-[10px]"
+                                style={{
+                                  flexShrink: 0,
+                                  marginRight: 6,
+                                  padding: "1px 6px",
+                                  borderRadius: 4,
+                                  whiteSpace: "nowrap",
+                                  color: "var(--cc-waiting, var(--text-muted))",
+                                  border: "1px solid color-mix(in srgb, var(--cc-waiting, #0f1216) 45%, transparent)",
+                                }}
+                              >
+                                {UNSERVED_ROW_TAG}
+                              </span>
+                            )}
                             {showLoad && (
                               <button
                                 type="button"

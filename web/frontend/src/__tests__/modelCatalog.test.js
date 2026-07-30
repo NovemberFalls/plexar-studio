@@ -15,6 +15,10 @@ import {
   isDeprecatedModel,
   getModelProvider,
   parseLocalModelId,
+  isUnservedSelection,
+  UNSERVED_MODEL_SUFFIX,
+  UNSERVED_MODEL_REASON,
+  BROWSE_ONLY_NOTE,
 } from "../modelCatalog.js";
 
 describe("buildModelGroups — family grouping + fallback contract", () => {
@@ -213,7 +217,13 @@ describe("parseLocalModelId", () => {
 
 describe("buildLocalGroups", () => {
   const providers = [
-    { id: "lmstudio-local", label: "LM Studio (local)", kind: "lmstudio", scope: "local", capabilities: ["models"] },
+    {
+      id: "lmstudio-local",
+      label: "LM Studio (local)",
+      kind: "lmstudio",
+      scope: "local",
+      capabilities: ["models", "model-control"],
+    },
     { id: "vllm-local", label: "vLLM (local)", kind: "vllm", scope: "local", capabilities: ["models"] },
   ];
 
@@ -242,6 +252,9 @@ describe("buildLocalGroups", () => {
         localProviderId: "lmstudio-local",
         localModelId: "qwen3-coder-30b",
         loaded: true,
+        canLoad: true,
+        selectable: true,
+        unavailableReason: null,
       },
       {
         id: "local:lmstudio-local:llama-3.1-8b",
@@ -250,9 +263,62 @@ describe("buildLocalGroups", () => {
         localProviderId: "lmstudio-local",
         localModelId: "llama-3.1-8b",
         loaded: false,
+        canLoad: true,
+        selectable: true,
+        unavailableReason: null,
       },
     ]);
     expect(groups[1].label).toBe("vLLM (local)");
+  });
+
+  // The owner picked an unserved vLLM model from this list and their session
+  // default silently became a model the engine cannot be made to serve.
+  describe("provider WITHOUT model-control (external vLLM)", () => {
+    const modelsByProviderId = {
+      "vllm-local": {
+        reachable: true,
+        models: [
+          { id: "qwen3-30b-instruct", state: "loaded" },
+          { id: "/models/Qwen3-Coder-30B-A3B-AWQ", state: "not-loaded" },
+        ],
+      },
+    };
+    const group = () => buildLocalGroups([providers[1]], modelsByProviderId)[0];
+
+    it("marks the unserved model unselectable, with a reason", () => {
+      const unserved = group().models[1];
+      expect(unserved.selectable).toBe(false);
+      expect(unserved.canLoad).toBe(false);
+      expect(unserved.unavailableReason).toBe(UNSERVED_MODEL_REASON);
+      expect(unserved.unavailableReason).toMatch(/restart it with this model/i);
+    });
+
+    it("distinguishes the served model — selectable, and labelled without a caveat", () => {
+      const served = group().models[0];
+      expect(served.selectable).toBe(true);
+      expect(served.loaded).toBe(true);
+      expect(served.label).toBe("qwen3-30b-instruct");
+    });
+
+    it("labels unserved models 'on disk, not served', never 'not loaded'", () => {
+      const unserved = group().models[1];
+      expect(unserved.label).toBe(`/models/Qwen3-Coder-30B-A3B-AWQ · ${UNSERVED_MODEL_SUFFIX}`);
+      expect(unserved.label).not.toMatch(/not loaded/);
+    });
+
+    it("keeps unserved models in the list (browse) and notes why the group is limited", () => {
+      expect(group().models).toHaveLength(2);
+      expect(group().note).toBe(BROWSE_ONLY_NOTE);
+      expect(group().canLoad).toBe(false);
+    });
+  });
+
+  it("leaves a model-control provider fully selectable and un-noted", () => {
+    const groups = buildLocalGroups([providers[0]], {
+      "lmstudio-local": { reachable: true, models: [{ id: "a", state: "not-loaded" }] },
+    });
+    expect(groups[0].note).toBeUndefined();
+    expect(groups[0].models[0]).toMatchObject({ selectable: true, canLoad: true, label: "a · not loaded" });
   });
 
   it("omits unreachable providers", () => {
@@ -273,6 +339,22 @@ describe("buildLocalGroups", () => {
     const groups = buildLocalGroups(providers, modelsByProviderId);
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("vLLM (local)");
+  });
+
+  it("flags a default that disagrees with the served model", () => {
+    const groups = buildLocalGroups([providers[1]], {
+      "vllm-local": {
+        reachable: true,
+        models: [
+          { id: "served", state: "loaded" },
+          { id: "other", state: "not-loaded" },
+        ],
+      },
+    });
+    expect(isUnservedSelection(groups[0].models[1])).toBe(true);
+    expect(isUnservedSelection(groups[0].models[0])).toBe(false);
+    expect(isUnservedSelection({ id: "claude-opus-5", label: "Opus 5" })).toBe(false);
+    expect(isUnservedSelection(undefined)).toBe(false);
   });
 
   it("returns an empty array for missing/invalid input", () => {

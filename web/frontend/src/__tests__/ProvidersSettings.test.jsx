@@ -44,6 +44,28 @@ const STATUS = {
   managed: true,
 };
 
+// GET /api/local/vllm/ownership — the three states the vLLM card must tell apart.
+const OWNERSHIP_EXTERNAL = {
+  effective: false, configured: false, external: false, source: "settings",
+  pending_restart: false, requires_restart: false, env_set: false,
+  reason: "vLLM is external — start and stop it where you started it.",
+};
+const OWNERSHIP_PENDING = {
+  effective: false, configured: true, external: false, source: "settings",
+  pending_restart: true, requires_restart: true, env_set: false,
+  reason: "Saved. Cockpit starts the vLLM container during startup…",
+};
+const OWNERSHIP_PORT_HELD = {
+  effective: false, configured: true, external: true, source: "external",
+  pending_restart: false, requires_restart: false, env_set: false,
+  reason: "An external vLLM is already answering on this port…",
+};
+const OWNERSHIP_MANAGED = {
+  effective: true, configured: true, external: false, source: "settings",
+  pending_restart: false, requires_restart: false, env_set: false,
+  reason: "Cockpit owns this vLLM container.",
+};
+
 const OPENROUTER = { configured: true, source: "ui", masked: "sk-or-v1…4f21" };
 
 const jsonOk = (body) => ({ ok: true, status: 200, json: async () => body });
@@ -53,6 +75,14 @@ function installFetch(overrides = {}) {
     const u = String(url);
     if (u === "/api/local/providers") return jsonOk(overrides.providers ?? PROVIDERS);
     if (u === "/api/local/status") return jsonOk(overrides.status ?? STATUS);
+    if (u === "/api/local/vllm/ownership") {
+      // null override = the route is unreachable (best-effort surface).
+      return "ownership" in overrides
+        ? (overrides.ownership === null
+            ? { ok: false, status: 404, json: async () => ({}) }
+            : jsonOk(overrides.ownership))
+        : jsonOk(OWNERSHIP_EXTERNAL);
+    }
     if (u.endsWith("/health")) {
       return jsonOk({ broker: { reachable: true }, provider: { reachable: true, models_loaded: 2 }, ok: true });
     }
@@ -252,9 +282,86 @@ describe("ProvidersSettings", () => {
 
     const start = screen.getByTestId("vllm-start");
     expect(start).toBeDisabled();
-    expect(start.getAttribute("title")).toMatch(/Engine/);
+    // The reason names OWNERSHIP, not a future phase: Cockpit must not start a
+    // container it does not own, and there is no start-on-demand endpoint.
+    expect(start.getAttribute("title")).toMatch(/does not own this vLLM/i);
+    expect(screen.getByTestId("vllm-launch-command-note")).toHaveTextContent(
+      /does not read this launch command/i
+    );
 
     expect(screen.getByTestId("overflow-vLLM")).toBeDisabled();
+  });
+
+  // ── vLLM "Managed by Cockpit" — the toggle that used to lie ──
+  //
+  // It writes providers.vllm.managed, which the server NOW reads, but only at
+  // startup (the container is launched there). So the card must say what state
+  // the user is in, and the three states have different fixes.
+  describe("vLLM ownership caveats", () => {
+    const renderWith = async (ownership, shell = makeShell()) => {
+      installFetch({ ownership });
+      render(<ProvidersSettings {...shell} />);
+      await waitFor(() => expect(screen.getByTestId("card-vllm")).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByTestId("vllm-managed-pill")).toBeInTheDocument());
+    };
+
+    it("renders the restart caveat when the toggle is saved but not in effect", async () => {
+      // Saved: the draft mirrors settings.json, and the server confirms the
+      // value has not reached the running container yet.
+      await renderWith(OWNERSHIP_PENDING, makeShell({ draft: { "providers.vllm.managed": true } }));
+      expect(screen.getByTestId("vllm-managed-pending-restart")).toHaveTextContent(
+        /takes effect the next time Cockpit restarts/i
+      );
+      expect(screen.queryByTestId("vllm-managed-external")).not.toBeInTheDocument();
+      // Ownership is server-reported, so the pill must NOT claim "Managed" yet.
+      expect(screen.getByTestId("vllm-managed-pill")).toHaveTextContent(/External/);
+    });
+
+    it("renders the restart caveat when the draft flips the toggle on", async () => {
+      // Not yet saved: the server still reports external, but the user has
+      // already changed the control, so the caveat must be on screen with it.
+      await renderWith(
+        OWNERSHIP_EXTERNAL,
+        makeShell({ draft: { "providers.vllm.managed": true }, dirtyPaths: ["providers.vllm.managed"] })
+      );
+      expect(screen.getByTestId("vllm-managed-pending-restart")).toBeInTheDocument();
+    });
+
+    it("explains the external-vLLM case DISTINCTLY — a restart will not help", async () => {
+      await renderWith(OWNERSHIP_PORT_HELD);
+      const note = screen.getByTestId("vllm-managed-external");
+      expect(note).toHaveTextContent(/already answering on this port/i);
+      expect(note).toHaveTextContent(/Restarting Cockpit will not change this/i);
+      expect(screen.queryByTestId("vllm-managed-pending-restart")).not.toBeInTheDocument();
+    });
+
+    it("says the env var wins when COCKPIT_MANAGED_VLLM is set", async () => {
+      await renderWith(
+        { ...OWNERSHIP_MANAGED, source: "env", env_set: true },
+        makeShell({ draft: { "providers.vllm.managed": false } })
+      );
+      expect(screen.getByTestId("vllm-managed-env-pinned")).toHaveTextContent(
+        /COCKPIT_MANAGED_VLLM.*wins over this toggle/i
+      );
+      expect(screen.queryByTestId("vllm-managed-pending-restart")).not.toBeInTheDocument();
+    });
+
+    it("shows no caveat when configured and effective agree", async () => {
+      await renderWith(
+        OWNERSHIP_MANAGED,
+        makeShell({ draft: { "providers.vllm.managed": true } })
+      );
+      expect(screen.getByTestId("vllm-managed-pill")).toHaveTextContent(/Managed/);
+      expect(screen.queryByTestId("vllm-managed-pending-restart")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("vllm-managed-external")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("vllm-managed-env-pinned")).not.toBeInTheDocument();
+    });
+
+    it("claims nothing when the ownership route is unreachable", async () => {
+      await renderWith(null, makeShell({ draft: { "providers.vllm.managed": true } }));
+      expect(screen.queryByTestId("vllm-managed-pending-restart")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("vllm-managed-external")).not.toBeInTheDocument();
+    });
   });
 
   it("enables Browse and reports the dotted path when onBrowse is supplied", async () => {

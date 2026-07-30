@@ -107,7 +107,9 @@ describe("SettingsNav — deep-linkable ids", () => {
       "keys",
       "session-defaults",
       "permissions",
-      "layout",
+      // "layout" REMOVED (owner-confirmed): pane count and sidebar width are set
+      // by direct manipulation and already persist, so a page for them could only
+      // ever disagree with what is on screen.
       "terminal",
       "theme",
       "tokens",
@@ -177,17 +179,17 @@ describe("SettingsView — page frame", () => {
   /* This used to assert the not-built panel via `theme`, which was correct when
      `providers` was the only real page. Twelve of the fourteen sections now have
      one, so the case is pinned on a section that is GENUINELY unbuilt instead --
-     and `layout` is the deliberate one: pane count and sidebar width are already
-     set by direct manipulation and persist, so a page for them would create a
-     second source of truth. If someone builds it, this test should fail and be
-     retired, not edited to point at yet another section. */
+     and `permissions` is the one still genuinely unbuilt. (`layout` was RETIRED
+     from the nav entirely rather than built -- see the id-contract test above.)
+     If someone builds Permissions, this test should fail and be retired along
+     with NotBuiltPanel, not edited to point at yet another section. */
   it("renders an honest not-built panel for a section that genuinely has no page", async () => {
-    render(<SettingsView section="layout" onSelectSection={() => {}} providersPage={ProvidersStub} />);
+    render(<SettingsView section="permissions" onSelectSection={() => {}} providersPage={ProvidersStub} />);
     await waitFor(() => {
-      expect(screen.getByText("Layout & panes is not built yet")).toBeInTheDocument();
+      expect(screen.getByText("Permissions & safety is not built yet")).toBeInTheDocument();
     });
     // Still names where the setting lives today rather than leaving a blank panel.
-    expect(screen.getByText(/adjusted directly in the shell/)).toBeInTheDocument();
+    expect(screen.getByText(/DEFAULTS pill/)).toBeInTheDocument();
     expect(screen.queryByTestId("providers-page")).not.toBeInTheDocument();
   });
 

@@ -14,7 +14,7 @@
  */
 import { createContext, createElement, useContext, useEffect, useState } from "react";
 
-import { useLocalModelsCatalog, offersModels } from "./hooks/useLocalModels.js";
+import { useLocalModelsCatalog, offersModels, offersModelControl } from "./hooks/useLocalModels.js";
 
 const POLL_MS = 10 * 60 * 1000; // models change on the order of weeks; 10 min is plenty
 
@@ -94,6 +94,27 @@ export function parseLocalModelId(id) {
  *  reachable:false is a false claim about machine state). */
 export const NO_MODEL_LIST_NOTE = "Does not publish a model list";
 
+/** Suffix for a model that exists on disk but is NOT the one the engine is
+ *  currently serving, on a provider Cockpit cannot load into (no
+ *  `model-control`). Deliberately different from "· not loaded": on a
+ *  controllable provider "not loaded" is a state you can change by clicking;
+ *  here it is a state nothing in Cockpit can change, so it must not read as a
+ *  one-click-away option. */
+export const UNSERVED_MODEL_SUFFIX = "on disk, not served";
+
+/** The short, visible tag on a row that cannot become the session default. */
+export const UNSERVED_ROW_TAG = "not selectable";
+
+/** Row-level reason (title + note text). Says what to DO, not where to look. */
+export const UNSERVED_MODEL_REASON =
+  "This engine serves one model, fixed when it starts, and runs outside Cockpit. " +
+  "Restart it with this model to use it.";
+
+/** Group-level note for a local provider that publishes a list but cannot be
+ *  loaded into. Browse-only is a true, healthy state — not an error. */
+export const BROWSE_ONLY_NOTE =
+  "Only the model this engine is serving can be used. Restart it with another model to switch.";
+
 /** Builds one picker group per reachable local provider that has >=1 model,
  *  from GET /api/local/providers + per-provider GET /api/local/{id}/models
  *  responses. Ids are namespaced "local:<providerId>:<modelId>" so they can
@@ -121,23 +142,48 @@ export function buildLocalGroups(providers, modelsByProviderId) {
     }
     const resp = modelsByProviderId?.[provider.id];
     if (!resp || resp.reachable === false || !Array.isArray(resp.models) || resp.models.length === 0) continue;
+    // Whether Cockpit can make an unserved model become the served one. Without
+    // it, "pick this model for my session" and "load this model" come apart:
+    // only the served model can actually answer a request, and nothing in
+    // Cockpit can change which one that is.
+    const canLoad = offersModelControl(provider);
     const models = resp.models
       .filter((m) => m && typeof m.id === "string")
       .map((m) => {
         const loaded = m.state === "loaded";
+        const selectable = loaded || canLoad;
         return {
           id: `${LOCAL_ID_PREFIX}${provider.id}:${m.id}`,
-          label: loaded ? m.id : `${m.id} · not loaded`,
+          label: loaded ? m.id : canLoad ? `${m.id} · not loaded` : `${m.id} · ${UNSERVED_MODEL_SUFFIX}`,
           provider: "local",
           localProviderId: provider.id,
           localModelId: m.id,
           loaded,
+          canLoad,
+          selectable,
+          unavailableReason: selectable ? null : UNSERVED_MODEL_REASON,
         };
       });
     if (models.length === 0) continue;
-    groups.push({ label: provider.label || provider.id, provider: "local", models });
+    groups.push({
+      label: provider.label || provider.id,
+      provider: "local",
+      localProviderId: provider.id,
+      canLoad,
+      models,
+      ...(canLoad ? null : { note: BROWSE_ONLY_NOTE }),
+    });
   }
   return groups;
+}
+
+/** True when a catalog entry is a local model that the engine is NOT currently
+ *  serving. A session launched on it fails at request time, far from the click
+ *  that chose it — so wherever the selection is displayed, this must read as a
+ *  problem rather than a neutral suffix. Non-local entries are never "unserved":
+ *  Anthropic/OpenRouter carry no load state. */
+export function isUnservedSelection(entry) {
+  return Boolean(entry) && entry.provider === "local" && entry.loaded === false;
 }
 
 /** True when the id is an Opus model (fast-toggle eligible). Matches the alias

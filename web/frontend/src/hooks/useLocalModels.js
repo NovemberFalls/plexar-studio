@@ -71,6 +71,13 @@ export function offersModels(provider) {
   return Array.isArray(provider?.capabilities) && provider.capabilities.includes("models");
 }
 
+/** True when Cockpit can load/unload/restart models on this provider. Without
+ *  it the provider is browse-only: only the model it is already serving can be
+ *  used, and Cockpit cannot change which one that is. */
+export function offersModelControl(provider) {
+  return Array.isArray(provider?.capabilities) && provider.capabilities.includes("model-control");
+}
+
 const EMPTY = Object.freeze({});
 
 let snapshot = {
@@ -137,6 +144,25 @@ export function setLocalModelBusy(modelId) {
 }
 
 /**
+ * What to say when a provider answers 404 to a load — i.e. Cockpit does not own
+ * it and cannot switch its model. vLLM is named when the provider is one,
+ * because "restart vLLM with --model X" is a command the user can actually run;
+ * for anything else we state the same shape without inventing a flag.
+ */
+export function unswitchableModelMessage(providerId) {
+  if (/vllm/i.test(String(providerId || ""))) {
+    return (
+      "vLLM serves one model, fixed by --model when it starts, and this one runs outside Cockpit. " +
+      "To use a different model, restart vLLM with it."
+    );
+  }
+  return (
+    "This engine serves one model, fixed when it starts, and runs outside Cockpit. " +
+    "To use a different model, restart the engine with it."
+  );
+}
+
+/**
  * Load a model, restarting the provider when it can only serve one.
  *
  * Dispatches by API behaviour rather than a capability lookup:
@@ -176,10 +202,10 @@ export async function loadOrRestartLocalModel(providerId, modelId) {
     const data = await res.json().catch(() => ({}));
     if (res.status === 404) {
       // Not offered, not broken. See the docstring: an external vLLM lands here.
-      toast(
-        "This provider doesn't offer model switching from Cockpit — see Engine ▸ Models for why.",
-        "info",
-      );
+      // The message must carry the ACTION, not a pointer to another screen: the
+      // owner followed "see Engine ▸ Models" and still ended up asking where the
+      // model is changed. Say what to do, here, in one sentence.
+      toast(unswitchableModelMessage(providerId), "info");
       return;
     }
     toast(data.error || "Could not load model", "error");

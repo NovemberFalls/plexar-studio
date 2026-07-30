@@ -1567,6 +1567,13 @@ export default function App() {
       setSidebarOpen((v) => !v);
       return;
     }
+    // Close the DEFAULTS drop-down on any destination change. It is the Phase-1
+    // TopBar scaffold rendered as an absolutely-positioned overlay, so leaving it
+    // open while navigating to Engine/Reports/Settings drops a full-width bar on
+    // top of that view's own header -- it reads as the app double-rendering its
+    // chrome. The panel belongs to Workspace's defaults, so it should not
+    // survive leaving Workspace.
+    setDefaultsOpen(false);
     setActiveSection((prev) => (prev === section ? "work" : section));
   }, []);
 

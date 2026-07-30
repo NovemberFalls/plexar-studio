@@ -2877,7 +2877,11 @@ _SPILL_MAX_S = 86400
 # ever sees {id,label,kind,scope,capabilities} — broker_url/management_url/auth
 # are server-side only (same SSRF stance as _LOCAL_BROKER_URL above).
 
-COCKPIT_MANAGED_VLLM = os.getenv("COCKPIT_MANAGED_VLLM", "0")
+# Raw COCKPIT_MANAGED_VLLM, or None when the operator did NOT set it. The
+# "unset" case has to stay distinguishable from an explicit "0", because the
+# stored setting (providers.vllm.managed) is only consulted when no env var
+# speaks — see _vllm_managed_intent below.
+COCKPIT_MANAGED_VLLM = os.getenv("COCKPIT_MANAGED_VLLM")
 COCKPIT_VLLM_PORT = os.getenv("COCKPIT_VLLM_PORT", "8001")
 COCKPIT_VLLM_MODEL = os.getenv("COCKPIT_VLLM_MODEL", "/models/Qwen3-Coder-30B-A3B-AWQ")
 COCKPIT_VLLM_SERVED_NAME = os.getenv("COCKPIT_VLLM_SERVED_NAME", "qwen3-coder-30b-awq")
@@ -2941,9 +2945,10 @@ _DEFAULT_PROVIDER = "lmstudio-local"
 #
 #   vLLM — there is no hot-swap API (one model per process, fixed by --model at
 #   launch), so the only mechanism is restarting the process. Cockpit can only
-#   do that for a container IT owns, i.e. COCKPIT_MANAGED_VLLM=1 and the
+#   do that for a container IT owns, i.e. the configured intent is on
+#   (COCKPIT_MANAGED_VLLM=1, else settings.json providers.vllm.managed) AND the
 #   double-bind guard did not hand ownership to an external process. When vLLM
-#   is external (the default — COCKPIT_MANAGED_VLLM defaults to "0"), advertising
+#   is external (the default — neither source opts in), advertising
 #   "model-control" was unconditional false advertising: the UI showed a
 #   Restart/Swap button and the route answered 409 every single time.
 _LMS_CLI = shutil.which("lms")
@@ -2951,23 +2956,147 @@ if _LMS_CLI:
     _PROVIDERS["lmstudio-local"]["capabilities"].append("model-control")
 
 
+# Memoized providers.vllm.managed, resolved from settings.json AT MOST ONCE per
+# process. The memo is not an optimisation, it is the semantics: the container
+# is launched during startup, so the only honest moment to read the stored
+# intent is startup. Re-reading it live would let a Settings save flip
+# _vllm_is_managed() mid-process, which would (a) make the "model-control"
+# capability list disagree with reality — nothing re-runs
+# _refresh_vllm_model_control() on a settings write — and (b) advertise a
+# restart for a container Cockpit never started. Freezing it keeps effective
+# ownership changeable at exactly two moments, both of which already refresh the
+# capability list: import and the startup double-bind probe.
+#
+# None = not resolved yet. _reset_vllm_managed_cache() exists for tests.
+_VLLM_MANAGED_SETTING: bool | None = None
+
+
+def _reset_vllm_managed_cache() -> None:
+    """Drop the memoized settings.json intent (tests; never called at runtime)."""
+    global _VLLM_MANAGED_SETTING
+    _VLLM_MANAGED_SETTING = None
+
+
+def _vllm_managed_setting(*, live: bool = False) -> bool:
+    """providers.vllm.managed from settings.json.
+
+    Read LAZILY (never at import of settings_store's data) and memoized, so the
+    file is touched once. `live=True` bypasses the memo — used only by the
+    ownership surface, which has to be able to say "you changed this and it has
+    not taken effect yet".
+    """
+    global _VLLM_MANAGED_SETTING
+    if live or _VLLM_MANAGED_SETTING is None:
+        try:
+            value = bool(
+                settings_store.read_settings()
+                .get("providers", {})
+                .get("vllm", {})
+                .get("managed", False)
+            )
+        except Exception:
+            logger.warning("Could not read providers.vllm.managed; assuming off", exc_info=True)
+            value = False
+        if live:
+            return value
+        _VLLM_MANAGED_SETTING = value
+    return _VLLM_MANAGED_SETTING
+
+
+def _vllm_managed_intent(*, live: bool = False) -> bool:
+    """The CONFIGURED intent to have Cockpit own vLLM — precedence, in order:
+
+      1. COCKPIT_MANAGED_VLLM, when explicitly set (any non-empty value): it
+         wins outright. An operator who exports the variable means it, and it is
+         what CI/headless runs use — so "0" in the env is a hard off even with
+         the toggle on, and "1" is a hard on even with the toggle off.
+      2. Otherwise providers.vllm.managed from settings.json (the Settings ▸
+         Providers ▸ vLLM toggle).
+
+    Intent only. Whether Cockpit ACTUALLY owns the process is _vllm_is_managed(),
+    which additionally defers to an external server holding the port.
+    """
+    if COCKPIT_MANAGED_VLLM:
+        return COCKPIT_MANAGED_VLLM == "1"
+    return _vllm_managed_setting(live=live)
+
+
 def _vllm_is_managed() -> bool:
     """True when Cockpit owns the vLLM process's lifecycle.
 
     Two conditions, both required:
-      * opt-in via COCKPIT_MANAGED_VLLM=1 (read as a module global so tests and
-        the refresh below see the same value the restart route sees), and
+      * the configured intent is on — _vllm_managed_intent(): COCKPIT_MANAGED_VLLM
+        when explicitly set, else settings.json's providers.vllm.managed. Both
+        are read through module state so tests, the capability refresh and the
+        restart route all see the same answer.
       * the startup double-bind guard did not find something already answering
         on the vLLM port. `start_managed_vllm` records that verdict in
-        _MANAGED_VLLM["external"]; with env=1 but an external server already up,
-        Cockpit is a pure observer and must not claim otherwise.
+        _MANAGED_VLLM["external"]; with the intent on but an external server
+        already up, Cockpit is a pure observer and must not claim otherwise.
+        This guard overrides BOTH config sources — it is the only one that
+        reflects what is actually running.
 
     Single source of truth for the "model-control" capability, the `managed`
     flag on GET /api/local/providers, and the restart route's refusal.
     """
-    if COCKPIT_MANAGED_VLLM != "1":
+    if not _vllm_managed_intent():
         return False
     return not _MANAGED_VLLM.get("external", False)
+
+
+def _vllm_ownership() -> dict:
+    """Who owns vLLM right now, and whether the user is waiting on a restart.
+
+    Three states the UI must be able to tell apart:
+      * external — something else answers on the vLLM port. Turning the toggle
+        on changes NOTHING until that process stops; a Cockpit restart will not
+        help, so pending_restart is False.
+      * pending_restart — the configured intent (live from env/settings.json)
+        disagrees with what this process resolved at startup. The container is
+        launched during startup, so the save is real but dormant.
+      * settled — configured and effective agree.
+    """
+    external = bool(_MANAGED_VLLM.get("external", False))
+    effective = _vllm_is_managed()
+    configured = _vllm_managed_intent(live=True)
+    source = "external" if external else ("env" if COCKPIT_MANAGED_VLLM else "settings")
+    pending = (not external) and (configured != effective)
+    if external:
+        reason = (
+            "An external vLLM is already answering on this port, so Cockpit defers to it "
+            "and will keep doing so until that process stops. Restarting Cockpit will not "
+            "change this."
+        )
+    elif pending and configured:
+        reason = (
+            "Saved. Cockpit starts the vLLM container during startup, so this takes effect "
+            "the next time Cockpit restarts."
+        )
+    elif pending:
+        reason = (
+            "Saved. Cockpit still owns the container it started; it is released the next "
+            "time Cockpit restarts."
+        )
+    elif effective:
+        reason = "Cockpit owns this vLLM container."
+    else:
+        reason = "vLLM is external — start and stop it where you started it."
+    return {
+        "effective": effective,
+        "configured": configured,
+        "external": external,
+        "source": source,
+        "pending_restart": pending,
+        "requires_restart": pending,
+        "env_set": bool(COCKPIT_MANAGED_VLLM),
+        "reason": reason,
+    }
+
+
+@app.get("/api/local/vllm/ownership")
+async def get_vllm_ownership():
+    """Ownership of the local vLLM process — see _vllm_ownership. Always 200."""
+    return JSONResponse(_vllm_ownership())
 
 
 def _refresh_vllm_model_control() -> None:
@@ -4372,8 +4501,12 @@ async def start_managed_vllm() -> bool:
     """Launch the managed vLLM container unless disabled or already answering.
 
     Returns True when Cockpit's own vLLM container is (being) launched.
+
+    Opt-in is the SAME determination the rest of the module uses
+    (_vllm_managed_intent: env var when set, else settings.json) so the toggle
+    the user flipped in Settings is what actually launches the container.
     """
-    if COCKPIT_MANAGED_VLLM != "1":
+    if not _vllm_managed_intent():
         return False
     if _MANAGED_VLLM["proc"] is not None:
         return True
@@ -4972,7 +5105,8 @@ async def unload_provider_model(provider_id: str, model_id: str):
             {"error": (
                 "vLLM cannot unload a single model — it serves one model per process. "
                 "Stopping the process is the only unload, and Cockpit only does that for "
-                "a container it owns (COCKPIT_MANAGED_VLLM=1)."
+                "a container it owns (Settings ▸ Providers ▸ vLLM ▸ \"Managed by Cockpit\", "
+                "or COCKPIT_MANAGED_VLLM=1)."
             )},
             status_code=409,
         )
@@ -5000,10 +5134,12 @@ async def unload_provider_model(provider_id: str, model_id: str):
 async def restart_provider_model(provider_id: str, request: Request):
     """Restart the managed vLLM container with a new model (vLLM has no hot-swap).
 
-    Only valid for the managed vLLM provider; an EXTERNAL vLLM (COCKPIT_MANAGED_VLLM
-    is not "1", or the startup double-bind probe found something already serving)
-    is not Cockpit's to restart → 409. Killing a container the user started by
-    hand would be destructive, so the refusal explains where to do it instead.
+    Only valid for the managed vLLM provider; an EXTERNAL vLLM (nothing opted in
+    — neither COCKPIT_MANAGED_VLLM=1 nor settings.json providers.vllm.managed —
+    or the startup double-bind probe found something already serving) is not
+    Cockpit's to restart → 409. Killing a container the user started by hand
+    would be destructive, so the refusal names the ACTUAL cause (external server,
+    save-not-yet-in-effect, or simply off) rather than a single generic line.
     """
     provider = _require_provider(provider_id)
     if provider is None:
@@ -5015,17 +5151,34 @@ async def restart_provider_model(provider_id: str, request: Request):
     # button, but a direct/stale call still deserves the explanation rather than
     # a bare "capability not available".
     if not _vllm_is_managed():
+        ownership = _vllm_ownership()
+        preamble = (
+            "vLLM has no model hot-swap API — one model per process, fixed by "
+            "--model at launch — so changing model means restarting the process. "
+            "Cockpit can only do that for a container it owns. "
+        )
+        if ownership["external"]:
+            cause = (
+                "An external vLLM is already answering on this port, so Cockpit defers to it. "
+                "Restart it where you started it, with the new --model."
+            )
+        elif ownership["pending_restart"]:
+            cause = (
+                "\"Managed by Cockpit\" is saved but not in effect yet — the container is "
+                "started during Cockpit startup, so restart Cockpit first."
+            )
+        else:
+            cause = (
+                "This vLLM is external. Turn on Settings ▸ Providers ▸ vLLM ▸ \"Managed by "
+                "Cockpit\" (or start Cockpit with COCKPIT_MANAGED_VLLM=1) and restart Cockpit, "
+                "or restart vLLM where you started it, with the new --model."
+            )
         return JSONResponse(
             {
-                "error": (
-                    "vLLM has no model hot-swap API — one model per process, fixed by "
-                    "--model at launch — so changing model means restarting the process. "
-                    "Cockpit can only do that for a container it owns (start Cockpit with "
-                    "COCKPIT_MANAGED_VLLM=1). This vLLM is external, so restart it where "
-                    "you started it, with the new --model."
-                ),
+                "error": preamble + cause,
                 "managed": False,
                 "env": "COCKPIT_MANAGED_VLLM",
+                "ownership": ownership,
             },
             status_code=409,
         )

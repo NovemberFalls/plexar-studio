@@ -210,12 +210,23 @@ async def test_restart_unmanaged_409(client, vllm_ownership):
 
 @pytest.mark.asyncio
 async def test_restart_external_double_bind_409(client, vllm_ownership):
-    """Opted in via env but something else is already serving -> still refuse."""
+    """Opted in via env but something else is already serving -> still refuse.
+
+    The refusal must name the ACTUAL cause. Telling this user to set
+    COCKPIT_MANAGED_VLLM=1 would be useless advice -- they already did, and the
+    external process is what is in the way -- so the env var survives as the
+    machine-readable `env` field while the prose points at the real blocker.
+    """
     vllm_ownership("1", external=True)
     async with client as c:
         r = await c.post("/api/local/vllm-local/restart", json={"model": "/models/x"})
     assert r.status_code == 409
-    assert "COCKPIT_MANAGED_VLLM" in r.json()["error"]
+    body = r.json()
+    assert body["env"] == "COCKPIT_MANAGED_VLLM"
+    assert "external vLLM is already answering" in body["error"]
+    assert "where you started it" in body["error"]
+    assert body["ownership"]["external"] is True
+    assert body["ownership"]["pending_restart"] is False
 
 
 @pytest.mark.asyncio

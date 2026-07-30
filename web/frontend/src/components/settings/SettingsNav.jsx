@@ -26,7 +26,12 @@ export const SETTINGS_GROUPS = [
     items: [
       { id: "session-defaults", label: "Defaults & models" },
       { id: "permissions", label: "Permissions & safety" },
-      { id: "layout", label: "Layout & panes" },
+      /* "Layout & panes" REMOVED, owner-confirmed. Pane count, sidebar width and
+         which panels are open are all set by direct manipulation in the shell and
+         already persist. A settings page for them would be a second source of
+         truth for values you set by dragging -- it could only ever disagree with
+         what is on screen. The two bits that genuinely belong to startup (default
+         pane count, inspector-open-on-launch) go to General & startup instead. */
       { id: "terminal", label: "Terminal" },
     ],
   },

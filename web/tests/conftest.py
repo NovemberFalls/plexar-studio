@@ -34,7 +34,11 @@ def vllm_ownership(monkeypatch):
     COCKPIT_MANAGED_VLLM is read from the env ONCE at import into a module
     global, so a test cannot use monkeypatch.setenv — the switch is that global
     plus server._refresh_vllm_model_control(), which is exactly the pair the
-    startup path uses. The capability list is mutable module state, so it is
+    startup path uses. Setting the global to "0"/"1" is an EXPLICIT env value,
+    which wins over settings.json's providers.vllm.managed (see
+    server._vllm_managed_intent), so these tests never depend on the developer's
+    own settings file. Tests that want the settings side are in
+    test_vllm_ownership.py. The capability list is mutable module state, so it is
     snapshotted and restored rather than left as the test found it (a developer
     running with COCKPIT_MANAGED_VLLM=1 in their own env would otherwise see
     cross-test pollution).

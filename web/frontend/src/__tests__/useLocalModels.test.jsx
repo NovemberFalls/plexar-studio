@@ -20,6 +20,7 @@ import useLocalModels, {
   useLocalModelsPoller,
   useLocalModelsCatalog,
   __resetLocalModelsStore,
+  unswitchableModelMessage,
 } from "../hooks/useLocalModels.js";
 import EngineModels from "../components/engine/EngineModels.jsx";
 import { buildLocalGroups, NO_MODEL_LIST_NOTE } from "../modelCatalog.js";
@@ -30,6 +31,16 @@ const PROVIDER = {
   kind: "lmstudio",
   scope: "local",
   capabilities: ["models", "model-control", "queue"],
+};
+
+/** An EXTERNAL vLLM: publishes a model list, but Cockpit does not own the
+ *  container, so every load 404s and only the served model can be used. */
+const EXTERNAL_VLLM = {
+  id: "vllm-local",
+  label: "vLLM (local)",
+  kind: "vllm",
+  scope: "local",
+  capabilities: ["models", "health"],
 };
 
 /** A provider that does not advertise `models` — must never be asked for one. */
@@ -101,7 +112,7 @@ function Catalog({ children }) {
 }
 
 /** Stands in for App: the one component that owns the poller. */
-function Shell({ provider = PROVIDER, enabled = true, watching = true, onToast, children }) {
+function Shell({ provider = PROVIDER, enabled = true, watching = true, onToast, loadFrom, children }) {
   const { models, busyModelId, loadOrRestartModel } = useLocalModelsPoller({
     enabled,
     provider,
@@ -117,7 +128,7 @@ function Shell({ provider = PROVIDER, enabled = true, watching = true, onToast, 
       <button
         type="button"
         data-testid="topbar-load"
-        onClick={() => loadOrRestartModel(PROVIDER.id, "qwen3-coder")}
+        onClick={() => loadOrRestartModel(loadFrom || PROVIDER.id, "qwen3-coder")}
       >
         load
       </button>
@@ -296,6 +307,36 @@ describe("useLocalModels", () => {
     });
     expect(onToast).toHaveBeenCalledWith("Provider unreachable — model not loaded", "error");
     expect(screen.getByTestId("spinner")).toHaveTextContent("idle");
+  });
+
+  // The owner clicked Load on an external vLLM, was told to "see Engine ▸ Models
+  // for why", went there, then to Settings, and still asked where the model is
+  // changed. The message has to contain the action, not a destination.
+  it("names the concrete action on a 404 instead of redirecting to another screen", async () => {
+    const onToast = vi.fn();
+    globalThis.fetch = vi.fn((url, init) => {
+      if (String(url).includes("/models/") && init?.method === "POST") {
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => LIST("not-loaded") });
+    });
+    render(<Shell provider={EXTERNAL_VLLM} onToast={onToast} loadFrom={EXTERNAL_VLLM.id} />);
+    await act(async () => {});
+    await act(async () => {
+      screen.getByTestId("topbar-load").click();
+    });
+    const [message, kind] = onToast.mock.calls[0] ?? [];
+    expect(kind).toBe("info");
+    expect(message).toMatch(/restart vLLM with it/i);
+    expect(message).toMatch(/--model/);
+    expect(message).not.toMatch(/Engine/i);
+    expect(message).not.toMatch(/see .* for why/i);
+  });
+
+  it("states the same shape without inventing a flag for a non-vLLM engine", () => {
+    expect(unswitchableModelMessage("some-broker")).toMatch(/restart the engine with it/i);
+    expect(unswitchableModelMessage("some-broker")).not.toMatch(/--model/);
+    expect(unswitchableModelMessage("vllm-local")).toMatch(/--model/);
   });
 
   it("never asks a provider that does not declare the models capability", async () => {

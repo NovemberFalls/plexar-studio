@@ -11,6 +11,8 @@
  *   GET /api/local/providers        → capability chips + which backends exist
  *   GET /api/local/status           → lane-broker identity fingerprint + managed
  *   GET /api/local/{id}/health      → per-backend reachability pill
+ *   GET /api/local/vllm/ownership   → who owns vLLM, and whether a saved
+ *                                     "Managed by Cockpit" is waiting on a restart
  *   GET|POST|DELETE /api/settings/openrouter → the OpenRouter key (masked only)
  *
  * The OpenRouter card ABSORBS OpenRouterModal.jsx: same three routes, same
@@ -20,8 +22,9 @@
  * Deliberately inert controls (honest gaps, not fake affordances):
  *   - every `Browse` button unless the caller passes `onBrowse` (native folder
  *     picker lands with Phase 9)
- *   - vLLM `Start engine` (lifecycle control lands with Engine ▸ Live; there is
- *     no start endpoint today)
+ *   - vLLM `Start engine` (there is no start-on-demand endpoint: Cockpit starts
+ *     its own container during Cockpit startup, and must never start or stop one
+ *     it does not own. The card says so in prose, not only in a tooltip.)
  *   - each card's `Ellipsis` overflow button (no menu actions exist yet)
  *   - Claude CLI detected version (no detection endpoint; backlog 03)
  *
@@ -1077,6 +1080,7 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   const [status, setStatus] = useState(undefined); // undefined = checking, null = unknown
   const [latencyMs, setLatencyMs] = useState(null);
   const [health, setHealth] = useState({}); // providerId -> payload | null
+  const [ownership, setOwnership] = useState(null); // vLLM ownership; null = unknown
   const [testing, setTesting] = useState(false);
 
   // No setState before the first await: the mount effect calls probe()
@@ -1085,14 +1089,19 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   // handleTest, which is only ever reached from a user click.
   const probe = useCallback(async () => {
     const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const [list, st] = await Promise.all([
+    const [list, st, own] = await Promise.all([
       safeGet("/api/local/providers"),
       safeGet("/api/local/status"),
+      // Who owns the vLLM process right now, and whether a save is waiting on a
+      // Cockpit restart. The draft value of providers.vllm.managed cannot answer
+      // that — it is intent, and the container is launched at startup.
+      safeGet("/api/local/vllm/ownership"),
     ]);
     const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
     const rows = Array.isArray(list?.providers) ? list.providers : [];
     setProviders(rows);
     setStatus(st ?? null);
+    setOwnership(own ?? null);
     setLatencyMs(st ? Math.max(0, Math.round(t1 - t0)) : null);
 
     const results = await Promise.all(
@@ -1159,6 +1168,28 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   const brokerStale = staleUrl("providers.lane_broker.base_url");
   const lmStudioStale = staleUrl("providers.lmstudio.base_url");
   const vllmStale = staleUrl("providers.vllm.base_url");
+
+  // ── vLLM ownership ──────────────────────────────────────
+  // "Managed by Cockpit" is INTENT; the container is launched during Cockpit
+  // startup, so the draft (and even the saved value) can legitimately disagree
+  // with what is running. GET /api/local/vllm/ownership is the only thing that
+  // knows which of the three situations the user is actually in, and they need
+  // different fixes:
+  //   env_set          — COCKPIT_MANAGED_VLLM wins outright; this toggle is inert
+  //   external         — someone else holds the port; a restart will NOT help
+  //   pending_restart  — the save is real but dormant until Cockpit restarts
+  const vllmOwned = ownership?.effective === true;
+  const vllmExternalHoldsPort = ownership?.external === true;
+  const vllmEnvPinned = ownership?.env_set === true;
+  const vllmManagedDraft = get("providers.vllm.managed", false) === true;
+  // Server-side pending (saved, not applied) OR a draft that disagrees with what
+  // is in effect. Never "pending" when the env pins it or an external process
+  // holds the port — in those cases restarting changes nothing.
+  const vllmPendingRestart =
+    ownership !== null &&
+    !vllmExternalHoldsPort &&
+    !vllmEnvPinned &&
+    (ownership.pending_restart === true || vllmManagedDraft !== vllmOwned);
   const ollamaStale = staleUrl("providers.ollama.base_url");
 
   // The claude_cli.* derivations that lived here went with the card above.
@@ -1335,10 +1366,12 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
             title={
               vllmStale
                 ? "Reflects the saved URL, not your edit."
-                : "Sourced from /api/local/status and the vLLM health probe"
+                : ownership?.reason || "Sourced from /api/local/vllm/ownership and the health probe"
             }
           >
-            {`${get("providers.vllm.managed", false) ? "Managed" : "External"} · ${
+            {/* Ownership comes from the server, NOT from the draft toggle — the
+                toggle is intent and only takes effect on a Cockpit restart. */}
+            {`${vllmOwned ? "Managed" : "External"} · ${
               healthFor(vllm)?.provider?.reachable ? "serving" : "stopped"
             }${vllmStale ? " · saved URL" : ""}`}
           </Pill>
@@ -1371,8 +1404,32 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           get={get}
           setField={setField}
           isDirty={isDirty}
-          hint="Cockpit owns the container lifecycle"
+          hint="Cockpit starts the container at startup and may restart it to change model"
+          title={ownership?.reason || undefined}
         />
+        {/* Exactly one caveat, naming the situation the user is actually in.
+            Order matters: the env var wins over everything, an external process
+            wins over a restart, and only then is "restart Cockpit" the fix. */}
+        {vllmEnvPinned && (
+          <Callout testId="vllm-managed-env-pinned">
+            COCKPIT_MANAGED_VLLM is set in this Cockpit's environment, and it wins over this
+            toggle — the saved value is ignored until that variable is unset.
+          </Callout>
+        )}
+        {!vllmEnvPinned && vllmExternalHoldsPort && (
+          <Callout testId="vllm-managed-external">
+            Another vLLM is already answering on this port, so Cockpit is deferring to it and
+            will keep deferring until that process stops. Restarting Cockpit will not change
+            this — stop the other vLLM first.
+          </Callout>
+        )}
+        {!vllmEnvPinned && !vllmExternalHoldsPort && vllmPendingRestart && (
+          <Callout testId="vllm-managed-pending-restart">
+            {vllmManagedDraft
+              ? "Cockpit starts the vLLM container during its own startup, so this takes effect the next time Cockpit restarts — not on save."
+              : "Cockpit still owns the container it started; it is released the next time Cockpit restarts."}
+          </Callout>
+        )}
         <SettingText
           label="Launch command"
           path="providers.vllm.launch_command"
@@ -1386,10 +1443,28 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
               label="Start engine"
               disabled
               testId="vllm-start"
-              title="Inert for now — engine start/stop lands with Engine ▸ Live. Cockpit has no start endpoint yet."
+              title={
+                vllmOwned
+                  ? "Cockpit starts its vLLM container during Cockpit startup — there is no start-on-demand endpoint."
+                  : "Cockpit does not own this vLLM, so it must not start or stop it. Start it where you started it."
+              }
             />
           }
         />
+        {/* The button next to a "docker run …" field reads as THE way to start
+            vLLM. It is not, and it never was — so say what actually starts it,
+            rather than leaving a disabled control to be guessed at. */}
+        <div
+          data-testid="vllm-launch-command-note"
+          role="note"
+          style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
+        >
+          Cockpit does not read this launch command — it builds its own{" "}
+          <code>docker run</code> from the vLLM environment variables and runs it at Cockpit
+          startup when it owns the container. `Start engine` stays disabled because there is
+          no start-on-demand endpoint, and Cockpit must never start or stop a container it
+          does not own.
+        </div>
         <SettingSlider
           label="GPU memory utilisation"
           path="providers.vllm.gpu_util"
