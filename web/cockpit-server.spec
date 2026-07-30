@@ -17,6 +17,12 @@ a = Analysis(
     binaries=[],
     datas=[
         (frontend_dist, 'frontend_dist'),
+        # GET /api/version reads the app version out of package.json -- the same
+        # file tauri.conf.json points at and vite injects as VITE_APP_VERSION.
+        # Without it bundled, _app_version() finds nothing in the sidecar and the
+        # endpoint reports app: null in the DESKTOP build while being correct in
+        # dev, which is the worst way for a version to be wrong.
+        (os.path.join(os.path.dirname(frontend_dist), 'package.json'), '.'),
     ],
     hiddenimports=[
         # Vendored lane broker — imported lazily inside start_managed_broker,

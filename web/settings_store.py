@@ -28,6 +28,14 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 _KEY_FIELD = "openrouter_api_key"
+_ANTHROPIC_KEY_FIELD = "anthropic_api_key"
+
+# Both provider keys live in config.json (secrets), NEVER in settings.json --
+# settings.json is user-exportable by design, so a key must never land there.
+_KEY_FIELDS = {
+    "openrouter": (_KEY_FIELD, "OPENROUTER_API_KEY"),
+    "anthropic": (_ANTHROPIC_KEY_FIELD, "ANTHROPIC_API_KEY"),
+}
 
 
 def _read_json_object(path: Path) -> dict:
@@ -143,6 +151,58 @@ def resolve_openrouter_key() -> tuple[str | None, str | None]:
     return None, None
 
 
+def get_provider_ui_key(provider: str) -> str | None:
+    """Return the UI-supplied key for *provider*, or None if not configured."""
+    field, _env = _KEY_FIELDS[provider]
+    value = _read_config().get(field)
+    return value if isinstance(value, str) and value else None
+
+
+def set_provider_ui_key(provider: str, key: str) -> None:
+    """Persist *key* as the UI-supplied key for *provider* (overwrites any existing value)."""
+    field, _env = _KEY_FIELDS[provider]
+    data = _read_config()
+    data[field] = key
+    _write_config(data)
+
+
+def delete_provider_ui_key(provider: str) -> bool:
+    """Remove the UI-supplied key for *provider*.
+
+    Returns True if a key was actually present and removed.
+    """
+    field, _env = _KEY_FIELDS[provider]
+    data = _read_config()
+    if not data.get(field):
+        return False
+    del data[field]
+    _write_config(data)
+    return True
+
+
+def resolve_provider_key(provider: str) -> tuple[str | None, str | None]:
+    """Resolve the effective key for *provider*.
+
+    Precedence mirrors ``resolve_openrouter_key``: a UI-configured key
+    (config.json) always beats the environment variable.
+
+    Returns (key, source) where source is "ui", "env", or (None, None).
+    """
+    field, env_var = _KEY_FIELDS[provider]
+    ui_key = get_provider_ui_key(provider)
+    if ui_key:
+        return ui_key, "ui"
+    env_key = os.environ.get(env_var)
+    if env_key:
+        return env_key, "env"
+    return None, None
+
+
+def resolve_anthropic_key() -> tuple[str | None, str | None]:
+    """Resolve the effective Anthropic key (UI-set beats ANTHROPIC_API_KEY)."""
+    return resolve_provider_key("anthropic")
+
+
 def mask_key(key: str) -> str:
     """Mask *key* for safe display/logging -- the full key must NEVER appear
     in any log line or API response.
@@ -203,6 +263,19 @@ DEFAULT_SETTINGS = {
         "enforce_on": {"bridges": True, "new_sessions": False},
     },
     "system": {"keybindings": {}},
+    # Terminal (xterm.js) options. These are Cockpit's own -- the `claude` CLI
+    # neither sees nor restricts them. NOT yet read by TerminalPane, which still
+    # hard-codes its values; the Settings page says so rather than implying they
+    # are live. This section exists because `update_settings` rejects an unknown
+    # top-level section ALL-OR-NOTHING: without it, saving a terminal edit 400s
+    # and silently discards every other page's pending edit in the same patch.
+    "terminal": {
+        "font_family": "",       # "" = use the mono stack from index.css
+        "font_size": 13,
+        "scrollback": 10000,
+        "cursor_style": "",      # "" = xterm default (bar, per TerminalPane)
+        "cursor_blink": True,
+    },
 }
 
 # Free-form dict leaves: their *contents* are user-defined (theme tokens,
@@ -219,6 +292,11 @@ _NUMERIC_BOUNDS = {
     "data.retention_days": (1, 3650),
     "spend.monthly_reset_day": (1, 28),
     "spend.alert_at_percent": (1, 100),
+    # 8 is the smallest legible mono size; past ~28 a pane holds too few columns
+    # to be useful. Scrollback is per-pane and Cockpit runs up to 8 of them, so
+    # the ceiling is a memory bound, not a preference.
+    "terminal.font_size": (8, 28),
+    "terminal.scrollback": (100, 100000),
 }
 
 # Dotted key -> allowed values. A value outside the set is rejected rather than

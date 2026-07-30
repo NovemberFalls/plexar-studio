@@ -28,6 +28,10 @@ import {
   driveOf,
 } from "../components/folderPath";
 import NewSessionDialog from "../components/NewSessionDialog";
+// The shared session vocabularies. Asserted against the definition, not a
+// fixture: a fixture would keep passing if this dialog re-grew its own copy,
+// which is how it came to offer only four of the six effort levels.
+import { PERMISSION_MODES, EFFORT_OPTIONS } from "../sessionVocabulary";
 
 const entry = (name, over = {}) => ({
   name,
@@ -457,6 +461,58 @@ describe("NewSessionDialog", () => {
     expect(screen.getByRole("button", { name: "Permission" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Effort" })).toBeInTheDocument();
     expect(screen.getByText(/CLAUDE_CLI_PATH/)).toBeInTheDocument();
+  });
+
+  // REGRESSION: this dialog's Effort select shipped with only four of the six
+  // levels ("" / low / medium / high), so it showed a menu claiming a session
+  // could not be set to xhigh or max, while its own comment claimed it mirrored
+  // TopBar. The selects are display-only, so nothing was ever misconfigured --
+  // but a decorative menu that misdescribes what a session can be is still a
+  // false statement about the system. All three lists now come from the shared
+  // sources.
+  it("offers every shared effort level, including xhigh and max", async () => {
+    await renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Effort" }));
+    for (const level of EFFORT_OPTIONS) {
+      expect(screen.getByRole("button", { name: level.label })).toBeInTheDocument();
+    }
+    // The two that were missing, named explicitly so the regression is legible.
+    expect(screen.getByRole("button", { name: "XHigh" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Max" })).toBeInTheDocument();
+  });
+
+  it("offers the shared permission modes with the canonical wording", async () => {
+    await renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Permission" }));
+    for (const mode of PERMISSION_MODES) {
+      expect(screen.getByRole("button", { name: mode.label })).toBeInTheDocument();
+    }
+  });
+
+  it("lists models from the shared catalog, not the stale local copy", async () => {
+    await renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    // The stale list named models that are not in Cockpit's catalog at all.
+    expect(screen.queryByRole("button", { name: "Sonnet 4.6" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Opus 4.6" })).not.toBeInTheDocument();
+    // A real catalog entry renders instead.
+    expect(screen.getByRole("button", { name: "Opus 5" })).toBeInTheDocument();
+  });
+
+  it("still passes ONLY (name, workdir, bypass) after the vocabulary migration", async () => {
+    // The selects remain display-only on purpose: App.jsx destructures onConfirm
+    // positionally and applies the global command-bar settings itself. Widening
+    // the menus must not start submitting them.
+    const { onConfirm } = await renderDialog({
+      savedLocations: [],
+      recentLocations: ["C:\\Code\\web"],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Effort" }));
+    fireEvent.click(screen.getByRole("button", { name: "Max" }));
+    fireEvent.change(screen.getByLabelText("Session name"), { target: { value: "api" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create session" }));
+    expect(onConfirm.mock.calls[0]).toEqual(["api", "C:\\Code\\web", false]);
+    expect(onConfirm.mock.calls[0]).toHaveLength(3);
   });
 
   it("does not crash with no recent or saved locations", async () => {

@@ -7,6 +7,16 @@ import {
   GitFork,
   ExternalLink,
 } from "lucide-react";
+// sessionVocabulary.js is the single source for the permission-mode and effort
+// vocabularies. Imported rather than re-declared so adding a level in one place
+// cannot leave this panel offering a different set — this panel drives LIVE
+// sessions, so a divergence here means a session configured with something the
+// rest of the UI cannot express. A plain module, deliberately: importing these
+// from TopBar dragged a whole UI tree into this file's tests.
+import {
+  PERMISSION_MODES,
+  EFFORT_OPTIONS as SHARED_EFFORT_OPTIONS,
+} from "../../sessionVocabulary";
 
 /** Map a session's activity state/status to a --cc-* state color token (mirrors Sidebar.jsx STATE_COLOR). */
 const STATE_COLOR = {
@@ -274,28 +284,32 @@ function WorkflowRow({ item }) {
   );
 }
 
-const PERMISSION_OPTIONS = [
-  { value: "default", label: "Ask" },
-  { value: "acceptEdits", label: "Auto-edit" },
-  { value: "bypassPermissions", label: "Bypass" },
-  { value: "plan", label: "Plan" },
-];
+/**
+ * The canonical permission-mode vocabulary, re-keyed `id` → `value` for
+ * OverrideSelect.
+ *
+ * This panel previously kept its own copy, which had drifted: it labelled
+ * `acceptEdits` "Auto-edit" and ordered `plan` last, while the other three
+ * surfaces said "Accept Edits" with `plan` second. The ids were always the same
+ * four, so no session was ever misconfigured — but the same setting answered to
+ * two different names depending on which panel you were in. Resolved in favour
+ * of the canonical wording; this panel now shows "Accept Edits" and orders
+ * `plan` second.
+ */
+const PERMISSION_OPTIONS = PERMISSION_MODES.map(({ id, label }) => ({ value: id, label }));
 
-// Auto's value MUST be the empty string, not "auto" — it mirrors App.jsx's
-// effort state (initialised to "" and persisted to localStorage key
-// "cockpit-effort") and pty_manager.py's _ALLOWED_EFFORT_LEVELS, which
-// RAISES ValueError on anything outside {"", "low","medium","high","xhigh","max"}.
-// Picking a non-"" "auto" value here breaks session creation for the rest of
-// the workspace's life (survives restart, no recovery UI). Mirrors TopBar.jsx's
-// EFFORT_OPTIONS exactly — keep the two in sync.
-const EFFORT_OPTIONS = [
-  { value: "", label: "Auto" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "XHigh" },
-  { value: "max", label: "Max" },
-];
+/**
+ * The canonical effort vocabulary, re-keyed `id` → `value` for OverrideSelect.
+ * This copy was already identical to the canonical list, so importing it is a
+ * pure de-duplication with no behavioural change.
+ *
+ * Auto's value is still the empty string, and still load-bearing: pty_manager's
+ * _ALLOWED_EFFORT_LEVELS raises ValueError on anything outside
+ * {"", "low","medium","high","xhigh","max"}, so an "auto" string would break
+ * session creation for the rest of the workspace's life (it survives restart and
+ * has no recovery UI). See sessionVocabulary.js for the full note.
+ */
+const EFFORT_OPTIONS = SHARED_EFFORT_OPTIONS.map(({ id, label }) => ({ value: id, label }));
 
 const FAST_OPTIONS = [
   { value: "off", label: "Fast off" },

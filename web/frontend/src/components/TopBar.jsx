@@ -1,6 +1,9 @@
 /* eslint-disable react-refresh/only-export-components -- MODEL_GROUPS/MODELS/isOpusModel
    are re-exported here so PaneActionsMenu.jsx reuses the exact same model list
-   instead of hardcoding a second copy (see CLAUDE.md model list conventions). */
+   instead of hardcoding a second copy (see CLAUDE.md model list conventions).
+   PERMISSION_MODES/EFFORT_OPTIONS are exported for the same reason: this file is
+   the single source for the model, permission-mode and effort vocabularies a
+   session can be configured with. */
 import { useState, useEffect } from "react";
 import { PanelLeft, ChevronDown, KeyRound, Cpu } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
@@ -16,6 +19,10 @@ import {
 // the same arithmetic (see the handoff: "Conversions to implement once and
 // share"). Do not re-derive these locally.
 import { fmtEta, laneLive } from "../utils/laneMath";
+// Permission modes + effort levels live in a plain module for the same reason
+// the model list lives in modelCatalog: four files had forked them and two had
+// drifted. See sessionVocabulary.js for the full history.
+import { PERMISSION_MODES, EFFORT_OPTIONS } from "../sessionVocabulary";
 
 // Re-exported for back-compat: PaneActionsMenu and the test suite import the
 // static model list from here. The LIVE, account-accurate catalog flows through
@@ -25,21 +32,12 @@ export const MODEL_GROUPS = FALLBACK_MODEL_GROUPS;
 export const MODELS = MODEL_GROUPS.flatMap((g) => g.models);
 export { isOpusModel, getModelProvider };
 
-const PERMISSION_MODES = [
-  { id: "default", label: "Ask" },
-  { id: "plan", label: "Plan" },
-  { id: "acceptEdits", label: "Accept Edits" },
-  { id: "bypassPermissions", label: "Bypass" },
-];
-
-const EFFORT_OPTIONS = [
-  { id: "", label: "Auto" },
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
-  { id: "xhigh", label: "XHigh" },
-  { id: "max", label: "Max" },
-];
+// Re-exported for back-compat, exactly like MODELS above: the permission-mode
+// and effort vocabularies are DEFINED in sessionVocabulary.js (a plain module,
+// so a consumer — or a test that module-mocks this component — can import them
+// without pulling in the TopBar tree). New consumers should import from
+// sessionVocabulary directly; these names stay so existing imports keep working.
+export { PERMISSION_MODES, EFFORT_OPTIONS };
 
 export default function TopBar({
   model,

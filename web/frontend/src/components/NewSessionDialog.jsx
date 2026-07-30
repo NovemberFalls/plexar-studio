@@ -38,37 +38,41 @@ import {
   GitBranch,
 } from "lucide-react";
 import FolderBrowser from "./FolderBrowser";
+// Shared vocabularies — see sessionVocabulary.js / modelCatalog.js. These lists
+// are display-only here, but a decorative select that lists a smaller set of
+// effort levels than a session actually supports is still a menu that lies.
+import { PERMISSION_MODES, EFFORT_OPTIONS } from "../sessionVocabulary";
+import { useModelCatalog } from "../modelCatalog";
 import { normPath, baseName, parentOf } from "./folderPath";
 
 const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
 
-// Mirrors TopBar.jsx's MODEL_GROUPS / PERMISSION_MODES / EFFORT_OPTIONS values —
-// display-only defaults here; the actual per-session model/permission/effort are
-// the global TopBar settings applied by createSession() in App.jsx. Kept as local
-// selects for visual parity with the design; not wired into onConfirm so the
-// existing (name, workdir, bypassPermissions) contract stays byte-identical.
-const MODEL_OPTIONS = [
-  { id: "claude-opus-5", label: "Opus 5" },
-  { id: "sonnet", label: "Sonnet 4.6" },
-  { id: "opus", label: "Opus 4.6" },
-  { id: "haiku", label: "Haiku 4.5" },
-];
-const PERMISSION_OPTIONS = [
-  { id: "default", label: "Ask" },
-  { id: "plan", label: "Plan" },
-  { id: "acceptEdits", label: "Accept Edits" },
-  { id: "bypassPermissions", label: "Bypass" },
-];
-const EFFORT_OPTIONS = [
-  { id: "", label: "Auto" },
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Medium" },
-  { id: "high", label: "High" },
-];
+/**
+ * The Model / Permission / Effort selects are display-only: App.jsx applies the
+ * global command-bar settings, and these are NOT passed to onConfirm, so the
+ * (name, workdir, bypassPermissions) contract stays byte-identical. That is
+ * deliberate and unchanged — see the file header.
+ *
+ * What DID change: all three lists used to be local copies, and two of them were
+ * wrong. The effort list stopped at "high", offering four of the six levels, so
+ * this dialog showed a menu claiming a session could not be set to `xhigh` or
+ * `max`. The model list still named "Sonnet 4.6" / "Opus 4.6", which are not in
+ * Cockpit's catalog at all. Both now come from the shared sources
+ * (sessionVocabulary.js, modelCatalog.js) so a decorative select cannot go on
+ * misdescribing what a session can be.
+ *
+ * PERMISSION_OPTIONS is imported under the canonical name; the local alias is
+ * kept so the JSX below is untouched.
+ */
+const PERMISSION_OPTIONS = PERMISSION_MODES;
 
 function ConfigSelect({ label, value, options, onChange }) {
   const [open, setOpen] = useState(false);
-  const current = options.find((o) => o.id === value) || options[0];
+  // The model options now come from the shared catalog rather than a literal, so
+  // an empty list is reachable (a caller supplying an empty catalog). Falling
+  // back to a placeholder keeps the dialog open instead of crashing it on
+  // `current.label` — this modal is the only way to create a session.
+  const current = options.find((o) => o.id === value) || options[0] || { id: "", label: "—" };
   return (
     <div className="flex flex-col gap-1 flex-1 relative">
       <span className="cc-label" style={{ paddingLeft: 2 }}>{label}</span>
@@ -149,7 +153,15 @@ export default function NewSessionDialog({
   const [bypassPermissions, setBypassPermissions] = useState(initialBypass);
   const [manualBypassOverride, setManualBypassOverride] = useState(false);
   const [nameFocused, setNameFocused] = useState(false);
-  const [modelSel, setModelSel] = useState(MODEL_OPTIONS[0].id);
+  // The live catalog when the app provides one (main.jsx wraps everything in
+  // ModelCatalogProvider), the static shared fallback otherwise — the same list
+  // the command bar's model picker shows, never a fifth hand-written copy.
+  const catalog = useModelCatalog();
+  const modelOptions =
+    catalog?.models?.length > 0
+      ? catalog.models.map((m) => ({ id: m.id, label: m.label || m.id }))
+      : [];
+  const [modelSel, setModelSel] = useState(catalog?.models?.[0]?.id ?? "");
   const [permissionSel, setPermissionSel] = useState(PERMISSION_OPTIONS[0].id);
   const [effortSel, setEffortSel] = useState(EFFORT_OPTIONS[0].id);
   const [validation, setValidation] = useState({ state: "unknown", error: "" });
@@ -458,7 +470,7 @@ export default function NewSessionDialog({
                   }}
                 />
               </div>
-              <ConfigSelect label="Model" value={modelSel} options={MODEL_OPTIONS} onChange={setModelSel} />
+              <ConfigSelect label="Model" value={modelSel} options={modelOptions} onChange={setModelSel} />
               <ConfigSelect
                 label="Permission"
                 value={permissionSel}

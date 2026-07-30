@@ -86,7 +86,7 @@ describe("ProvidersSettings", () => {
     delete globalThis.fetch;
   });
 
-  it("renders all five provider cards plus the Claude CLI card", async () => {
+  it("renders all five provider cards — the Claude CLI card moved to its own page", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
 
@@ -99,7 +99,6 @@ describe("ProvidersSettings", () => {
       "card-vllm",
       "card-ollama",
       "card-openrouter",
-      "card-claude-cli",
     ]) {
       expect(screen.getByTestId(id)).toBeInTheDocument();
     }
@@ -264,28 +263,23 @@ describe("ProvidersSettings", () => {
     render(<ProvidersSettings {...shell} onBrowse={onBrowse} />);
     await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
 
-    const browse = screen.getByTestId("browse-claude_cli.binary_path");
+    // Repointed from claude_cli.binary_path to a SURVIVING Browse field when the
+    // Claude CLI card was removed. The mechanism under test is Browse itself —
+    // still live for LM Studio's CLI binary and models folder — so this keeps its
+    // coverage instead of losing it with the card.
+    const browse = screen.getByTestId("browse-providers.lmstudio.cli_path");
     expect(browse).toBeEnabled();
     fireEvent.click(browse);
-    expect(onBrowse).toHaveBeenCalledWith("claude_cli.binary_path");
+    expect(onBrowse).toHaveBeenCalledWith("providers.lmstudio.cli_path");
   });
 
-  it("shows an em dash for the undetected Claude CLI version instead of inventing one", async () => {
-    const shell = makeShell({ draft: { "claude_cli.detected_version": null } });
-    render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
-
-    expect(screen.getByTestId("cli-detected-version")).toHaveTextContent("—");
-    expect(screen.getByText(/backlog 03/i)).toBeInTheDocument();
-  });
-
-  it("warns when the resolved Claude CLI path is not the claude binary", async () => {
-    const shell = makeShell({ draft: { "claude_cli.binary_path": "C:/tools/notclaude.exe" } });
-    render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
-
-    expect(screen.getByTestId("cli-mismatch")).toBeInTheDocument();
-  });
+  /* The two Claude CLI assertions that were here (em-dash version, wrong-binary
+     warning) moved WITH the behaviour to Settings ▸ Claude CLI, which reads the
+     real GET /api/cli instead of the settings keys nothing on the server read.
+     They are covered by ClaudeCliSettings.test.jsx — "renders an em dash for a
+     null version and invents nothing" and its name_matches:false fixture — so
+     this is a relocation, not a coverage loss. The old em-dash test also
+     asserted a "backlog 03" note that became false when GET /api/cli landed. */
 
   it("re-probes only on an explicit Test click — never on an interval", async () => {
     // Settings is intent, not a live dashboard: the page must not install a

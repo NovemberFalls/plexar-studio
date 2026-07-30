@@ -369,3 +369,123 @@ async def test_delete_settings_when_nothing_configured_is_still_ok(client, isola
     data = res.json()
     assert data["ok"] is True
     assert data["configured"] is False
+
+
+# ---------------------------------------------------------------------------
+# Anthropic key -- GET/POST/DELETE /api/settings/anthropic
+#
+# Same contract as the OpenRouter routes above. The key lives in config.json
+# (secrets), never settings.json (exportable), and no route may ever emit an
+# unmasked key.
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_KEY = "sk-ant-api03-AAAAbbbbCCCCddddEEEEffff"
+
+
+@pytest.fixture()
+def isolated_anthropic(isolated_config, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    return isolated_config
+
+
+def test_anthropic_store_roundtrip(isolated_anthropic):
+    config_dir, config_file = isolated_anthropic
+
+    assert settings_store.get_provider_ui_key("anthropic") is None
+    settings_store.set_provider_ui_key("anthropic", _ANTHROPIC_KEY)
+    assert settings_store.get_provider_ui_key("anthropic") == _ANTHROPIC_KEY
+
+    # Stored in config.json under its own field, beside the OpenRouter key.
+    on_disk = json.loads(config_file.read_text(encoding="utf-8"))
+    assert on_disk == {"anthropic_api_key": _ANTHROPIC_KEY}
+
+    assert settings_store.delete_provider_ui_key("anthropic") is True
+    assert settings_store.get_provider_ui_key("anthropic") is None
+    assert settings_store.delete_provider_ui_key("anthropic") is False
+
+
+def test_anthropic_key_never_lands_in_settings_json(isolated_anthropic, tmp_path, monkeypatch):
+    settings_file = tmp_path / ".claude-cockpit" / "settings.json"
+    monkeypatch.setattr(settings_store, "SETTINGS_FILE", settings_file)
+    settings_store.set_provider_ui_key("anthropic", _ANTHROPIC_KEY)
+    blob = json.dumps(settings_store.read_settings())
+    assert _ANTHROPIC_KEY not in blob
+
+
+def test_anthropic_ui_key_beats_env(isolated_anthropic, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-key-000111222333")
+    settings_store.set_provider_ui_key("anthropic", _ANTHROPIC_KEY)
+    key, source = settings_store.resolve_anthropic_key()
+    assert (key, source) == (_ANTHROPIC_KEY, "ui")
+
+
+@pytest.mark.asyncio
+async def test_anthropic_get_reports_unconfigured(client, isolated_anthropic):
+    res = await client.get("/api/settings/anthropic")
+    assert res.status_code == 200
+    assert res.json() == {"configured": False, "source": None, "masked": None}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_post_get_delete_roundtrip(client, isolated_anthropic):
+    res = await client.post("/api/settings/anthropic", json={"key": _ANTHROPIC_KEY})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+
+    res = await client.get("/api/settings/anthropic")
+    body = res.json()
+    assert body["configured"] is True
+    assert body["source"] == "ui"
+    assert body["masked"] == settings_store.mask_key(_ANTHROPIC_KEY)
+
+    res = await client.delete("/api/settings/anthropic")
+    assert res.json()["ok"] is True
+    assert res.json()["configured"] is False
+    assert settings_store.get_provider_ui_key("anthropic") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {"key": ""},
+    {"key": "   "},
+    {"key": "has space in it"},
+    {"key": 12345},
+    {},
+])
+async def test_anthropic_post_rejects_bad_bodies(client, isolated_anthropic, body):
+    res = await client.post("/api/settings/anthropic", json=body)
+    assert res.status_code == 400
+    assert settings_store.get_provider_ui_key("anthropic") is None
+
+
+@pytest.mark.asyncio
+async def test_anthropic_delete_refuses_honestly_for_env_key(client, isolated_anthropic, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-key-000111222333")
+
+    res = await client.delete("/api/settings/anthropic")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is False
+    assert body["source"] == "env"
+    assert body["configured"] is True
+    assert "ANTHROPIC_API_KEY" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_no_anthropic_route_emits_an_unmasked_key(client, isolated_anthropic, monkeypatch):
+    """Hard guarantee: the full key must not appear in ANY response body."""
+    env_key = "sk-ant-env-key-000111222333"
+    bodies = []
+
+    res = await client.post("/api/settings/anthropic", json={"key": _ANTHROPIC_KEY})
+    bodies.append(res.text)
+    bodies.append((await client.get("/api/settings/anthropic")).text)
+    bodies.append((await client.delete("/api/settings/anthropic")).text)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", env_key)
+    bodies.append((await client.get("/api/settings/anthropic")).text)
+    bodies.append((await client.delete("/api/settings/anthropic")).text)
+
+    for text in bodies:
+        assert _ANTHROPIC_KEY not in text
+        assert env_key not in text

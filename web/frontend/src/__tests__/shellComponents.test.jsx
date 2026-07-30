@@ -20,6 +20,11 @@ import CommandBar from "../components/shell/CommandBar";
 import LaneStrip from "../components/shell/LaneStrip";
 import Inspector from "../components/shell/Inspector";
 import StatusStrip from "../components/shell/StatusStrip";
+// The single source for the session-configuration vocabularies.
+import {
+  EFFORT_OPTIONS as SHARED_EFFORT_OPTIONS,
+  PERMISSION_MODES as SHARED_PERMISSION_MODES,
+} from "../sessionVocabulary";
 
 describe("LaneStrip — exact container types App.jsx passes", () => {
   // paneSlotById is keyed by App.jsx's local `session.id` (activeIds stores
@@ -328,5 +333,38 @@ describe("Rail and CommandBar smoke render (basic prop contracts)", () => {
     );
     expect(screen.getByText("Workspace")).toBeInTheDocument();
     expect(screen.getByText("opus")).toBeInTheDocument();
+  });
+});
+
+/**
+ * Inspector's per-session effort select is DERIVED from TopBar.EFFORT_OPTIONS,
+ * not forked from it. This panel drives live sessions, so a level the command bar
+ * offers and the Inspector does not (or vice versa) means a session can be put
+ * into a state the rest of the UI cannot express.
+ *
+ * Asserted against the shared export rather than a fixture on purpose: a fixture
+ * would keep passing if Inspector grew its own copy again.
+ */
+describe("Inspector — session vocabularies come from the shared source", () => {
+  it("offers every shared effort level, in the shared order, Auto as \"\"", () => {
+    render(<Inspector session={{ id: "s1", name: "S1", status: "idle" }} bridge={null} />);
+    const select = screen.getByLabelText("Effort");
+    const options = [...select.querySelectorAll("option")];
+    expect(options.map((o) => o.value)).toEqual(SHARED_EFFORT_OPTIONS.map((e) => e.id));
+    expect(options.map((o) => o.textContent)).toEqual(SHARED_EFFORT_OPTIONS.map((e) => e.label));
+    // pty_manager._ALLOWED_EFFORT_LEVELS raises on any other spelling of Auto.
+    expect(options.find((o) => o.textContent === "Auto").value).toBe("");
+  });
+
+  it("offers the shared permission modes with the canonical wording and order", () => {
+    // This panel used to say "Auto-edit" and order `plan` last. Resolved in
+    // favour of the canonical list, so ids, LABELS and ORDER must all match now —
+    // a setting should not change its name depending on which panel you are in.
+    render(<Inspector session={{ id: "s1", name: "S1", status: "idle" }} bridge={null} />);
+    const options = [...screen.getByLabelText("Permission mode").querySelectorAll("option")];
+    expect(options.map((o) => o.value)).toEqual(SHARED_PERMISSION_MODES.map((p) => p.id));
+    expect(options.map((o) => o.textContent)).toEqual(SHARED_PERMISSION_MODES.map((p) => p.label));
+    expect(options.map((o) => o.textContent)).toContain("Accept Edits");
+    expect(options.map((o) => o.textContent)).not.toContain("Auto-edit");
   });
 });

@@ -8,10 +8,20 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# logging_config now installs a rotating FILE handler, and most test modules
+# call logging_config.setup() at import time. Without this, running the suite
+# writes test noise into the user's REAL ~/.claude-cockpit/logs/cockpit.log.
+# Set at conftest import (before any test module is imported) rather than as an
+# autouse fixture, so it is in force for import-time setup() calls too.
+os.environ.setdefault(
+    "COCKPIT_LOG_DIR", os.path.join(tempfile.gettempdir(), "cockpit-test-logs"),
+)
 
 import server as server_module
 

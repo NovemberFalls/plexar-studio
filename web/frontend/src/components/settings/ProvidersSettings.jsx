@@ -1161,11 +1161,9 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   const vllmStale = staleUrl("providers.vllm.base_url");
   const ollamaStale = staleUrl("providers.ollama.base_url");
 
-  const cliPath = get("claude_cli.binary_path", "") || "";
-  const cliVersion = get("claude_cli.detected_version", null);
-  const cliMismatch =
-    cliPath.length > 0 &&
-    !cliPath.toLowerCase().replace(/\\/g, "/").split("/").pop().startsWith(EXPECTED_CLI);
+  // The claude_cli.* derivations that lived here went with the card above.
+  // Settings ▸ Claude CLI reads the REAL resolved path from GET /api/cli instead
+  // of these settings keys, which nothing on the server ever consulted.
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
@@ -1454,42 +1452,18 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
         <OpenRouterCard get={get} setField={setField} isDirty={isDirty} />
       </div>
 
-      {/* ── Claude CLI ────────────────────────────────── */}
-      <div style={CARD} data-testid="card-claude-cli">
-        <CardHeader icon={Terminal} token="var(--cc-ok)" name="Claude CLI">
-          <Badge>{cliVersion ? `v${cliVersion}` : "version —"}</Badge>
-          <span style={{ marginLeft: "auto" }} />
-          <OverflowButton name="Claude CLI" />
-        </CardHeader>
+      {/* The Claude CLI card that used to live here has been REMOVED, not moved.
+          It rendered a live text input bound to `claude_cli.binary_path` — but
+          `pty_manager.resolve_claude_cli` reads the CLAUDE_CLI_PATH environment
+          variable and otherwise searches PATH; it never consults settings_store.
+          So that field saved, reported itself persisted, and changed which binary
+          spawns not at all. Its sibling note also claimed version detection was
+          unavailable, which stopped being true when GET /api/cli landed.
 
-        <SettingText
-          label="Binary path"
-          path="claude_cli.binary_path"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          placeholder="claude"
-          mono
-          action={<BrowseButton path="claude_cli.binary_path" onBrowse={onBrowse} />}
-        />
-        <FieldRow label="Detected version" hint="Read-only">
-          <span data-testid="cli-detected-version" style={{ fontSize: 12, color: "var(--cc-dim)" }}>
-            {cliVersion || "—"}
-          </span>
-        </FieldRow>
-        {!cliVersion && (
-          <div style={{ fontSize: 11, color: "var(--cc-muted)", paddingTop: 2 }}>
-            Cockpit cannot detect the CLI version yet — version detection lands with
-            backlog 03. Nothing is being hidden; there is simply no detection endpoint.
-          </div>
-        )}
-        {cliMismatch && (
-          <Callout testId="cli-mismatch">
-            This path does not look like the <code>claude</code> binary. Sessions spawn with
-            whatever this points at, so a wrong path means every new session fails to start.
-          </Callout>
-        )}
-      </div>
+          Settings ▸ Claude CLI is the real home: it reports the resolved path,
+          how it was found, the probed version, and a warning when the resolved
+          file is not named `claude`. It deliberately offers no path input, for
+          the same reason this card should not have had one. */}
     </div>
   );
 }

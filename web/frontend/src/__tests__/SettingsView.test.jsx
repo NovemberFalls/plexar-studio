@@ -13,6 +13,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 import SettingsView, { middleEllipsize } from "../components/settings/SettingsView.jsx";
+import { ThemeProvider } from "../hooks/useTheme.jsx";
 import SettingsNav, {
   SETTINGS_GROUPS,
   SETTINGS_SECTION_LABELS,
@@ -173,14 +174,46 @@ describe("SettingsView — page frame", () => {
     });
   });
 
-  it("renders an honest not-built panel for every other section", async () => {
-    render(<SettingsView section="theme" onSelectSection={() => {}} providersPage={ProvidersStub} />);
+  /* This used to assert the not-built panel via `theme`, which was correct when
+     `providers` was the only real page. Twelve of the fourteen sections now have
+     one, so the case is pinned on a section that is GENUINELY unbuilt instead --
+     and `layout` is the deliberate one: pane count and sidebar width are already
+     set by direct manipulation and persist, so a page for them would create a
+     second source of truth. If someone builds it, this test should fail and be
+     retired, not edited to point at yet another section. */
+  it("renders an honest not-built panel for a section that genuinely has no page", async () => {
+    render(<SettingsView section="layout" onSelectSection={() => {}} providersPage={ProvidersStub} />);
     await waitFor(() => {
-      expect(screen.getByText("Theme & glow is not built yet")).toBeInTheDocument();
+      expect(screen.getByText("Layout & panes is not built yet")).toBeInTheDocument();
     });
-    // Names where the setting lives today.
-    expect(screen.getByText(/palette popover in the rail/)).toBeInTheDocument();
+    // Still names where the setting lives today rather than leaving a blank panel.
+    expect(screen.getByText(/adjusted directly in the shell/)).toBeInTheDocument();
     expect(screen.queryByTestId("providers-page")).not.toBeInTheDocument();
+  });
+
+  it("routes every built section to a real page, not the not-built panel", async () => {
+    // The registry is the thing under test: a page that exists but is missing
+    // from PAGES silently falls through to "not built yet", which would be a
+    // lie that no other test catches.
+    for (const id of [
+      "claude-cli", "keys", "session-defaults", "terminal", "theme",
+      "tokens", "reporting", "pricing", "keybindings", "updates", "diagnostics",
+    ]) {
+      // ThemeSettings consumes the THROWING useTheme, which is correct for a
+      // page that genuinely needs the palette — main.jsx wraps the whole app in
+      // ThemeProvider. The harness has to match that, not the page be loosened.
+      const { unmount } = render(
+        <ThemeProvider>
+          <SettingsView section={id} onSelectSection={() => {}} providersPage={ProvidersStub} />
+        </ThemeProvider>,
+      );
+      // Assert on the PANEL, not on the phrase. Matching /is not built yet/ as
+      // text gave a false positive: utils/keybindings.js honestly notes that the
+      // command palette itself is not built (Ctrl+K opens the Projects drawer),
+      // and that truthful copy is page content, not a missing page.
+      await waitFor(() => expect(screen.queryByTestId("not-built-panel")).not.toBeInTheDocument());
+      unmount();
+    }
   });
 
   it("disables Save changes until something is dirty", async () => {

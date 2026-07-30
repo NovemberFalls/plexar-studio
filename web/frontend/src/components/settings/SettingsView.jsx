@@ -30,6 +30,42 @@ import ProvidersSettings from "./ProvidersSettings.jsx";
 import TokensSettings from "./TokensSettings.jsx";
 import SpendGuardrails from "./SpendGuardrails.jsx";
 import PricingSettings from "./PricingSettings.jsx";
+import ClaudeCliSettings from "./ClaudeCliSettings.jsx";
+import KeysSettings from "./KeysSettings.jsx";
+import SessionDefaultsSettings from "./SessionDefaultsSettings.jsx";
+import TerminalSettings from "./TerminalSettings.jsx";
+import ThemeSettings from "./ThemeSettings.jsx";
+import KeybindingsSettings from "./KeybindingsSettings.jsx";
+import UpdatesSettings from "./UpdatesSettings.jsx";
+import DiagnosticsSettings from "./DiagnosticsSettings.jsx";
+
+/**
+ * section id -> page component. `providers` is handled separately because it
+ * carries a test seam for a missing module; everything else resolves here.
+ *
+ * A section id present in SettingsNav but ABSENT from this table falls through
+ * to NotBuiltPanel, which is the honest default: it names what will live there
+ * and where the setting lives today. `layout` is the only such id left, and
+ * deliberately so -- pane count and sidebar width are already set by direct
+ * manipulation and persist, so a page duplicating them would create a second
+ * source of truth for values the shell already owns.
+ */
+const PAGES = {
+  general: null, // no page yet -- NotBuiltPanel handles it
+  "claude-cli": ClaudeCliSettings,
+  keys: KeysSettings,
+  "session-defaults": SessionDefaultsSettings,
+  permissions: null,
+  layout: null, // deliberately unbuilt -- see above
+  terminal: TerminalSettings,
+  theme: ThemeSettings,
+  tokens: TokensSettings,
+  reporting: SpendGuardrails,
+  pricing: PricingSettings,
+  keybindings: KeybindingsSettings,
+  updates: UpdatesSettings,
+  diagnostics: DiagnosticsSettings,
+};
 
 /** Page title + one-line description per section id (11px description line). */
 const PAGE_META = {
@@ -104,50 +140,25 @@ const NOT_BUILT = {
     will: "Default workspace folder, restore-sessions-on-launch, max concurrent sessions, and the managed-service toggles (lane broker, vLLM).",
     today: "environment variables on the server (COCKPIT_MANAGED_BROKER, COCKPIT_MANAGED_VLLM, MAX_SESSIONS).",
   },
-  "claude-cli": {
-    will: "Path to the claude executable, extra CLI flags, and the environment overrides applied to every spawned session.",
-    today: "hard-coded in pty_manager.py — not user-configurable.",
-  },
-  keys: {
-    will: "Set / clear the Anthropic and OpenRouter keys, with a set/not-set indicator only — key values are never sent to the browser.",
-    today: "the OpenRouter key dialog in the top bar, plus the ANTHROPIC_API_KEY environment variable.",
-  },
-  "session-defaults": {
-    will: "Default model, effort level, and fast mode for new sessions, per provider.",
-    today: "the DEFAULTS pill in the command bar.",
-  },
   permissions: {
     will: "Default permission mode for new sessions and which modes are allowed at all.",
     today: "the DEFAULTS pill in the command bar and the per-session Inspector.",
   },
   layout: {
     will: "Default pane count, lane strip visibility, inspector-open-by-default, and sidebar width.",
-    today: "adjusted directly in the shell and remembered in browser storage.",
+    today: "adjusted directly in the shell and remembered in browser storage — which is why this page may never need to exist. A second source of truth for values you already set by dragging is worse than none.",
   },
-  terminal: {
-    will: "Font family and size, scrollback length, cursor style, and Ctrl+C / paste behaviour.",
-    today: "hard-coded in TerminalPane.jsx.",
-  },
-  theme: {
-    will: "Palette choice, dark/light variant, and glow size as a first-class setting.",
-    today: "the palette popover in the rail.",
-  },
-  /* `tokens`, `reporting` and `pricing` are BUILT — their entries were removed
-     rather than left here as unreachable copy. Note the old `pricing` entry
-     promised "an editable per-model price table"; there is no price-editing
-     endpoint, so the real page states plainly that it is read-only. */
-  keybindings: {
-    will: "A remappable list of every Cockpit shortcut with conflict detection.",
-    today: null,
-  },
-  updates: {
-    will: "Update channel, check-on-launch toggle, and a manual check with the current version.",
-    today: "automatic on launch in the desktop app; there is no control.",
-  },
-  diagnostics: {
-    will: "Log level, a reveal-logs action, and a diagnostics bundle for bug reports.",
-    today: "log files under the Cockpit data directory.",
-  },
+  /* Every other section is BUILT. Their entries were REMOVED rather than left
+     here as unreachable copy, and two of them had gone factually wrong:
+       - `claude-cli` claimed the path was "hard-coded in pty_manager.py — not
+         user-configurable". False: pty_manager has always honoured a
+         CLAUDE_CLI_PATH override and searched known install locations. The path
+         was simply never exposed. GET /api/cli exposes it now.
+       - `diagnostics` claimed logs lived in "log files under the Cockpit data
+         directory". Also false: logging_config had NO FileHandler at all, so
+         nothing was ever written to disk. It does now, bounded and rotated.
+     A "not built yet" panel that misdescribes the current state is worse than a
+     blank one, because it sends the reader somewhere that does not exist. */
 };
 
 /** Middle-ellipsize a long path so both the start and the filename stay legible. */
@@ -173,6 +184,7 @@ function NotBuiltPanel({ sectionId }) {
         padding: 18,
         maxWidth: 620,
       }}
+      data-testid="not-built-panel"
     >
       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--cc-fg)", marginBottom: 8 }}>
         {label} is not built yet
@@ -457,27 +469,31 @@ export default function SettingsView({
             )}
           </div>
 
-          {/* page content */}
-          {current === "providers" ? (
-            ProvidersPage ? (
-              <ProvidersPage get={get} setField={setField} isDirty={isDirty} />
-            ) : (
-              <ProvidersUnavailablePanel />
-            )
-          ) : current === "tokens" ? (
-            <TokensSettings
-              get={get}
-              setField={setField}
-              isDirty={isDirty}
-              deleteField={deleteField}
-            />
-          ) : current === "pricing" ? (
-            <PricingSettings />
-          ) : current === "reporting" ? (
-            <SpendGuardrails get={get} setField={setField} isDirty={isDirty} />
-          ) : (
-            <NotBuiltPanel sectionId={current} />
-          )}
+          {/* page content — resolved from PAGES, not a ternary chain. Ten pages
+              deep, a chain is unreadable, and it was also the single line every
+              parallel page author had to edit, which made it a collision point. */}
+          {(() => {
+            if (current === "providers") {
+              return ProvidersPage ? (
+                <ProvidersPage get={get} setField={setField} isDirty={isDirty} />
+              ) : (
+                <ProvidersUnavailablePanel />
+              );
+            }
+            const Page = PAGES[current];
+            if (!Page) return <NotBuiltPanel sectionId={current} />;
+            // Every page takes the same draft props; the ones that own no draft
+            // state (Pricing, Claude CLI, Keys, Updates, Diagnostics) simply do
+            // not destructure them. Passing uniformly keeps this table flat.
+            return (
+              <Page
+                get={get}
+                setField={setField}
+                isDirty={isDirty}
+                deleteField={deleteField}
+              />
+            );
+          })()}
         </div>
       </div>
     </div>

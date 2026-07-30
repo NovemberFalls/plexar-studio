@@ -31,6 +31,7 @@ import logging_config  # noqa: E402 -- deliberately imported after load_dotenv()
 logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
+import pty_manager as pty_manager_module  # noqa: E402 -- module handle for resolve_claude_cli(); see /api/cli
 from pty_manager import ClaudeCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
 # _wait_for_idle_simple / _wrap are underscore-prefixed (bridge_manager treats
@@ -2392,6 +2393,86 @@ async def delete_openrouter_settings():
     return JSONResponse({"ok": True, "configured": key is not None, "source": source})
 
 
+# ── Settings: Anthropic API Key ──────────────────────────
+#
+# Deliberately the same shape as the OpenRouter routes above (GET/POST/DELETE,
+# {configured, source, masked}) so the Settings UI can reuse one card. The key
+# is stored in config.json alongside the OpenRouter key -- NEVER settings.json,
+# which is an exportable, shareable blob.
+#
+# Unlike OpenRouter there is no save-time live validation: Anthropic has no
+# free "who am I" endpoint that is safe to call unconditionally, and a
+# validation probe that costs the user money on every save is worse than a
+# late failure. Format is checked instead.
+
+
+@app.get("/api/settings/anthropic")
+async def get_anthropic_settings():
+    """Report whether an Anthropic key is configured, and from where."""
+    key, source = settings_store.resolve_anthropic_key()
+    return JSONResponse({
+        "configured": key is not None,
+        "source": source,
+        "masked": settings_store.mask_key(key) if key else None,
+    })
+
+
+@app.post("/api/settings/anthropic")
+async def set_anthropic_settings(request: Request):
+    """Persist a user-supplied Anthropic API key. Body: {"key": str}."""
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return JSONResponse({"ok": False, "error": "body must be valid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "body must be a JSON object"}, status_code=400)
+
+    key = body.get("key", "")
+    if not isinstance(key, str):
+        return JSONResponse({"ok": False, "error": "key must be a string"}, status_code=400)
+    key = key.strip()
+    if not key:
+        return JSONResponse({"ok": False, "error": "key must not be empty"}, status_code=400)
+    if any(ch.isspace() for ch in key):
+        return JSONResponse({"ok": False, "error": "key must not contain whitespace"}, status_code=400)
+
+    settings_store.set_provider_ui_key("anthropic", key)
+    masked = settings_store.mask_key(key)
+    logger.info("Anthropic API key saved (masked: %s)", masked)
+    return JSONResponse({"ok": True, "configured": True, "source": "ui", "masked": masked})
+
+
+@app.delete("/api/settings/anthropic")
+async def delete_anthropic_settings():
+    """Remove the UI-configured Anthropic key.
+
+    A key that came from ANTHROPIC_API_KEY cannot be removed from here -- the
+    server does not own the caller's environment. Saying so beats reporting
+    success and leaving the key in force.
+    """
+    removed = settings_store.delete_provider_ui_key("anthropic")
+    key, source = settings_store.resolve_anthropic_key()
+    if source == "env":
+        return JSONResponse({
+            "ok": False,
+            "configured": True,
+            "source": "env",
+            "masked": settings_store.mask_key(key),
+            "error": (
+                "This key comes from the ANTHROPIC_API_KEY environment variable, "
+                "which Cockpit cannot unset. Remove it from your environment (or "
+                "web/.env) and restart Cockpit."
+            ),
+        })
+    return JSONResponse({
+        "ok": True,
+        "removed": removed,
+        "configured": key is not None,
+        "source": source,
+        "masked": settings_store.mask_key(key) if key else None,
+    })
+
+
 @app.get("/api/settings")
 async def get_settings():
     """Return the effective settings blob plus the real resolved path of settings.json.
@@ -2453,6 +2534,323 @@ async def reveal_settings_file():
         subprocess.Popen(argv)
     except (OSError, ValueError) as e:
         logger.warning("Failed to reveal settings folder %s", folder, exc_info=True)
+        return JSONResponse({"ok": False, "path": path, "error": str(e)})
+    return JSONResponse({"ok": True, "path": path})
+
+
+# ── Claude CLI info (Settings ▸ Claude CLI) ──────────────
+#
+# Resolution is NOT re-implemented here. pty_manager.resolve_claude_cli() is
+# the single owner of "where is claude" -- the same function the spawn path
+# uses -- so this endpoint can never disagree with what a new session will
+# actually run. All this route adds is: which mechanism won, the --version
+# string, and whether the resolved file is named what we expect.
+
+# The name we expect the resolved executable to have, extension aside. npm
+# shims are claude.cmd / claude.ps1 and the native installer produces
+# claude.exe / claude, so the STEM is what is meaningful, not the suffix.
+_EXPECTED_CLI_NAME = "claude"
+
+# Hard ceiling on `claude --version`. A hung or half-installed binary must not
+# hold a request open: 3s is far more than a version print needs.
+_CLI_VERSION_TIMEOUT = 3.0
+
+# Version cache, keyed on the resolved path. Held for the LIFETIME OF THE
+# PROCESS (no TTL): the binary behind a given path does not change while
+# cockpit runs, and a user who upgrades the CLI restarts cockpit anyway. A
+# changed resolved path re-probes, since the key no longer matches. Failures
+# are cached too -- otherwise a missing/hanging binary would be re-probed (and
+# re-timed-out) on every page render.
+_cli_version_cache: dict[str, str | None] = {}
+
+# Matches a version number inside whatever the CLI prints, e.g.
+# "1.10.1 (Claude Code)". Nothing is returned unless a real version-shaped
+# token is present -- an error message is not a version.
+_CLI_VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+.\w]*)?")
+
+
+def _probe_cli_version(path: str) -> str | None:
+    """Run ``<path> --version`` and extract the version. None on any failure.
+
+    BLOCKING (subprocess.run) -- callers must use asyncio.to_thread so a slow
+    binary cannot stall the event loop. subprocess.run's own timeout kills the
+    child, so the thread cannot leak either.
+    """
+    try:
+        proc = subprocess.run(
+            [path, "--version"],       # list argv, never shell=True
+            capture_output=True,
+            timeout=_CLI_VERSION_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("`%s --version` timed out after %.0fs", path, _CLI_VERSION_TIMEOUT)
+        return None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        logger.warning("Failed to run `%s --version`", path, exc_info=True)
+        return None
+
+    if proc.returncode != 0:
+        logger.warning("`%s --version` exited %s", path, proc.returncode)
+        return None
+
+    raw = (proc.stdout or b"") + b"\n" + (proc.stderr or b"")
+    text = raw.decode("utf-8", errors="replace").strip()
+    match = _CLI_VERSION_RE.search(text)
+    return match.group(0) if match else None
+
+
+async def _cli_version_for(path: str) -> str | None:
+    """Cached version lookup for *path*."""
+    if path in _cli_version_cache:
+        return _cli_version_cache[path]
+    version = await asyncio.to_thread(_probe_cli_version, path)
+    _cli_version_cache[path] = version
+    return version
+
+
+@app.get("/api/cli")
+async def get_cli_info():
+    """Report the resolved Claude CLI: path, how it was found, and its version.
+
+    ``path: null`` + ``source: "not_found"`` is a real, load-bearing state --
+    cockpit cannot spawn any session at all -- so it is reported plainly
+    rather than as an error.
+    """
+    override_raw = os.environ.get(pty_manager_module._CLAUDE_CLI_PATH_ENV, "").strip().strip('"')
+    override_set = bool(override_raw)
+
+    try:
+        path, _effective_path = pty_manager_module.resolve_claude_cli(os.environ.get("PATH", ""))
+    except ClaudeCliNotFound:
+        # Expected on a machine without Claude Code installed; the payload
+        # below is the honest answer, not a failure.
+        logger.info("/api/cli: no `claude` executable could be resolved")
+        return JSONResponse({
+            "path": None,
+            "source": "not_found",
+            "version": None,
+            "expected_name": _EXPECTED_CLI_NAME,
+            "name_matches": False,
+            "override_env": pty_manager_module._CLAUDE_CLI_PATH_ENV,
+            "override_set": override_set,
+        })
+    except OSError:
+        logger.warning("/api/cli: CLI resolution raised unexpectedly", exc_info=True)
+        return JSONResponse({
+            "path": None,
+            "source": "not_found",
+            "version": None,
+            "expected_name": _EXPECTED_CLI_NAME,
+            "name_matches": False,
+            "override_env": pty_manager_module._CLAUDE_CLI_PATH_ENV,
+            "override_set": override_set,
+        })
+
+    version = await _cli_version_for(path)
+    return JSONResponse({
+        "path": path,
+        # The override is the ONLY branch in resolve_claude_cli that returns
+        # without searching, so an override that is set and resolved is "env";
+        # everything else (PATH hit or install-dir probe) is "search".
+        "source": "env" if override_set else "search",
+        "version": version,
+        "expected_name": _EXPECTED_CLI_NAME,
+        "name_matches": Path(path).stem.lower() == _EXPECTED_CLI_NAME,
+        "override_env": pty_manager_module._CLAUDE_CLI_PATH_ENV,
+        "override_set": override_set,
+    })
+
+
+# ── Version info (Settings ▸ Updates) ────────────────────
+#
+# READ-ONLY. The actual update check is Tauri's updater plugin in the frontend
+# (it owns signature verification against latest.json); nothing here contacts
+# GitHub.
+
+# frontend/package.json is the single source of truth for the app version --
+# vite.config.js injects it as VITE_APP_VERSION and tauri.conf.json reads
+# "../package.json", so reading the same file means the API can never disagree
+# with the number in the title bar or the installer.
+def _app_version() -> str | None:
+    candidates = [Path(__file__).parent / "frontend" / "package.json"]
+    if getattr(sys, "_MEIPASS", None):
+        # PyInstaller bundle layouts, in case package.json is added to the
+        # spec's datas. Absent it, we return null rather than a guess.
+        candidates.insert(0, Path(sys._MEIPASS) / "package.json")
+        candidates.insert(1, Path(sys._MEIPASS) / "frontend_dist" / "package.json")
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            logger.warning("Could not read app version from %s", candidate, exc_info=True)
+            continue
+        version = data.get("version") if isinstance(data, dict) else None
+        if isinstance(version, str) and version:
+            return version
+    return None
+
+
+@app.get("/api/version")
+async def get_version_info():
+    """App / CLI / Python / platform versions. Never 500s; unknowns are null."""
+    cli_version = None
+    try:
+        path, _effective = pty_manager_module.resolve_claude_cli(os.environ.get("PATH", ""))
+    except (ClaudeCliNotFound, OSError):
+        path = None
+    if path:
+        cli_version = await _cli_version_for(path)
+
+    return JSONResponse({
+        "app": _app_version(),
+        "cli": cli_version,
+        "python": ".".join(str(p) for p in sys.version_info[:3]),
+        "platform": sys.platform,
+    })
+
+
+# ── Logs (Settings ▸ Diagnostics) ────────────────────────
+
+_LOG_LINES_DEFAULT = 500
+_LOG_LINES_MAX = 2000
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
+# Redaction applied to EVERY line handed to the browser. The log viewer's
+# output ends up in screenshots the owner pastes into chats, so a secret that
+# was mis-logged upstream must not become a second leak here. Patterns:
+#   1. provider keys with a known prefix (sk-ant-…, sk-or-…, sk-proj-…, plain
+#      sk-… followed by 16+ key characters) -- the prefix is kept so the line
+#      still says WHICH kind of key it was;
+#   2. Authorization: Bearer <token> -- the token, not the header.
+_REDACTIONS = (
+    (re.compile(r"\b(sk-(?:ant|or|proj|live|test)-)[A-Za-z0-9_\-]{6,}"), r"\1<redacted>"),
+    (re.compile(r"\b(sk-)[A-Za-z0-9_\-]{16,}"), r"\1<redacted>"),
+    (re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._\-]{12,}"), r"\1<redacted>"),
+)
+
+
+def _redact(line: str) -> str:
+    """Replace secret-shaped substrings in *line* with a marker."""
+    for pattern, replacement in _REDACTIONS:
+        line = pattern.sub(replacement, line)
+    return line
+
+
+def _tail_file(path: Path, lines: int) -> tuple[list[str], bool, int]:
+    """Return (last *lines* lines, truncated, size_bytes) for *path*.
+
+    Reads BACKWARDS in 64 KiB blocks from the end of the file, so tailing a
+    multi-megabyte log costs a couple of reads instead of loading the whole
+    file. A missing/unreadable file is a clean empty result, never an error.
+    """
+    block = 64 * 1024
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return [], False, 0
+
+    chunks: list[bytes] = []
+    newlines = 0
+    reached_start = False
+    try:
+        with path.open("rb") as f:
+            pos = size
+            while pos > 0 and newlines <= lines:
+                read_size = min(block, pos)
+                pos -= read_size
+                f.seek(pos)
+                data = f.read(read_size)
+                chunks.insert(0, data)
+                newlines += data.count(b"\n")
+            reached_start = pos == 0
+    except OSError:
+        logger.warning("Failed to tail log file %s", path, exc_info=True)
+        return [], False, size
+
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    region = text.splitlines()
+    # The first line of the read region may be a partial line unless we
+    # reached byte 0 -- drop it rather than show half a message.
+    if not reached_start and region:
+        region = region[1:]
+    truncated = not reached_start or len(region) > lines
+    return [_redact(line) for line in region[-lines:]], truncated, size
+
+
+@app.get("/api/logs")
+async def get_logs(lines: str | None = None):
+    """Return the tail of the cockpit log file, secret-redacted.
+
+    ``lines`` is taken as a raw string and parsed here (rather than declared
+    ``int``) so junk input falls back to the default instead of producing
+    FastAPI's 422 -- a log viewer should always render something.
+    """
+    try:
+        count = _LOG_LINES_DEFAULT if lines is None else int(lines)
+    except (TypeError, ValueError):
+        count = _LOG_LINES_DEFAULT
+    count = max(1, min(_LOG_LINES_MAX, count))
+
+    path = logging_config.log_file_path()
+    tail, truncated, size = await asyncio.to_thread(_tail_file, Path(path), count)
+    return JSONResponse({
+        "path": path,
+        "lines": tail,
+        "truncated": truncated,
+        "size_bytes": size,
+        "rotation": logging_config.rotation_config(),
+        "file_logging": logging_config.file_logging_active(),
+    })
+
+
+@app.get("/api/logs/level")
+async def get_log_level():
+    """Current level of the ``cockpit`` logger tree, plus the accepted values."""
+    return JSONResponse({"level": logging_config.current_level(), "levels": list(_LOG_LEVELS)})
+
+
+@app.put("/api/logs/level")
+async def put_log_level(request: Request):
+    """Set the runtime level for the ``cockpit`` logger tree. Body: {"level": str}."""
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return JSONResponse({"error": "body must be valid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+
+    level = body.get("level")
+    if not isinstance(level, str) or level.upper() not in _LOG_LEVELS:
+        return JSONResponse(
+            {"error": f"level must be one of {', '.join(_LOG_LEVELS)}"},
+            status_code=400,
+        )
+
+    level = level.upper()
+    logging.getLogger("cockpit").setLevel(getattr(logging, level))
+    logger.info("Log level set to %s", level)
+    return JSONResponse({"ok": True, "level": logging_config.current_level()})
+
+
+@app.post("/api/logs/reveal")
+async def reveal_log_folder():
+    """Best-effort: open the log folder in the OS file manager. Always 200."""
+    path = logging_config.log_file_path()
+    folder = str(Path(path).parent)
+    try:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            argv = ["explorer", folder]
+        elif sys.platform == "darwin":
+            argv = ["open", folder]
+        else:
+            argv = ["xdg-open", folder]
+        # List argv, never shell=True.
+        subprocess.Popen(argv)
+    except (OSError, ValueError) as e:
+        logger.warning("Failed to reveal log folder %s", folder, exc_info=True)
         return JSONResponse({"ok": False, "path": path, "error": str(e)})
     return JSONResponse({"ok": True, "path": path})
 
