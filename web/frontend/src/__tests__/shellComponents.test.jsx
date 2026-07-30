@@ -12,7 +12,7 @@
  * and a real Set — not object literals — so a future regression to the wrong
  * container type fails loudly instead of silently rendering nothing.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import Rail from "../components/shell/Rail";
@@ -333,6 +333,36 @@ describe("Rail and CommandBar smoke render (basic prop contracts)", () => {
     );
     expect(screen.getByText("Workspace")).toBeInTheDocument();
     expect(screen.getByText("opus")).toBeInTheDocument();
+  });
+
+  it("CommandBar carries the subscription usage pill on the always-visible bar", () => {
+    /**
+     * REGRESSION: this pill first shipped inside TopBar, which App.jsx renders
+     * ONLY within the DEFAULTS dropdown. It was therefore invisible until the
+     * user opened that popover — useless for an at-a-glance quota readout, and
+     * the owner reported simply not seeing it. It belongs on CommandBar, which
+     * is the bar that is always on screen.
+     */
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ available: false, reason: "no_credentials", detail: "x", limits: [] }),
+      })
+    );
+    render(
+      <CommandBar
+        title="Workspace"
+        workspaceName={null}
+        onOpenPalette={() => {}}
+        model="opus"
+        permissionMode="default"
+        effort="auto"
+        onOpenDefaults={() => {}}
+      />
+    );
+    expect(
+      screen.getByRole("button", { name: /usage limits/i })
+    ).toBeInTheDocument();
   });
 });
 
