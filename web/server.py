@@ -2143,6 +2143,71 @@ async def delete_openrouter_settings():
     return JSONResponse({"ok": True, "configured": key is not None, "source": source})
 
 
+@app.get("/api/settings")
+async def get_settings():
+    """Return the effective settings blob plus the real resolved path of settings.json.
+
+    The path is reported so the Settings UI can show the user where the file
+    actually lives instead of guessing.
+    """
+    return JSONResponse({
+        "path": settings_store.settings_path(),
+        "settings": settings_store.read_settings(),
+    })
+
+
+@app.put("/api/settings")
+async def put_settings(request: Request):
+    """Apply a PARTIAL nested settings patch.
+
+    Body is a nested dict containing only the keys to change. Validation is
+    all-or-nothing: a single bad value rejects the whole patch with 400 and
+    nothing is written.
+    """
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return JSONResponse({"error": "body must be valid JSON"}, status_code=400)
+
+    try:
+        effective = settings_store.update_settings(body)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    # Log the sections touched, never the values -- settings can carry user
+    # palettes and keybindings, and the line should stay short.
+    sections = ", ".join(sorted(body)) if isinstance(body, dict) else ""
+    logger.info("Settings updated (sections: %s)", sections or "none")
+    return JSONResponse({"path": settings_store.settings_path(), "settings": effective})
+
+
+@app.post("/api/settings/reveal")
+async def reveal_settings_file():
+    """Best-effort: open the folder containing settings.json in the OS file manager.
+
+    The folder is created first so a reveal on a fresh install (where nothing
+    has been saved yet) still works. A failed reveal is a UI inconvenience, not
+    a server error, so this always returns 200.
+    """
+    path = settings_store.settings_path()
+    folder = str(Path(path).parent)
+    try:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            argv = ["explorer", folder]
+        elif sys.platform == "darwin":
+            argv = ["open", folder]
+        else:
+            argv = ["xdg-open", folder]
+        # List argv, never shell=True -- the path is server-derived but a shell
+        # invocation here would be a needless injection surface.
+        subprocess.Popen(argv)
+    except (OSError, ValueError) as e:
+        logger.warning("Failed to reveal settings folder %s", folder, exc_info=True)
+        return JSONResponse({"ok": False, "path": path, "error": str(e)})
+    return JSONResponse({"ok": True, "path": path})
+
+
 # ── Local model broker (LM Studio lane broker) ───────────
 
 # Base URL of the local-lane broker (queue + metrics). Read-only endpoints.

@@ -21,6 +21,8 @@ import CommandBar from "./components/shell/CommandBar";
 import LaneStrip from "./components/shell/LaneStrip";
 import Inspector from "./components/shell/Inspector";
 import StatusStrip from "./components/shell/StatusStrip";
+import SettingsView from "./components/settings/SettingsView";
+import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneLive, predictedWaitSeconds, pressureFraction } from "./utils/laneMath";
 
 const LOCATIONS_KEY = "cockpit-locations";
@@ -245,6 +247,10 @@ export default function App() {
   // Fleet and Broker to both be "open" at once, each clearing the other by
   // hand at every call site.
   const [activeSection, setActiveSection] = useState("work"); // work|projects|fleet|engine|reports|settings
+  // Which Settings page is showing. Kept in App rather than inside SettingsView
+  // so it survives navigating away to Workspace and back, and so a future
+  // command-palette deep link ("go to Settings > Design tokens") can set it.
+  const [settingsSection, setSettingsSection] = useState(DEFAULT_SETTINGS_SECTION);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   // Last pane slot each session occupied, so activating a session from
   // Projects/Fleet/palette focuses its own pane instead of reshuffling the grid.
@@ -2386,26 +2392,36 @@ export default function App() {
               })}
             </main>
 
-            {/* Inspector follows pane focus. Only in Workspace — the full-area
-                sections own the whole content width. */}
-            {(activeSection === "reports" || activeSection === "settings") && (
+            {/* Settings owns INTENT (Phase 4). It renders instead of the panes +
+                Inspector, but the pane grid above is only display:none'd — the
+                terminals stay mounted so xterm and every WebSocket survive the
+                trip through Settings. */}
+            {activeSection === "settings" && (
+              <SettingsView
+                section={settingsSection}
+                onSelectSection={setSettingsSection}
+              />
+            )}
+
+            {activeSection === "reports" && (
               <div
                 className="flex-1 min-w-0 flex items-center justify-center"
                 style={{ background: "var(--cc-bg)", padding: 24 }}
               >
                 <div style={{ textAlign: "center", maxWidth: 420 }}>
                   <div style={{ fontSize: 15, fontWeight: 700, color: "var(--cc-fg)", marginBottom: 8 }}>
-                    {SECTION_TITLES[activeSection]} is not built yet
+                    {SECTION_TITLES.reports} is not built yet
                   </div>
                   <p style={{ fontSize: 12, lineHeight: 1.6, color: "var(--cc-muted)" }}>
-                    {activeSection === "reports"
-                      ? "Token and cost accounting down to individual traces. Until this lands, per-model reporting lives in Engine."
-                      : "Every tunable value in one addressable place, including the design tokens. Until this lands, use the pickers in DEFAULTS and the Engine view."}
+                    Token and cost accounting down to individual traces. Until this lands, per-model
+                    reporting lives in Engine.
                   </p>
                 </div>
               </div>
             )}
 
+            {/* Inspector follows pane focus. Only in Workspace — the full-area
+                sections own the whole content width. */}
             {inspectorOpen && activeSection === "work" && (
               <Inspector
                 session={focusedSession}

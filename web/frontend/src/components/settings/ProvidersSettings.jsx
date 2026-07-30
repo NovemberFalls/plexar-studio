@@ -1,0 +1,1223 @@
+/**
+ * ProvidersSettings — the Settings ▸ Providers & Endpoints page (Phase 4).
+ *
+ * INTENT, NOT A DASHBOARD. Every editable value is a draft field owned by the
+ * Settings shell and written through `setField(dottedPath, value)`; nothing is
+ * kept in local component state or localStorage. The shell owns saving, so this
+ * page renders no save button.
+ *
+ * Live data is read-only, best-effort, and fetched ONCE on mount (plus on an
+ * explicit "Test" click) — never on an interval:
+ *   GET /api/local/providers        → capability chips + which backends exist
+ *   GET /api/local/status           → lane-broker identity fingerprint + managed
+ *   GET /api/local/{id}/health      → per-backend reachability pill
+ *   GET|POST|DELETE /api/settings/openrouter → the OpenRouter key (masked only)
+ *
+ * The OpenRouter card ABSORBS OpenRouterModal.jsx: same three routes, same
+ * masking contract (the server never returns a full key, and the paste field
+ * only ever holds what the user is typing right now).
+ *
+ * Deliberately inert controls (honest gaps, not fake affordances):
+ *   - every `Browse` button unless the caller passes `onBrowse` (native folder
+ *     picker lands with Phase 9)
+ *   - vLLM `Start engine` (lifecycle control lands with Engine ▸ Live; there is
+ *     no start endpoint today)
+ *   - each card's `Ellipsis` overflow button (no menu actions exist yet)
+ *   - Claude CLI detected version (no detection endpoint; backlog 03)
+ *
+ * Props (pinned by the Settings shell):
+ *   get(dottedPath, fallback) → current DRAFT value
+ *   setField(dottedPath, value) → record an unsaved edit
+ *   isDirty(dottedPath) → bool; true fields highlight in --cc-waiting
+ *   onBrowse(dottedPath) → optional; enables the Browse buttons when supplied
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import {
+  Boxes,
+  Cloud,
+  Cpu,
+  Ellipsis,
+  Eye,
+  EyeOff,
+  FolderOpen,
+  Layers,
+  Route,
+  Terminal,
+  TriangleAlert,
+} from "lucide-react";
+
+// ── tokens / shared style fragments ───────────────────────
+const ACCENT_FG = "#0f1216"; // the one permitted literal: accent-button foreground
+const DIRTY = "var(--cc-waiting)";
+const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
+
+const CARD = {
+  borderRadius: 12,
+  background: "var(--cc-surface)",
+  border: "1px solid var(--cc-border)",
+  padding: 16,
+};
+
+const LABEL = {
+  fontSize: 10,
+  fontWeight: 800,
+  textTransform: "uppercase",
+  letterSpacing: ".08em",
+  color: "var(--cc-muted)",
+};
+
+const FIELD_GRID = {
+  display: "grid",
+  gridTemplateColumns: "200px 1fr 108px",
+  gap: 8,
+  alignItems: "center",
+  padding: "6px 0",
+};
+
+// The full capability vocabulary the broker contract defines. A provider that
+// does not declare one renders its chip dimmed rather than hiding it — the
+// absence is the information.
+const ALL_CAPABILITIES = ["models", "health", "queue", "metrics", "spill", "traces"];
+
+/** Cockpit's expected Claude CLI binary name — anything else earns a warning callout. */
+const EXPECTED_CLI = "claude";
+
+// ── primitives ────────────────────────────────────────────
+
+function SectionTitle({ children, note }) {
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+      <span style={{ ...LABEL, fontSize: 10, color: "var(--cc-fg)" }}>{children}</span>
+      {note && (
+        <span style={{ fontSize: 10, color: "var(--cc-muted)" }}>{note}</span>
+      )}
+    </div>
+  );
+}
+
+/** Status pill: a dot + text, tinted by a state token. */
+function Pill({ token, children, title, testId }) {
+  return (
+    <span
+      data-testid={testId}
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        height: 20,
+        padding: "0 8px",
+        borderRadius: 999,
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: ".06em",
+        textTransform: "uppercase",
+        color: token,
+        background: tint(token, 8),
+        border: `1px solid ${tint(token, 35)}`,
+        flexShrink: 0,
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{ width: 5, height: 5, borderRadius: 999, background: token, flexShrink: 0 }}
+      />
+      {children}
+    </span>
+  );
+}
+
+/** Small neutral badge (kind label, "Default", model counts). */
+function Badge({ children, token = "var(--cc-dim)" }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        height: 18,
+        padding: "0 7px",
+        borderRadius: 7,
+        fontSize: 9,
+        fontWeight: 800,
+        letterSpacing: ".08em",
+        textTransform: "uppercase",
+        color: token,
+        background: tint(token, 8),
+        border: `1px solid ${tint(token, 30)}`,
+        flexShrink: 0,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** 108px action button that lives in the third grid column. */
+function ActionButton({ label, onClick, disabled, title, accent, testId }) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      onClick={onClick}
+      disabled={disabled}
+      title={title || label}
+      aria-label={label}
+      className="rounded transition-colors hover-bg-elevated"
+      style={{
+        width: "100%",
+        height: 26,
+        fontSize: 11,
+        fontWeight: 600,
+        borderRadius: 7,
+        background: accent && !disabled ? "var(--cc-accent)" : "var(--cc-elev)",
+        color: accent && !disabled ? ACCENT_FG : "var(--cc-fg)",
+        border: `1px solid ${accent && !disabled ? "transparent" : "var(--cc-border)"}`,
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** The 22px square kind badge shown at the left of each backend card header. */
+function KindIcon({ icon: Icon, token }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 22,
+        height: 22,
+        borderRadius: 7,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: token,
+        background: tint(token, 8),
+        border: `1px solid ${tint(token, 30)}`,
+        flexShrink: 0,
+      }}
+    >
+      <Icon size={12} />
+    </span>
+  );
+}
+
+/** Overflow affordance. Deliberately inert — no card-level menu actions exist. */
+function OverflowButton({ name }) {
+  return (
+    <button
+      type="button"
+      disabled
+      data-testid={`overflow-${name}`}
+      aria-label={`More ${name} actions`}
+      title="No overflow actions yet — card-level actions arrive with a later phase"
+      className="rounded"
+      style={{
+        width: 22,
+        height: 22,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 7,
+        background: "none",
+        border: "1px solid var(--cc-border)",
+        color: "var(--cc-muted)",
+        opacity: 0.5,
+        cursor: "not-allowed",
+        flexShrink: 0,
+      }}
+    >
+      <Ellipsis size={12} />
+    </button>
+  );
+}
+
+function CardHeader({ icon, token, name, children }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        flexWrap: "wrap",
+        paddingBottom: 10,
+        marginBottom: 4,
+        borderBottom: "1px solid var(--cc-line)",
+      }}
+    >
+      {icon && <KindIcon icon={icon} token={token} />}
+      <span style={{ fontSize: 13, fontWeight: 700, color: "var(--cc-fg)" }}>{name}</span>
+      {children}
+    </div>
+  );
+}
+
+/** label / control / action row. */
+function FieldRow({ label, hint, action, children }) {
+  return (
+    <div style={FIELD_GRID}>
+      <div style={{ minWidth: 0 }}>
+        <div style={LABEL}>{label}</div>
+        {hint && (
+          <div style={{ fontSize: 9, color: "var(--cc-muted)", marginTop: 2 }}>{hint}</div>
+        )}
+      </div>
+      <div style={{ minWidth: 0 }}>{children}</div>
+      <div>{action ?? null}</div>
+    </div>
+  );
+}
+
+/**
+ * A draft text field. The value lives in the Settings draft (via get/setField)
+ * — never in local state — so the shell's dirty tracking and save are authoritative.
+ */
+function SettingText({ label, path, get, setField, isDirty, placeholder, hint, action, mono }) {
+  const dirty = Boolean(isDirty?.(path));
+  return (
+    <FieldRow label={label} hint={hint} action={action}>
+      <input
+        type="text"
+        value={get(path, "") ?? ""}
+        onChange={(e) => setField(path, e.target.value)}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        aria-label={label}
+        data-testid={`field-${path}`}
+        data-dirty={dirty ? "true" : "false"}
+        className="w-full rounded"
+        style={{
+          height: 26,
+          padding: "0 8px",
+          fontSize: 11,
+          fontFamily: mono ? "var(--font-mono, monospace)" : "inherit",
+          borderRadius: 7,
+          background: "var(--cc-elev)",
+          border: `1px solid ${dirty ? DIRTY : "var(--cc-border)"}`,
+          color: dirty ? DIRTY : "var(--cc-fg)",
+          outline: "none",
+        }}
+      />
+    </FieldRow>
+  );
+}
+
+/** A draft boolean rendered as a two-segment switch. */
+function SettingToggle({ label, path, get, setField, isDirty, hint, title, onLabel = "On", offLabel = "Off" }) {
+  const dirty = Boolean(isDirty?.(path));
+  const on = Boolean(get(path, false));
+  const segment = (active, text, next) => (
+    <button
+      key={text}
+      type="button"
+      role="radio"
+      aria-checked={active}
+      aria-label={`${label}: ${text}`}
+      onClick={() => setField(path, next)}
+      className="transition-colors hover-bg-surface"
+      style={{
+        height: 22,
+        padding: "0 10px",
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: ".06em",
+        textTransform: "uppercase",
+        border: "none",
+        background: active ? "var(--cc-accent)" : "transparent",
+        color: active ? ACCENT_FG : "var(--cc-dim)",
+        cursor: "pointer",
+      }}
+    >
+      {text}
+    </button>
+  );
+  return (
+    <FieldRow label={label} hint={hint}>
+      <div
+        role="radiogroup"
+        aria-label={label}
+        title={title}
+        data-testid={`field-${path}`}
+        data-dirty={dirty ? "true" : "false"}
+        style={{
+          display: "inline-flex",
+          overflow: "hidden",
+          borderRadius: 8,
+          background: "var(--cc-elev)",
+          border: `1px solid ${dirty ? DIRTY : "var(--cc-border)"}`,
+        }}
+      >
+        {segment(!on, offLabel, false)}
+        {segment(on, onLabel, true)}
+      </div>
+    </FieldRow>
+  );
+}
+
+/** A draft numeric slider. */
+function SettingSlider({ label, path, get, setField, isDirty, min, max, step, fallback, format, hint }) {
+  const dirty = Boolean(isDirty?.(path));
+  const raw = get(path, fallback);
+  const value = typeof raw === "number" && !Number.isNaN(raw) ? raw : fallback;
+  return (
+    <FieldRow label={label} hint={hint}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => setField(path, Number(e.target.value))}
+          aria-label={label}
+          data-testid={`field-${path}`}
+          data-dirty={dirty ? "true" : "false"}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            accentColor: dirty ? DIRTY : "var(--cc-accent)",
+          }}
+        />
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            minWidth: 40,
+            textAlign: "right",
+            color: dirty ? DIRTY : "var(--cc-fg)",
+          }}
+        >
+          {format ? format(value) : value}
+        </span>
+      </div>
+    </FieldRow>
+  );
+}
+
+/** Capability chips — declared caps solid, undeclared dimmed to .5. */
+function CapabilityChips({ capabilities }) {
+  const have = new Set(Array.isArray(capabilities) ? capabilities : []);
+  return (
+    <FieldRow label="Capabilities" hint="Dimmed = not offered by this backend">
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+        {ALL_CAPABILITIES.map((cap) => {
+          const present = have.has(cap);
+          return (
+            <span
+              key={cap}
+              data-testid={`cap-${cap}`}
+              data-present={present ? "true" : "false"}
+              title={present ? `${cap} available` : `${cap} not offered by this backend`}
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: ".06em",
+                textTransform: "uppercase",
+                padding: "2px 7px",
+                borderRadius: 999,
+                color: present ? "var(--cc-accent)" : "var(--cc-muted)",
+                background: present ? tint("var(--cc-accent)", 8) : "transparent",
+                border: `1px solid ${present ? tint("var(--cc-accent)", 30) : "var(--cc-border)"}`,
+                opacity: present ? 1 : 0.5,
+              }}
+            >
+              {cap}
+            </span>
+          );
+        })}
+      </div>
+    </FieldRow>
+  );
+}
+
+/**
+ * Browse — inert unless the shell supplies onBrowse. There is no folder-picker
+ * endpoint wired for these fields yet (Phase 9); a disabled button that says so
+ * is honest, a button that opens nothing is not.
+ */
+function BrowseButton({ path, onBrowse }) {
+  const enabled = typeof onBrowse === "function";
+  return (
+    <ActionButton
+      label="Browse"
+      testId={`browse-${path}`}
+      onClick={enabled ? () => onBrowse(path) : undefined}
+      disabled={!enabled}
+      title={
+        enabled
+          ? "Choose a path"
+          : "Inert for now — the native folder picker arrives with the folder browser (Phase 9)"
+      }
+    />
+  );
+}
+
+/**
+ * The one-line qualifier that must accompany any pill whose meaning depends on
+ * a base URL the user has edited but not saved. Probing hits the SAVED url the
+ * server is using, so an unqualified green pill next to an edited field reads as
+ * "Cockpit told me this URL was fine" — a lie about the screen even when it is
+ * true about the system. We qualify the pill; we never blank it.
+ */
+function StaleUrlNote({ name }) {
+  return (
+    <div
+      data-testid={`stale-url-${name}`}
+      role="note"
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 6,
+        marginTop: 4,
+        fontSize: 11,
+        lineHeight: 1.5,
+        color: DIRTY,
+      }}
+    >
+      <TriangleAlert size={12} style={{ flexShrink: 0, marginTop: 2 }} />
+      <span>
+        Unsaved URL — the status above still reflects the saved URL the server is using.
+        Save to test the edited value.
+      </span>
+    </div>
+  );
+}
+
+/** Title used on every Test button that is blocked by an unsaved URL. */
+const STALE_TEST_TITLE =
+  "Save changes first — Test probes the URL the server is currently using, not the edited value.";
+
+/**
+ * Per-card Test action. Disabled while that card's base URL is dirty, because
+ * the probe cannot reach an unsaved URL (there is no probe-arbitrary-URL
+ * endpoint, and inventing one is out of scope).
+ */
+function TestButton({ name, staleUrl, testing, onTest }) {
+  return (
+    <ActionButton
+      label={testing && !staleUrl ? "Testing…" : "Test"}
+      onClick={staleUrl ? undefined : onTest}
+      disabled={staleUrl || testing}
+      testId={`test-${name}`}
+      title={staleUrl ? STALE_TEST_TITLE : "Re-probe this backend now"}
+    />
+  );
+}
+
+/**
+ * Plain-English note for values that persist correctly but are NOT yet read by
+ * the server (those paths are still env-var driven). A slider that saves cleanly
+ * and changes nothing is a trap, so we say so rather than implying it is live.
+ */
+function NotEnforcedNote({ name, what }) {
+  return (
+    <div
+      data-testid={`not-enforced-${name}`}
+      role="note"
+      style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
+    >
+      {what} is saved, but Cockpit does not apply it yet — the running services still read
+      this from their environment variables. It takes effect when engine lifecycle control
+      lands.
+    </div>
+  );
+}
+
+/** Inline callout, used for honest "not wired yet" and mismatch warnings. */
+function Callout({ token = DIRTY, icon: Icon = TriangleAlert, children, testId }) {
+  return (
+    <div
+      data-testid={testId}
+      role="note"
+      style={{
+        display: "flex",
+        gap: 8,
+        alignItems: "flex-start",
+        marginTop: 10,
+        padding: "8px 10px",
+        borderRadius: 9,
+        fontSize: 11,
+        lineHeight: 1.5,
+        color: token,
+        background: tint(token, 8),
+        border: `1px solid ${tint(token, 35)}`,
+      }}
+    >
+      <Icon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+      <span>{children}</span>
+    </div>
+  );
+}
+
+// ── live-data helpers ─────────────────────────────────────
+
+/** Best-effort JSON GET. Returns null on any failure — callers render "unknown". */
+async function safeGet(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null; // silent by convention: no console noise for background reads
+  }
+}
+
+/**
+ * `stale` = this backend's base URL has unsaved edits, so the probe result
+ * describes the SAVED url. The pill is qualified ("· saved URL") and recolored
+ * to --cc-waiting rather than blanked — the reading is still true, just not
+ * about what is on screen.
+ */
+function reachabilityPill(health, testId, stale) {
+  const q = (text) => (stale ? `${text} · saved URL` : text);
+  const staleTitle = stale ? "Reflects the saved URL, not your edit. " : "";
+  if (health === undefined) {
+    return (
+      <Pill token={stale ? DIRTY : "var(--cc-muted)"} testId={testId} title={staleTitle || undefined}>
+        {q("checking")}
+      </Pill>
+    );
+  }
+  if (health === null) {
+    return (
+      <Pill
+        token={stale ? DIRTY : "var(--cc-muted)"}
+        testId={testId}
+        title={`${staleTitle}Cockpit could not read this backend's health`}
+      >
+        {q("unknown")}
+      </Pill>
+    );
+  }
+  const up = Boolean(health?.provider?.reachable);
+  return (
+    <Pill
+      token={stale ? DIRTY : up ? "var(--cc-idle)" : "var(--cc-error)"}
+      testId={testId}
+      title={`${staleTitle}${up ? "Backend answered a health probe" : "Backend did not answer"}`}
+    >
+      {q(up ? "reachable" : "unreachable")}
+    </Pill>
+  );
+}
+
+function modelCountText(health) {
+  const n = health?.provider?.models_loaded;
+  if (typeof n !== "number") return "models n/a";
+  return `${n} loaded`;
+}
+
+// ── OpenRouter card (absorbs OpenRouterModal) ─────────────
+
+function openRouterStatus(configured, source, masked) {
+  if (!configured || !source) return "Not configured";
+  const where = source === "env" ? "environment key" : "saved key";
+  return masked ? `${where} ${masked}` : where;
+}
+
+function OpenRouterCard({ get, setField, isDirty }) {
+  // Server-owned key state (never part of the Settings draft — it is written
+  // through its own routes, exactly as OpenRouterModal did).
+  const [configured, setConfigured] = useState(false);
+  const [source, setSource] = useState(null);
+  const [masked, setMasked] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  // Holds ONLY what the user is typing. Never seeded from the server.
+  const [keyInput, setKeyInput] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+
+  const refresh = useCallback(async () => {
+    const data = await safeGet("/api/settings/openrouter");
+    if (data) {
+      setConfigured(Boolean(data.configured));
+      setSource(data.source ?? null);
+      setMasked(data.masked ?? null);
+    }
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const save = async () => {
+    if (busy) return;
+    if (!keyInput || /\s/.test(keyInput)) {
+      setNotice("Key cannot be empty or contain whitespace.");
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/settings/openrouter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: keyInput }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setConfigured(true);
+        setSource("ui");
+        setMasked(data.masked ?? null);
+        setKeyInput("");
+      } else {
+        setNotice(data.error || "Failed to save the key.");
+      }
+    } catch (err) {
+      setNotice(`Could not reach the server: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/settings/openrouter", { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setConfigured(Boolean(data.configured));
+        setSource(data.source ?? null);
+        setMasked(data.masked ?? null);
+      } else {
+        setNotice(data.error || "Failed to remove the key.");
+      }
+    } catch (err) {
+      setNotice(`Could not reach the server: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={CARD} data-testid="card-openrouter">
+      <CardHeader icon={Cloud} token="var(--cc-macro)" name="OpenRouter">
+        {configured ? (
+          <Pill token="var(--cc-idle)" testId="openrouter-key-pill">Key saved</Pill>
+        ) : (
+          <Pill token="var(--cc-muted)" testId="openrouter-key-pill">
+            {loaded ? "No key" : "checking"}
+          </Pill>
+        )}
+        <span style={{ marginLeft: "auto" }} />
+        <OverflowButton name="OpenRouter" />
+      </CardHeader>
+
+      <SettingToggle
+        label="Enabled"
+        path="providers.openrouter.enabled"
+        get={get}
+        setField={setField}
+        isDirty={isDirty}
+      />
+
+      {/* Masked preview only — the server never returns a full key, and this
+          field is not an input, so there is nothing to reveal. */}
+      <FieldRow label="Current key">
+        <span
+          data-testid="openrouter-masked"
+          style={{ fontSize: 11, color: "var(--cc-dim)", fontFamily: "var(--font-mono, monospace)" }}
+        >
+          {openRouterStatus(configured, source, masked)}
+        </span>
+      </FieldRow>
+
+      <FieldRow
+        label="Paste new key"
+        hint={source === "ui" ? "Saving replaces the current key" : undefined}
+        action={<ActionButton label={busy ? "Saving…" : "Save"} onClick={save} disabled={busy} accent />}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type={showKey ? "text" : "password"}
+            value={keyInput}
+            onChange={(e) => {
+              setKeyInput(e.target.value);
+              setNotice(null);
+            }}
+            placeholder="sk-or-v1-…"
+            autoComplete="off"
+            spellCheck={false}
+            aria-label="Paste new OpenRouter key"
+            data-testid="openrouter-key-input"
+            className="rounded"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              height: 26,
+              padding: "0 8px",
+              fontSize: 11,
+              borderRadius: 7,
+              background: "var(--cc-elev)",
+              border: "1px solid var(--cc-border)",
+              color: "var(--cc-fg)",
+              outline: "none",
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setShowKey((v) => !v)}
+            aria-label={showKey ? "Hide typed key" : "Show typed key"}
+            aria-pressed={showKey}
+            className="rounded transition-colors hover-bg-elevated"
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: 7,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "none",
+              border: "1px solid var(--cc-border)",
+              color: "var(--cc-dim)",
+              flexShrink: 0,
+            }}
+          >
+            {showKey ? <EyeOff size={12} /> : <Eye size={12} />}
+          </button>
+        </div>
+      </FieldRow>
+
+      {source === "ui" && (
+        <FieldRow
+          label="Remove key"
+          hint="Deletes the key Cockpit stored"
+          action={
+            <ActionButton
+              label={busy ? "Removing…" : "Remove"}
+              onClick={remove}
+              disabled={busy}
+              testId="openrouter-remove"
+            />
+          }
+        >
+          <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>
+            Cockpit stops routing through OpenRouter.
+          </span>
+        </FieldRow>
+      )}
+
+      {source === "env" && (
+        <Callout token="var(--cc-accent)" icon={Cloud}>
+          This key comes from the environment. Cockpit cannot remove it here — unset the
+          environment variable instead.
+        </Callout>
+      )}
+
+      {notice && <Callout testId="openrouter-notice">{notice}</Callout>}
+    </div>
+  );
+}
+
+// ── page ──────────────────────────────────────────────────
+
+export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) {
+  const [providers, setProviders] = useState(null); // null = not yet read
+  const [status, setStatus] = useState(undefined); // undefined = checking, null = unknown
+  const [latencyMs, setLatencyMs] = useState(null);
+  const [health, setHealth] = useState({}); // providerId -> payload | null
+  const [testing, setTesting] = useState(false);
+
+  // No setState before the first await: the mount effect calls probe()
+  // directly, and a synchronous setState in an effect body triggers cascading
+  // renders (react-hooks/set-state-in-effect). The in-flight flag is owned by
+  // handleTest, which is only ever reached from a user click.
+  const probe = useCallback(async () => {
+    const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const [list, st] = await Promise.all([
+      safeGet("/api/local/providers"),
+      safeGet("/api/local/status"),
+    ]);
+    const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const rows = Array.isArray(list?.providers) ? list.providers : [];
+    setProviders(rows);
+    setStatus(st ?? null);
+    setLatencyMs(st ? Math.max(0, Math.round(t1 - t0)) : null);
+
+    const results = await Promise.all(
+      rows
+        .filter((p) => Array.isArray(p.capabilities) && p.capabilities.includes("health"))
+        .map(async (p) => [p.id, await safeGet(`/api/local/${p.id}/health`)])
+    );
+    setHealth(Object.fromEntries(results));
+  }, []);
+
+  const handleTest = useCallback(async () => {
+    setTesting(true);
+    try {
+      await probe();
+    } finally {
+      setTesting(false);
+    }
+  }, [probe]);
+
+  useEffect(() => {
+    probe();
+  }, [probe]);
+
+  const rows = providers || [];
+  const byKind = (kind) => rows.find((p) => p.kind === kind) || null;
+  const lmStudio = byKind("lmstudio");
+  const vllm = byKind("vllm");
+  const ollama = byKind("ollama");
+  const healthFor = (p) => (p ? health[p.id] : null);
+
+  // Lane-broker health. /api/local/status returns
+  // {reachable, compatible, service, detail, url, managed} — version/pid are
+  // not in that contract today, so they render only if the server starts
+  // sending them.
+  const brokerToken =
+    status === undefined
+      ? "var(--cc-muted)"
+      : status && status.reachable && status.compatible
+        ? "var(--cc-idle)"
+        : status && status.reachable
+          ? DIRTY
+          : "var(--cc-error)";
+  const brokerText =
+    status === undefined
+      ? "checking"
+      : status === null
+        ? "unknown"
+        : !status.reachable
+          ? "offline"
+          : status.compatible
+            ? `online · ${latencyMs ?? "?"}ms`
+            : "wrong service";
+
+  // A probe can only ever hit the SAVED url — so any card whose base URL is
+  // dirty must disable its Test button and qualify its pill.
+  const staleUrl = (path) => Boolean(isDirty?.(path));
+  const brokerStale = staleUrl("providers.lane_broker.base_url");
+  const lmStudioStale = staleUrl("providers.lmstudio.base_url");
+  const vllmStale = staleUrl("providers.vllm.base_url");
+  const ollamaStale = staleUrl("providers.ollama.base_url");
+
+  const cliPath = get("claude_cli.binary_path", "") || "";
+  const cliVersion = get("claude_cli.detected_version", null);
+  const cliMismatch =
+    cliPath.length > 0 &&
+    !cliPath.toLowerCase().replace(/\\/g, "/").split("/").pop().startsWith(EXPECTED_CLI);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
+      {/* ── Lane broker ───────────────────────────────── */}
+      <div style={CARD} data-testid="card-lane-broker">
+        <CardHeader icon={Route} token="var(--cc-accent)" name="Lane broker">
+          <Pill
+            token={brokerStale ? DIRTY : brokerToken}
+            testId="broker-health"
+            title={
+              brokerStale
+                ? `Reflects the saved URL, not your edit. ${status?.detail || ""}`.trim()
+                : status?.detail || undefined
+            }
+          >
+            {brokerStale ? `${brokerText} · saved URL` : brokerText}
+          </Pill>
+          {status?.managed === true && <Badge token="var(--cc-accent)">managed by Cockpit</Badge>}
+          {status?.managed === false && status?.reachable && <Badge>external process</Badge>}
+          <span style={{ marginLeft: "auto" }} />
+          <OverflowButton name="lane broker" />
+        </CardHeader>
+
+        <div style={{ fontSize: 11, color: "var(--cc-dim)", padding: "6px 0 2px" }}>
+          {status?.service ? `service: ${status.service}` : "service: unknown"}
+          {status?.version ? ` · version ${status.version}` : ""}
+          {status?.pid ? ` · pid ${status.pid}` : ""}
+          {status?.detail ? ` — ${status.detail}` : ""}
+        </div>
+
+        <SettingText
+          label="Base URL"
+          path="providers.lane_broker.base_url"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="http://127.0.0.1:1235"
+          mono
+          action={
+            <TestButton
+              name="lane-broker"
+              staleUrl={brokerStale}
+              testing={testing}
+              onTest={handleTest}
+            />
+          }
+        />
+        {brokerStale && <StaleUrlNote name="lane-broker" />}
+        <SettingToggle
+          label="Autostart with Cockpit"
+          path="providers.lane_broker.autostart"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          hint="Cockpit runs the broker unless one is already listening"
+        />
+        <SettingSlider
+          label="Lane concurrency"
+          path="providers.lane_broker.concurrency"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          min={1}
+          max={8}
+          step={1}
+          fallback={1}
+          hint="1 keeps decode fastest"
+        />
+        <NotEnforcedNote name="lane-broker" what="Lane concurrency" />
+      </div>
+
+      {/* ── Backends ──────────────────────────────────── */}
+      <SectionTitle note="each backend sits behind the broker unless noted">
+        Backends behind the broker
+      </SectionTitle>
+
+      {/* LM Studio */}
+      <div style={CARD} data-testid="card-lmstudio">
+        <CardHeader icon={Boxes} token="var(--cc-type)" name="LM Studio">
+          {reachabilityPill(
+            providers === null ? undefined : healthFor(lmStudio),
+            "lmstudio-health",
+            lmStudioStale
+          )}
+          {get("providers.lmstudio.default", false) === true && (
+            <Badge token="var(--cc-accent)">Default</Badge>
+          )}
+          <Badge>{modelCountText(healthFor(lmStudio))}</Badge>
+          <span style={{ marginLeft: "auto" }} />
+          <OverflowButton name="LM Studio" />
+        </CardHeader>
+
+        <SettingText
+          label="Base URL"
+          path="providers.lmstudio.base_url"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="http://127.0.0.1:1234"
+          mono
+          action={
+            <TestButton
+              name="lmstudio"
+              staleUrl={lmStudioStale}
+              testing={testing}
+              onTest={handleTest}
+            />
+          }
+        />
+        {lmStudioStale && <StaleUrlNote name="lmstudio" />}
+        <SettingText
+          label="lms CLI binary"
+          path="providers.lmstudio.cli_path"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="lms"
+          mono
+          action={<BrowseButton path="providers.lmstudio.cli_path" onBrowse={onBrowse} />}
+        />
+        <SettingText
+          label="Models folder"
+          path="providers.lmstudio.models_dir"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="~/.lmstudio/models"
+          mono
+          action={<BrowseButton path="providers.lmstudio.models_dir" onBrowse={onBrowse} />}
+        />
+        <SettingToggle
+          label="Default backend"
+          path="providers.lmstudio.default"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          hint="New sessions target this backend"
+          title="LM Studio is currently the only backend the settings schema lets you mark as default."
+        />
+        <CapabilityChips capabilities={lmStudio?.capabilities} />
+      </div>
+
+      {/* vLLM */}
+      <div style={CARD} data-testid="card-vllm">
+        <CardHeader icon={Cpu} token="var(--cc-fn)" name="vLLM">
+          {reachabilityPill(
+            providers === null ? undefined : healthFor(vllm),
+            "vllm-health",
+            vllmStale
+          )}
+          <Pill
+            token={
+              vllmStale
+                ? DIRTY
+                : healthFor(vllm)?.provider?.reachable
+                  ? "var(--cc-idle)"
+                  : "var(--cc-muted)"
+            }
+            testId="vllm-managed-pill"
+            title={
+              vllmStale
+                ? "Reflects the saved URL, not your edit."
+                : "Sourced from /api/local/status and the vLLM health probe"
+            }
+          >
+            {`${get("providers.vllm.managed", false) ? "Managed" : "External"} · ${
+              healthFor(vllm)?.provider?.reachable ? "serving" : "stopped"
+            }${vllmStale ? " · saved URL" : ""}`}
+          </Pill>
+          <Badge>{modelCountText(healthFor(vllm))}</Badge>
+          <span style={{ marginLeft: "auto" }} />
+          <OverflowButton name="vLLM" />
+        </CardHeader>
+
+        <div style={{ fontSize: 11, color: "var(--cc-dim)", padding: "6px 0 2px" }}>
+          Served direct on its own port — not behind the broker, so continuous batching
+          is not serialised.
+        </div>
+
+        <SettingText
+          label="Base URL"
+          path="providers.vllm.base_url"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="http://127.0.0.1:8001"
+          mono
+          action={
+            <TestButton name="vllm" staleUrl={vllmStale} testing={testing} onTest={handleTest} />
+          }
+        />
+        {vllmStale && <StaleUrlNote name="vllm" />}
+        <SettingToggle
+          label="Managed by Cockpit"
+          path="providers.vllm.managed"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          hint="Cockpit owns the container lifecycle"
+        />
+        <SettingText
+          label="Launch command"
+          path="providers.vllm.launch_command"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="docker run …"
+          mono
+          action={
+            <ActionButton
+              label="Start engine"
+              disabled
+              testId="vllm-start"
+              title="Inert for now — engine start/stop lands with Engine ▸ Live. Cockpit has no start endpoint yet."
+            />
+          }
+        />
+        <SettingSlider
+          label="GPU memory utilisation"
+          path="providers.vllm.gpu_util"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          min={0.05}
+          max={1}
+          step={0.05}
+          fallback={0.9}
+          format={(v) => `${Math.round(v * 100)}%`}
+          hint="Share of VRAM vLLM may claim"
+        />
+        <NotEnforcedNote name="vllm" what="GPU memory utilisation" />
+        <CapabilityChips capabilities={vllm?.capabilities} />
+      </div>
+
+      {/* Ollama + OpenRouter — compact half-width pair */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, minWidth: 0 }}>
+        <div style={CARD} data-testid="card-ollama">
+          <CardHeader icon={Layers} token="var(--cc-num)" name="Ollama">
+            {reachabilityPill(
+              providers === null ? undefined : healthFor(ollama),
+              "ollama-health",
+              ollamaStale
+            )}
+            <span style={{ marginLeft: "auto" }} />
+            <OverflowButton name="Ollama" />
+          </CardHeader>
+          <SettingText
+            label="Base URL"
+            path="providers.ollama.base_url"
+            get={get}
+            setField={setField}
+            isDirty={isDirty}
+            placeholder="http://127.0.0.1:11434"
+            mono
+            action={
+              <TestButton
+                name="ollama"
+                staleUrl={ollamaStale}
+                testing={testing}
+                onTest={handleTest}
+              />
+            }
+          />
+          {ollamaStale && <StaleUrlNote name="ollama" />}
+          <SettingToggle
+            label="Enabled"
+            path="providers.ollama.enabled"
+            get={get}
+            setField={setField}
+            isDirty={isDirty}
+          />
+        </div>
+
+        <OpenRouterCard get={get} setField={setField} isDirty={isDirty} />
+      </div>
+
+      {/* ── Claude CLI ────────────────────────────────── */}
+      <div style={CARD} data-testid="card-claude-cli">
+        <CardHeader icon={Terminal} token="var(--cc-ok)" name="Claude CLI">
+          <Badge>{cliVersion ? `v${cliVersion}` : "version —"}</Badge>
+          <span style={{ marginLeft: "auto" }} />
+          <OverflowButton name="Claude CLI" />
+        </CardHeader>
+
+        <SettingText
+          label="Binary path"
+          path="claude_cli.binary_path"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="claude"
+          mono
+          action={<BrowseButton path="claude_cli.binary_path" onBrowse={onBrowse} />}
+        />
+        <FieldRow label="Detected version" hint="Read-only">
+          <span data-testid="cli-detected-version" style={{ fontSize: 12, color: "var(--cc-dim)" }}>
+            {cliVersion || "—"}
+          </span>
+        </FieldRow>
+        {!cliVersion && (
+          <div style={{ fontSize: 11, color: "var(--cc-muted)", paddingTop: 2 }}>
+            Cockpit cannot detect the CLI version yet — version detection lands with
+            backlog 03. Nothing is being hidden; there is simply no detection endpoint.
+          </div>
+        )}
+        {cliMismatch && (
+          <Callout testId="cli-mismatch">
+            This path does not look like the <code>claude</code> binary. Sessions spawn with
+            whatever this points at, so a wrong path means every new session fails to start.
+          </Callout>
+        )}
+      </div>
+    </div>
+  );
+}
