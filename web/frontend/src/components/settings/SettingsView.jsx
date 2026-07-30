@@ -23,6 +23,7 @@ import SettingsNav, {
   DEFAULT_SETTINGS_SECTION,
 } from "./SettingsNav.jsx";
 import ProvidersSettings from "./ProvidersSettings.jsx";
+import TokensSettings from "./TokensSettings.jsx";
 
 /** Page title + one-line description per section id (11px description line). */
 const PAGE_META = {
@@ -232,6 +233,7 @@ export default function SettingsView({
     isDirty,
     get,
     setField,
+    deleteField,
     save,
     revert,
     reveal,
@@ -464,6 +466,13 @@ export default function SettingsView({
             ) : (
               <ProvidersUnavailablePanel />
             )
+          ) : current === "tokens" ? (
+            <TokensSettings
+              get={get}
+              setField={setField}
+              isDirty={isDirty}
+              deleteField={deleteField}
+            />
           ) : (
             <NotBuiltPanel sectionId={current} />
           )}

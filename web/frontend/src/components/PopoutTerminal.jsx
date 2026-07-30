@@ -13,34 +13,8 @@ import {
   ZOOM_STORAGE_KEY,
 } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
+import { buildXtermTheme } from "../utils/xtermTheme";
 import "@xterm/xterm/css/xterm.css";
-
-function buildXtermTheme(theme) {
-  return {
-    background: theme.bg,
-    foreground: theme.fg,
-    cursor: theme.accent,
-    cursorAccent: theme.bg,
-    selectionBackground: `${theme.accent}40`,
-    selectionForeground: theme.fg,
-    black: theme.bgSurface,
-    red: theme.red,
-    green: theme.green,
-    yellow: theme.yellow,
-    blue: theme.accent,
-    magenta: theme.purple,
-    cyan: theme.cyan,
-    white: theme.fg,
-    brightBlack: theme.fgMuted,
-    brightRed: theme.red,
-    brightGreen: theme.green,
-    brightYellow: theme.yellow,
-    brightBlue: theme.accent,
-    brightMagenta: theme.purple,
-    brightCyan: theme.cyan,
-    brightWhite: "#ffffff",
-  };
-}
 
 export default function PopoutTerminal({ terminalId, name, model }) {
   // Long OpenRouter slugs would overflow the pill — show the friendly label
@@ -57,7 +31,11 @@ export default function PopoutTerminal({ terminalId, name, model }) {
   const pendingDataRef = useRef("");
   const writeRafRef = useRef(null);
   const connectWsRef = useRef(null);
-  const { theme } = useTheme();
+  const { theme, accent, tokenOverrides } = useTheme();
+
+  // Latest theme inputs, readable from the mount-only construction effect.
+  const xtermThemeInputsRef = useRef({ theme, accent, tokenOverrides });
+  xtermThemeInputsRef.current = { theme, accent, tokenOverrides };
 
   useEffect(() => {
     document.title = `${name} — Claude Cockpit`;
@@ -137,12 +115,14 @@ export default function PopoutTerminal({ terminalId, name, model }) {
     };
   }, [terminalId]);
 
-  // Theme sync — update xterm theme when theme changes; Canvas re-rasterizes automatically.
+  // Theme sync — the ANSI palette is derived from the `--cc-*` tokens, so accent
+  // and per-token overrides must be observed here too, not just the theme id.
+  // Canvas re-rasterizes automatically.
   useEffect(() => {
     if (xtermRef.current) {
-      xtermRef.current.options.theme = buildXtermTheme(theme);
+      xtermRef.current.options.theme = buildXtermTheme(theme, { accent, tokenOverrides });
     }
-  }, [theme]);
+  }, [theme, accent, tokenOverrides]);
 
   // Terminal init + WebSocket + paste stack — runs once on mount
   useEffect(() => {
@@ -166,7 +146,7 @@ export default function PopoutTerminal({ terminalId, name, model }) {
         fontSize: loadPersistedZoom(),
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', monospace",
         lineHeight: 1.3,
-        theme: buildXtermTheme(theme),
+        theme: buildXtermTheme(xtermThemeInputsRef.current.theme, xtermThemeInputsRef.current),
         allowTransparency: false,
         scrollback: 10000,
         convertEol: true,

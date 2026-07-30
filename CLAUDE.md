@@ -20,7 +20,7 @@ claude-cockpit/
                        # WorkflowsPanel
         __tests__/     # Frontend tests (vitest)
         hooks/         # useTheme (active)
-        themes/        # themeData.js (20 themes: 10 palettes x dark/light)
+        themes/        # themeData.js (2 dark palettes + per-token --cc-* overrides)
       src-tauri/       # Tauri desktop wrapper (Rust, NSIS installer)
   # Legacy directories (static/, src/cockpit/) removed in v1.3.0 hygiene sweep
 ```
@@ -66,7 +66,7 @@ cd web/frontend && npm run lint
 - **CSS hover utilities:** Use CSS hover classes (`hover-bg-surface`, `hover-color-red`, etc.) defined in `index.css` instead of JS `onMouseEnter`/`onMouseLeave` handlers for performance.
 - **Python logging:** Use `cockpit.server`, `cockpit.pty`, and other `cockpit.*` loggers via `logging.getLogger()`. No `print()` statements.
 - **React components:** Sidebar sub-components (`SessionItem`, `LocationNode`, `LocationContextMenu`) are module-scope, not nested inside parent components. They receive all dependencies via props to avoid React identity/re-render issues.
-- **Themes:** 10 color palettes with dark/light variants in `themeData.js`. Theme context provided by `useTheme` hook.
+- **Themes:** `themeData.js` ships **two** palettes, both dark — `va-night` (Visual Assist Night) and `cockpit-blue`. There are no light variants. (This doc previously claimed "20 themes: 10 palettes × dark/light", which was never true; `themeData.test.js` has always asserted exactly 2. The design handoff inherited the wrong number from here.) Theme context comes from the `useTheme` hook; `applyThemeToDOM` is the **single writer** of every `--cc-*` property. Per-token user overrides and named user palettes layer on top — see "Design tokens & overrides" below.
 - **Error handling:** No bare `except Exception: pass`. Always log with `exc_info=True`.
 - **User errors:** Surface via Toast notifications, not console.log.
 

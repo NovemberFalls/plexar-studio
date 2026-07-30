@@ -12,37 +12,8 @@ import PaneActionsMenu from "./PaneActionsMenu";
 import { useModelCatalog } from "../modelCatalog";
 import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
+import { buildXtermTheme } from "../utils/xtermTheme";
 import "@xterm/xterm/css/xterm.css";
-
-/**
- * Build an xterm.js theme from our cockpit theme palette.
- */
-function buildXtermTheme(theme) {
-  return {
-    background: theme.bg,
-    foreground: theme.fg,
-    cursor: theme.accent,
-    cursorAccent: theme.bg,
-    selectionBackground: `${theme.accent}40`,
-    selectionForeground: theme.fg,
-    black: theme.bgSurface,
-    red: theme.red,
-    green: theme.green,
-    yellow: theme.yellow,
-    blue: theme.accent,
-    magenta: theme.purple,
-    cyan: theme.cyan,
-    white: theme.fg,
-    brightBlack: theme.fgMuted,
-    brightRed: theme.red,
-    brightGreen: theme.green,
-    brightYellow: theme.yellow,
-    brightBlue: theme.accent,
-    brightMagenta: theme.purple,
-    brightCyan: theme.cyan,
-    brightWhite: "#ffffff",
-  };
-}
 
 const TerminalPane = forwardRef(function TerminalPane({
   session,       // { id, name, terminalId, model, status, activityState }
@@ -83,7 +54,12 @@ const TerminalPane = forwardRef(function TerminalPane({
   const searchInputRef = useRef(null);
   const renameInputRef = useRef(null);
   const actionsMenuBtnRef = useRef(null);
-  const { theme } = useTheme();
+  const { theme, accent, tokenOverrides } = useTheme();
+
+  // Latest theme inputs, readable from the mount-only terminal-construction
+  // effect without adding them to its dep list.
+  const xtermThemeInputsRef = useRef({ theme, accent, tokenOverrides });
+  xtermThemeInputsRef.current = { theme, accent, tokenOverrides };
 
   // Long OpenRouter slugs (e.g. "deepseek/deepseek-v4-pro") would overflow the
   // pill in the header — display the friendly label when the id is known,
@@ -271,7 +247,9 @@ const TerminalPane = forwardRef(function TerminalPane({
         fontSize: terminalZoom,
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', monospace",
         lineHeight: 1.3,
-        theme: buildXtermTheme(theme),
+        // Built from the ref so a theme/accent/override change that lands while
+        // the async platform-info fetch is in flight is not missed.
+        theme: buildXtermTheme(xtermThemeInputsRef.current.theme, xtermThemeInputsRef.current),
         allowTransparency: false,
         scrollback: 10000,
         convertEol: true,
@@ -568,12 +546,15 @@ const TerminalPane = forwardRef(function TerminalPane({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: this effect runs once on mount only; theme/zoom/session changes are handled by dedicated effects below
   }, []); // Only run once on mount
 
-  // Update theme when it changes — Canvas re-rasterizes automatically.
+  // Update theme when the theme, the accent, or any per-token override changes
+  // — Canvas re-rasterizes automatically. The override map must be in the deps:
+  // the ANSI palette is derived from the `--cc-*` tokens, so an override that
+  // is not observed here would never reach the terminal.
   useEffect(() => {
     if (xtermRef.current) {
-      xtermRef.current.options.theme = buildXtermTheme(theme);
+      xtermRef.current.options.theme = buildXtermTheme(theme, { accent, tokenOverrides });
     }
-  }, [theme]);
+  }, [theme, accent, tokenOverrides]);
 
   // Update font size when zoom changes — font size changes cols/rows WITHOUT
   // changing the container's box size, so the ResizeObserver above can never
