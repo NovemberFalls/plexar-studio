@@ -144,6 +144,39 @@ export function formatEndEventToast(event) {
   }
 }
 
+/** Map of terminalId -> BRIDGE_KIND | CHANNEL_KIND for every session taking part
+ *  in an active bridge or channel.
+ *
+ *  This MUST return a Map, not a Set: BridgeModal calls `.has()` AND `.get()`
+ *  on it, because the value is the reason string its BusyHint renders as
+ *  "BUSY · in bridge" / "in channel". A Set satisfies `.has()` but has no
+ *  `.get()`, so handing one over crashes the modal with "x.get is not a
+ *  function" as soon as a session row renders. That regressed in v1.4.0 (the
+ *  modal gained the reason label while its producer stayed a Set) and survived
+ *  a green test suite because the modal's own tests passed a hand-built Map —
+ *  which is why this lives here, shared by App and its test, instead of being
+ *  reimplemented in either.
+ *
+ *  First writer wins, so a session somehow in both keeps a stable label (the
+ *  backend's 409 conflict guard should make that combination impossible). */
+export function buildBusyTerminalIds(activeBridges, channels) {
+  const busy = new Map();
+  const mark = (id, reason) => {
+    if (id && !busy.has(id)) busy.set(id, reason);
+  };
+  for (const b of Array.isArray(activeBridges) ? activeBridges : []) {
+    if (b?.state !== "active") continue;
+    mark(b.from_id, BRIDGE_KIND);
+    mark(b.to_id, BRIDGE_KIND);
+  }
+  for (const ch of Array.isArray(channels) ? channels : []) {
+    if (ch?.state !== "active") continue;
+    mark(ch.lead_id, CHANNEL_KIND);
+    if (Array.isArray(ch.worker_ids)) for (const w of ch.worker_ids) mark(w, CHANNEL_KIND);
+  }
+  return busy;
+}
+
 /** Build the "Session A ↔ Session B" (bridge) or "Lead + N workers" (channel)
  *  name fragment for a toast, or "" if the record doesn't expose names. */
 function describeNames(kind, record) {

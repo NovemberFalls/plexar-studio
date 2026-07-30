@@ -16,7 +16,7 @@ import LocalModelsPanel from "./components/LocalModelsPanel";
 import TracesPanel from "./components/TracesPanel";
 import LocalBrokerView from "./components/LocalBrokerView.jsx";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
-import { computeEndEvents, formatEndEventToast, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
+import { computeEndEvents, formatEndEventToast, buildBusyTerminalIds, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -1298,23 +1298,15 @@ export default function App() {
     return null;
   }, [channels]);
 
-  /** Set of terminalIds currently participating in any active bridge or channel.
-   *  Passed to BridgeModal so its session pickers can disable already-busy sessions
-   *  instead of letting the user hit a 409 on Send. */
-  const busyTerminalIds = useMemo(() => {
-    const ids = new Set();
-    for (const b of activeBridges) {
-      if (b.state !== "active") continue;
-      if (b.from_id) ids.add(b.from_id);
-      if (b.to_id) ids.add(b.to_id);
-    }
-    for (const ch of channels) {
-      if (ch.state !== "active") continue;
-      if (ch.lead_id) ids.add(ch.lead_id);
-      if (ch.worker_ids) for (const w of ch.worker_ids) ids.add(w);
-    }
-    return ids;
-  }, [activeBridges, channels]);
+  /** Map of terminalId -> "bridge" | "channel" for every session taking part in
+   *  an active bridge or channel. Passed to BridgeModal so its session pickers
+   *  can disable already-busy sessions instead of letting the user hit a 409 on
+   *  Send. Built by the shared helper (which documents why it must be a Map and
+   *  not a Set) so App and its tests exercise the same code. */
+  const busyTerminalIds = useMemo(
+    () => buildBusyTerminalIds(activeBridges, channels),
+    [activeBridges, channels],
+  );
 
   // BroadcastChannel: receive CLOSED from popout windows to clear their placeholder
   useEffect(() => {
