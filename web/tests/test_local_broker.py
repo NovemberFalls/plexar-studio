@@ -381,7 +381,7 @@ async def test_provider_models_normalization(client, monkeypatch):
     assert body["models"][1] == {
         "id": "sparse-model", "type": None, "arch": None, "quantization": None,
         "state": None, "max_context_length": None, "loaded_context_length": None,
-        "name": None, "host_path": None,
+        "container_path": None, "name": None, "host_path": None,
     }
 
 
@@ -393,7 +393,7 @@ async def test_provider_models_unreachable_503(client, monkeypatch):
     monkeypatch.setattr(server_module, "_mgmt_get", fake_mgmt_get)
     res = await client.get("/api/local/lmstudio-local/models")
     assert res.status_code == 503
-    assert res.json() == {"reachable": False}
+    assert res.json() == {"reachable": False, "reason": "unreachable"}
 
 
 @pytest.mark.asyncio

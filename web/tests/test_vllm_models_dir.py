@@ -38,8 +38,10 @@ def client():
 @pytest.fixture(autouse=True)
 def _clean_models_dir_state(monkeypatch, tmp_path):
     # Isolate from a developer's real ~/.claude-cockpit and reset the module-
-    # level mutable between tests.
+    # level mutables between tests.
     monkeypatch.setattr(server_module, "_vllm_models_dir", "")
+    monkeypatch.setattr(server_module, "_vllm_models_dir_mount", "")
+    monkeypatch.setattr(server_module, "_vllm_models_dir_raw", "")
     monkeypatch.setattr(
         server_module, "_VLLM_MODELS_DIR_FILE", str(tmp_path / "vllm-models-dir.json")
     )
@@ -53,7 +55,10 @@ def _clean_models_dir_state(monkeypatch, tmp_path):
 async def test_models_dir_get_default_empty(client):
     res = await client.get("/api/local/vllm-local/models-dir")
     assert res.status_code == 200
-    assert res.json() == {"path": "", "exists": False, "writable_config": True}
+    assert res.json() == {
+        "path": "", "mount_path": "", "scan_path": "", "exists": False,
+        "writable_config": True, "current_model": server_module._vllm_runtime_model,
+    }
 
 
 @pytest.mark.asyncio
@@ -64,14 +69,17 @@ async def test_models_dir_put_happy_path_and_persistence(client, tmp_path):
     assert res.status_code == 200
     body = res.json()
     assert body["exists"] is True
-    assert os.path.samefile(body["path"], target)
-    assert server_module._vllm_models_dir == body["path"]
+    assert body["path"] == str(target)
+    assert os.path.samefile(body["scan_path"], target)
+    assert server_module._vllm_models_dir == body["scan_path"]
+    assert server_module._vllm_models_dir_raw == str(target)
+    assert body["current_model"] == server_module._vllm_runtime_model
 
-    # Persisted to disk.
+    # Persisted to disk (raw as typed).
     with open(server_module._VLLM_MODELS_DIR_FILE, "r", encoding="utf-8") as f:
         import json
         saved = json.load(f)
-    assert os.path.samefile(saved["path"], target)
+    assert saved["path"] == str(target)
 
     # GET reflects the persisted value.
     res2 = await client.get("/api/local/vllm-local/models-dir")
@@ -151,6 +159,7 @@ def test_scan_finds_config_json_subdirs(monkeypatch, tmp_path):
         assert e["state"] == "available"
         assert e["host_path"].endswith(e["name"])
         assert os.path.isabs(e["host_path"])
+        assert e["container_path"] == e["id"]
 
 
 def test_scan_quantization_sniffing(monkeypatch, tmp_path):
@@ -224,6 +233,7 @@ async def test_unreachable_vllm_but_scannable_dir_returns_200(client, monkeypatc
     assert res.status_code == 200
     body = res.json()
     assert body["reachable"] is False
+    assert body["reason"] == "server_offline_disk_only"
     assert [m["id"] for m in body["models"]] == ["/models/some-model"]
 
 
@@ -238,4 +248,129 @@ async def test_unreachable_vllm_and_no_dir_returns_503(client, monkeypatch):
 
     res = await client.get("/api/local/vllm-local/models")
     assert res.status_code == 503
-    assert res.json() == {"reachable": False}
+    assert res.json() == {"reachable": False, "reason": "unreachable"}
+
+
+# ── vLLM ground-truth /v1/models normalization (Bug 1) ─────
+
+
+@pytest.mark.asyncio
+async def test_vllm_ground_truth_payload_normalized(client, monkeypatch):
+    """Exact shape captured live from vLLM's /v1/models (see task brief)."""
+    def fake_mgmt_get(provider, path):
+        return {"object": "list", "data": [{
+            "id": "qwen3-30b-instruct", "object": "model", "created": 1785370694,
+            "owned_by": "vllm", "root": "/models/Qwen3-30B-A3B-Instruct-2507-AWQ",
+            "parent": None, "max_model_len": 32768, "permission": [],
+        }]}
+
+    monkeypatch.setattr(server_module, "_mgmt_get", fake_mgmt_get)
+    res = await client.get("/api/local/vllm-local/models")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["reachable"] is True
+    m = body["models"][0]
+    assert m["id"] == "qwen3-30b-instruct"
+    assert m["state"] == "loaded"
+    assert m["max_context_length"] == 32768
+    assert m["loaded_context_length"] == 32768
+    assert m["container_path"] == "/models/Qwen3-30B-A3B-Instruct-2507-AWQ"
+    assert m["quantization"] == "awq"
+    assert m["arch"] is None
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_state_not_overwritten(client, monkeypatch):
+    """A real LM Studio 'not-loaded' state must survive untouched -- the
+    vLLM normalization path must never run for lmstudio-kind providers."""
+    def fake_mgmt_get(provider, path):
+        return {"data": [{"id": "some-model", "state": "not-loaded"}]}
+
+    monkeypatch.setattr(server_module, "_mgmt_get", fake_mgmt_get)
+    res = await client.get("/api/local/lmstudio-local/models")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["models"][0]["state"] == "not-loaded"
+    assert body["models"][0]["container_path"] is None
+
+
+# ── Windows+WSL models-dir mount/scan derivation (Bug 2) ────
+
+
+@pytest.mark.asyncio
+async def test_windows_wsl_style_input_derives_unc_scan_and_keeps_mount(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server_module.sys, "platform", "win32")
+    monkeypatch.setattr(server_module, "_WSL_DISTRO_CACHE", {})
+
+    # Fake distro detection.
+    monkeypatch.setattr(server_module, "_detect_wsl_distro", lambda: "Ubuntu")
+
+    expected_scan = tmp_path  # pretend the UNC form resolves here
+    monkeypatch.setattr(
+        server_module, "_derive_models_dir_paths",
+        lambda raw: ("/home/lenbo/models", str(expected_scan)),
+    )
+
+    res = await client.put("/api/local/vllm-local/models-dir", json={"path": "/home/lenbo/models"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["path"] == "/home/lenbo/models"
+    assert body["mount_path"] == "/home/lenbo/models"
+    assert os.path.samefile(body["scan_path"], expected_scan)
+
+    # Docker argv uses the MOUNT path, never the scan path.
+    argv = server_module._vllm_docker_argv("run")
+    joined = " ".join(argv)
+    assert "-v /home/lenbo/models:/models" in joined
+    assert str(expected_scan) not in joined
+
+
+@pytest.mark.asyncio
+async def test_windows_style_input_derives_mnt_mount(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server_module.sys, "platform", "win32")
+    target = tmp_path / "models"
+    target.mkdir()
+
+    res = await client.put("/api/local/vllm-local/models-dir", json={"path": str(target)})
+    assert res.status_code == 200
+    body = res.json()
+    drive = str(target)[0].lower()
+    assert body["mount_path"].startswith(f"/mnt/{drive}/")
+    assert os.path.samefile(body["scan_path"], target)
+
+
+def test_wsl_distro_detection_failure_accepted_not_rejected(monkeypatch):
+    monkeypatch.setattr(server_module.sys, "platform", "win32")
+    monkeypatch.setattr(server_module, "_WSL_DISTRO_CACHE", {})
+    monkeypatch.setattr(server_module, "_detect_wsl_distro", lambda: None)
+
+    ok, error, mount_path, scan_path = server_module._validate_models_dir("/home/lenbo/models")
+    assert ok is True
+    assert error is None
+    assert mount_path == "/home/lenbo/models"
+    assert scan_path == ""
+
+
+def test_posix_platform_mount_equals_scan(monkeypatch, tmp_path):
+    monkeypatch.setattr(server_module.sys, "platform", "linux")
+    ok, error, mount_path, scan_path = server_module._validate_models_dir(str(tmp_path))
+    assert ok is True
+    assert mount_path == scan_path
+    assert os.path.samefile(mount_path, tmp_path)
+
+
+def test_wsl_distro_detection_parses_and_caches(monkeypatch):
+    monkeypatch.setattr(server_module, "_WSL_DISTRO_CACHE", {})
+    calls = {"n": 0}
+
+    class _FakeResult:
+        stdout = "Ubuntu\r\n".encode("utf-16-le")
+
+    def fake_run(*args, **kwargs):
+        calls["n"] += 1
+        return _FakeResult()
+
+    monkeypatch.setattr(server_module.subprocess, "run", fake_run)
+    assert server_module._detect_wsl_distro() == "Ubuntu"
+    assert server_module._detect_wsl_distro() == "Ubuntu"
+    assert calls["n"] == 1  # cached after first call

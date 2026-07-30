@@ -2180,6 +2180,13 @@ COCKPIT_VLLM_MODELS_DIR = os.getenv("COCKPIT_VLLM_MODELS_DIR", "")
 # reported for restart purposes must be expressed as "/models/<name>" — the
 # CONTAINER path — while the host path stays around for display only.
 _vllm_models_dir = COCKPIT_VLLM_MODELS_DIR
+# SCAN path above (what Python enumerates -- see _scan_vllm_models_dir).
+# MOUNT path below (what docker's -v receives -- see _vllm_docker_argv). On
+# POSIX these are always identical; on Windows+WSL they diverge (see
+# _derive_models_dir_paths). RAW below is the exact string the user typed,
+# kept for display/persistence/re-derivation at startup.
+_vllm_models_dir_mount = COCKPIT_VLLM_MODELS_DIR
+_vllm_models_dir_raw = COCKPIT_VLLM_MODELS_DIR
 COCKPIT_VLLM_MAX_MODEL_LEN = os.getenv("COCKPIT_VLLM_MAX_MODEL_LEN", "49152")
 COCKPIT_VLLM_MAX_NUM_SEQS = os.getenv("COCKPIT_VLLM_MAX_NUM_SEQS", "2")
 COCKPIT_VLLM_GPU_UTIL = os.getenv("COCKPIT_VLLM_GPU_UTIL", "0.90")
@@ -2408,17 +2415,22 @@ def apply_persisted_vllm_models_dir() -> None:
     stale config file must never block startup, and a path that has since
     disappeared/changed type on disk must not be silently trusted.
     """
-    global _vllm_models_dir
+    global _vllm_models_dir, _vllm_models_dir_mount, _vllm_models_dir_raw
 
     persisted = _load_vllm_models_dir()
     if not persisted:
         return
-    ok, _error, resolved = _validate_models_dir(persisted)
+    ok, _error, mount_path, scan_path = _validate_models_dir(persisted)
     if not ok:
         logger.warning("ignoring unsafe/stale persisted vLLM models dir: %s", persisted)
         return
-    _vllm_models_dir = resolved
-    logger.info("Applied persisted vLLM models dir: %s", resolved)
+    _vllm_models_dir = scan_path
+    _vllm_models_dir_mount = mount_path
+    _vllm_models_dir_raw = persisted
+    logger.info(
+        "Applied persisted vLLM models dir: raw=%s mount=%s scan=%s",
+        persisted, mount_path, scan_path,
+    )
 
 
 _QUANT_HINTS = ("awq", "gptq", "int4", "int8", "fp8", "q4", "q8")
@@ -2433,36 +2445,141 @@ def _sniff_quantization(name: str) -> str | None:
     return None
 
 
-def _validate_models_dir(raw_path: str) -> tuple[bool, str | None, str | None]:
+_WSL_DISTRO_CACHE: dict[str, str | None] = {}
+
+
+def _detect_wsl_distro() -> str | None:
+    """Best-effort default WSL distro name via `wsl -l -q`, cached after the
+    first call (successful or not -- a failure here is almost certainly
+    environmental, i.e. WSL not installed, and retrying every request just
+    adds latency).
+
+    Returns None on any failure (WSL missing, timeout, unparsable output);
+    callers must degrade gracefully rather than rejecting the models-dir path
+    outright -- the docker bind-mount may still work even if Cockpit can't
+    enumerate it from Windows.
+    """
+    if "name" in _WSL_DISTRO_CACHE:
+        return _WSL_DISTRO_CACHE["name"]
+    name = None
+    try:
+        result = subprocess.run(
+            ["wsl", "-l", "-q"], capture_output=True, timeout=5,
+        )
+        raw = result.stdout or b""
+        for encoding in ("utf-16-le", "utf-8"):
+            try:
+                text = raw.decode(encoding)
+            except Exception:
+                continue
+            lines = [ln.strip().strip("\x00") for ln in text.splitlines()]
+            lines = [ln for ln in lines if ln]
+            if lines:
+                name = lines[0]
+                break
+    except Exception:
+        logger.debug("WSL distro detection failed", exc_info=True)
+        name = None
+    _WSL_DISTRO_CACHE["name"] = name
+    return name
+
+
+def _derive_models_dir_paths(raw_path: str) -> tuple[str, str]:
+    """Return (mount_path, scan_path) for a models-dir input.
+
+    docker (via _vllm_docker_argv) runs INSIDE WSL on Windows, so the bind
+    mount source must be a WSL/Linux-style path; Python (running natively on
+    Windows) needs a Windows-visible path to enumerate. On POSIX platforms
+    there is no split -- both are the raw path, unchanged from before.
+
+    Two accepted input shapes on Windows:
+      - WSL/POSIX-style ("/home/lenbo/models"): this already IS the mount
+        path docker needs. The scan path is derived as the UNC form
+        \\\\wsl$\\<distro>\\home\\lenbo\\models (verified listable from
+        Windows Explorer/Python) using the default WSL distro name.
+      - Windows-style ("C:\\models"): this already IS the scan path. The
+        mount path is derived as /mnt/c/models (lowercase drive letter),
+        the standard WSL mapping into a Windows drive.
+    """
+    if sys.platform != "win32":
+        return raw_path, raw_path
+
+    if raw_path.startswith("/"):
+        mount_path = raw_path
+        distro = _detect_wsl_distro()
+        if distro is None:
+            scan_path = ""  # undeterminable -- caller treats as unscannable
+        else:
+            scan_path = f"\\\\wsl$\\{distro}" + raw_path.replace("/", "\\")
+        return mount_path, scan_path
+
+    # Windows-style: "C:\models\sub" -> "/mnt/c/models/sub"
+    drive, _, rest = raw_path.partition(":")
+    mount_path = "/mnt/" + drive.lower() + rest.replace("\\", "/")
+    return mount_path, raw_path
+
+
+def _validate_models_dir(raw_path: str) -> tuple[bool, str | None, str | None, str | None]:
     """Validate a browser-supplied filesystem path for the vLLM models dir.
 
-    Returns (ok, error_message, resolved_path). This is a filesystem path
-    coming straight from the browser, so it is validated defensively even
-    though it is operator-facing config:
+    Returns (ok, error_message, mount_path, scan_path). This is a filesystem
+    path coming straight from the browser, so it is validated defensively
+    even though it is operator-facing config:
       - must be a non-empty string, under _VLLM_MODELS_DIR_MAX_LEN chars
       - must not contain a NUL byte
-      - must be an ABSOLUTE path
-      - resolved (Path.resolve()) and re-checked as an existing directory --
-        closes off traversal games where the pre-resolve string looks fine but
-        resolves somewhere else entirely.
+      - must be an ABSOLUTE path (WSL/POSIX-style OR Windows-style on
+        win32; POSIX-absolute only on POSIX platforms)
+      - the SCAN path (see _derive_models_dir_paths) is resolved
+        (Path.resolve()) and re-checked as an existing directory -- closes
+        off traversal games where the pre-resolve string looks fine but
+        resolves somewhere else entirely. EXCEPTION: a WSL-style path whose
+        distro can't be detected is accepted anyway with an empty scan path
+        -- the mount may still be valid even though Cockpit can't verify it.
     """
     if not isinstance(raw_path, str) or not raw_path:
-        return False, "path must be a non-empty string", None
+        return False, "path must be a non-empty string", None, None
     if len(raw_path) > _VLLM_MODELS_DIR_MAX_LEN:
-        return False, f"path must be at most {_VLLM_MODELS_DIR_MAX_LEN} characters", None
+        return False, f"path must be at most {_VLLM_MODELS_DIR_MAX_LEN} characters", None, None
     if "\x00" in raw_path:
-        return False, "path must not contain a NUL byte", None
+        return False, "path must not contain a NUL byte", None, None
+
+    if sys.platform == "win32":
+        is_wsl_style = raw_path.startswith("/")
+        is_windows_style = Path(raw_path).is_absolute()  # drive-letter or UNC
+        if not (is_wsl_style or is_windows_style):
+            return False, "path must be absolute", None, None
+
+        mount_path, scan_path = _derive_models_dir_paths(raw_path)
+
+        if is_wsl_style and not scan_path:
+            return True, None, mount_path, ""
+
+        try:
+            resolved = Path(scan_path).resolve(strict=False)
+        except Exception:
+            logger.debug("Failed to resolve models dir %r", scan_path, exc_info=True)
+            return False, "path could not be resolved", None, None
+        if not resolved.is_dir():
+            return False, "path does not exist or is not a directory", None, None
+        # For WSL-style input, mount_path is kept exactly as typed (it's
+        # already docker-ready); only the scan side gets resolved. For
+        # Windows-style input, mount_path was derived from the raw string,
+        # and the scan side is the resolved Windows path.
+        return True, None, mount_path, str(resolved)
+
+    # POSIX: no WSL split -- mount and scan are the same resolved path,
+    # exactly the pre-existing behavior.
     p = Path(raw_path)
     if not p.is_absolute():
-        return False, "path must be absolute", None
+        return False, "path must be absolute", None, None
     try:
         resolved = p.resolve(strict=False)
     except Exception:
         logger.debug("Failed to resolve models dir %r", raw_path, exc_info=True)
-        return False, "path could not be resolved", None
+        return False, "path could not be resolved", None, None
     if not resolved.is_dir():
-        return False, "path does not exist or is not a directory", None
-    return True, None, str(resolved)
+        return False, "path does not exist or is not a directory", None, None
+    return True, None, str(resolved), str(resolved)
 
 
 def _scan_vllm_models_dir() -> list[dict]:
@@ -2494,6 +2611,10 @@ def _scan_vllm_models_dir() -> list[dict]:
                 "quantization": _sniff_quantization(child.name),
                 "arch": None,
                 "max_context_length": None,
+                # Disk-scanned entries already ARE the container path (the
+                # scanner computes it as "/models/<name>") -- same value as
+                # "id", included for shape consistency with served entries.
+                "container_path": f"/models/{child.name}",
             })
         return entries
     except Exception:
@@ -3414,7 +3535,10 @@ def _vllm_docker_argv(action: str = "run") -> list[str]:
         docker_argv = ["docker", "rm", "-f", _MANAGED_VLLM["container"]]
     else:
         gpus = f'--gpus "device={COCKPIT_VLLM_GPU_UUID}"' if COCKPIT_VLLM_GPU_UUID else "--gpus all"
-        mount = f"-v {_vllm_models_dir}:/models" if _vllm_models_dir else ""
+        # MOUNT path (not scan path) -- docker itself runs inside WSL on
+        # Windows (see the wrap below), so -v's source must be WSL/Linux-
+        # style. See _derive_models_dir_paths.
+        mount = f"-v {_vllm_models_dir_mount}:/models" if _vllm_models_dir_mount else ""
         gpu_pin = (
             f"-e CUDA_DEVICE_ORDER=PCI_BUS_ID -e CUDA_VISIBLE_DEVICES={COCKPIT_VLLM_GPU_UUID}"
             if COCKPIT_VLLM_GPU_UUID else ""
@@ -3507,7 +3631,43 @@ async def get_local_status():
 # traces routes are new, all provider-keyed by construction.
 
 _MODEL_FIELDS = ("id", "type", "arch", "quantization", "state",
-                  "max_context_length", "loaded_context_length")
+                  "max_context_length", "loaded_context_length", "container_path")
+
+
+def _normalize_vllm_raw_model(m: dict) -> dict:
+    """Map vLLM's native /v1/models shape onto the common model-fields shape.
+
+    Ground-truth vLLM payload has no state/arch/quantization/max_context_length
+    -- only id/root/max_model_len (root is the in-container model path, exactly
+    what a restart's --model needs). LM Studio's /api/v0/models genuinely
+    provides state/arch/quantization/context fields, so this function is only
+    ever applied to vLLM upstream entries -- never touch the LM Studio path.
+    """
+    out = dict(m)
+
+    # A model returned by vLLM's /v1/models IS being served, by definition --
+    # vLLM has no concept of a "known but unloaded" model in that response.
+    if out.get("state") is None:
+        out["state"] = "loaded"
+
+    max_model_len = m.get("max_model_len")
+    if max_model_len is not None:
+        # For vLLM the served context IS the loaded context (no separate
+        # "loaded vs max" concept like LM Studio) -- but never overwrite a
+        # genuine value if one is somehow already present.
+        if out.get("max_context_length") is None:
+            out["max_context_length"] = max_model_len
+        if out.get("loaded_context_length") is None:
+            out["loaded_context_length"] = max_model_len
+
+    root = m.get("root")
+    out["container_path"] = root
+
+    if out.get("quantization") is None:
+        sniff_source = root or m.get("id") or ""
+        out["quantization"] = _sniff_quantization(sniff_source) if sniff_source else None
+
+    return out
 
 
 def _require_provider(provider_id: str):
@@ -3759,7 +3919,14 @@ async def get_vllm_models_dir(provider_id: str):
     if provider["scope"] != "local" or provider["kind"] != "vllm":
         return JSONResponse({"error": "models-dir config is vLLM-local-only"}, status_code=404)
     exists = bool(_vllm_models_dir) and Path(_vllm_models_dir).is_dir()
-    return JSONResponse({"path": _vllm_models_dir or "", "exists": exists, "writable_config": True})
+    return JSONResponse({
+        "path": _vllm_models_dir_raw or "",
+        "mount_path": _vllm_models_dir_mount or "",
+        "scan_path": _vllm_models_dir or "",
+        "exists": exists,
+        "writable_config": True,
+        "current_model": _vllm_runtime_model,
+    })
 
 
 @app.put("/api/local/{provider_id}/models-dir")
@@ -3773,7 +3940,7 @@ async def set_vllm_models_dir(provider_id: str, request: Request):
     length. Only vLLM-local supports this (LM Studio's catalog is already
     complete via /api/v0/models).
     """
-    global _vllm_models_dir
+    global _vllm_models_dir, _vllm_models_dir_mount, _vllm_models_dir_raw
 
     provider = _require_provider(provider_id)
     if provider is None:
@@ -3789,14 +3956,30 @@ async def set_vllm_models_dir(provider_id: str, request: Request):
         return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
 
     raw_path = body.get("path")
-    ok, error, resolved = _validate_models_dir(raw_path)
+    ok, error, mount_path, scan_path = _validate_models_dir(raw_path)
     if not ok:
         return JSONResponse({"error": error}, status_code=400)
 
-    _vllm_models_dir = resolved
-    _save_vllm_models_dir(resolved)
-    logger.info("Provider %s models dir set to %s", provider_id, resolved)
-    return JSONResponse({"path": resolved, "exists": True, "writable_config": True})
+    _vllm_models_dir = scan_path
+    _vllm_models_dir_mount = mount_path
+    _vllm_models_dir_raw = raw_path
+    # Persist the RAW value as typed -- both mount/scan paths are re-derived
+    # from it at startup (see apply_persisted_vllm_models_dir), which also
+    # re-runs WSL distro detection rather than trusting a stale cached form.
+    _save_vllm_models_dir(raw_path)
+    logger.info(
+        "Provider %s models dir set: raw=%s mount=%s scan=%s",
+        provider_id, raw_path, mount_path, scan_path,
+    )
+    exists = bool(scan_path) and Path(scan_path).is_dir()
+    return JSONResponse({
+        "path": raw_path,
+        "mount_path": mount_path,
+        "scan_path": scan_path,
+        "exists": exists,
+        "writable_config": True,
+        "current_model": _vllm_runtime_model,
+    })
 
 
 @app.get("/api/local/{provider_id}/models")
@@ -3819,12 +4002,21 @@ async def get_provider_models(provider_id: str):
             # vLLM offline but its models dir is configured/scannable: still
             # useful to the UI ("load this one"), so this is 200 not 503 --
             # a deliberate shape change from the plain-unreachable case below.
-            return JSONResponse({"reachable": False, "models": disk_models})
-        return JSONResponse({"reachable": False}, status_code=503)
+            return JSONResponse({
+                "reachable": False,
+                "models": disk_models,
+                "reason": "server_offline_disk_only",
+            })
+        return JSONResponse({"reachable": False, "reason": "unreachable"}, status_code=503)
 
     raw_models = data.get("data") if isinstance(data, dict) else None
     if raw_models is None:
         raw_models = []
+    if provider.get("kind") == "vllm":
+        raw_models = [
+            _normalize_vllm_raw_model(m) if isinstance(m, dict) else m
+            for m in raw_models
+        ]
     models = [
         {
             **{field: m.get(field) if isinstance(m, dict) else None for field in _MODEL_FIELDS},

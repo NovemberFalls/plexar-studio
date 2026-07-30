@@ -1738,6 +1738,7 @@ export default function App() {
                 {selectedProvider?.capabilities?.includes("models") && (
                   <LocalModelsPanel
                     models={localModels}
+                    providerKind={selectedProvider?.kind}
                     controlEnabled={selectedProvider?.capabilities?.includes("model-control")}
                     busyModelId={localBusyModelId}
                     onLoad={loadLocalModel}

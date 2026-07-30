@@ -63,8 +63,8 @@ function Card({ title, children, style }) {
  *  models-folder path from GET /api/local/{id}/models-dir, an editable text
  *  input, and a Save button that PUTs it. On success, refreshes the models
  *  list (via onModelsRefresh) so newly-discovered models appear right away. */
-function ModelsFolderCard({ provider, onToast, onModelsRefresh }) {
-  const [current, setCurrent] = useState(null); // { path, exists, writable_config } | null (unfetched)
+function ModelsFolderCard({ provider, onToast, onModelsRefresh, onCurrentModel }) {
+  const [current, setCurrent] = useState(null); // { path, mount_path, scan_path, exists, writable_config, current_model } | null (unfetched)
   const [input, setInput] = useState("");
   const [saving, setSaving] = useState(false);
   const providerId = provider?.id;
@@ -79,6 +79,7 @@ function ModelsFolderCard({ provider, onToast, onModelsRefresh }) {
         if (!cancelled && res.ok) {
           setCurrent(data);
           setInput(data.path || "");
+          onCurrentModel?.(data.current_model || null);
         }
       } catch {
         /* best-effort */
@@ -104,6 +105,7 @@ function ModelsFolderCard({ provider, onToast, onModelsRefresh }) {
       }
       setCurrent(data);
       setInput(data.path || path);
+      onCurrentModel?.(data.current_model || null);
       onToast?.("Models folder saved", "success");
       try {
         const mres = await fetch(`/api/local/${encodeURIComponent(providerId)}/models`);
@@ -131,6 +133,15 @@ function ModelsFolderCard({ provider, onToast, onModelsRefresh }) {
               {" "}· {current.exists ? "exists" : "not found"}
             </span>
           )}
+          {current.mount_path && current.scan_path && current.mount_path !== current.scan_path && (
+            <div style={{ marginTop: 2 }}>
+              mounted at {current.mount_path} · scanned at {current.scan_path}
+            </div>
+          )}
+          <div style={{ marginTop: 4, fontStyle: "italic" }}>
+            This is the folder CONTAINING your model subfolders. On Windows, models
+            usually live inside WSL, so a path like /home/&lt;you&gt;/models is normal.
+          </div>
         </div>
       )}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -172,21 +183,27 @@ function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider,
   const [savedHint, setSavedHint] = useState(hint || null);
   const [saving, setSaving] = useState(false);
   const controlEnabled = provider?.capabilities?.includes("model-control");
-  const loadedModelId =
-    (Array.isArray(localModels?.models) ? localModels.models : []).find((m) => m.state === "loaded")?.id || "";
-  const [restartModel, setRestartModel] = useState(loadedModelId);
+  const modelList = Array.isArray(localModels?.models) ? localModels.models : [];
+  const loadedModel = modelList.find((m) => m.state === "loaded") || null;
+  const loadedValue = loadedModel ? (loadedModel.container_path || loadedModel.id) : "";
+  const [currentModelFallback, setCurrentModelFallback] = useState(null); // from models-dir
+  // Priority: loaded model's container_path -> models-dir current_model -> empty.
+  const prefillValue = loadedValue || currentModelFallback || "";
+  const [restartModel, setRestartModel] = useState(prefillValue);
+  const [customPath, setCustomPath] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [userEdited, setUserEdited] = useState(false);
 
   useEffect(() => {
-    // Keep the restart input seeded with whatever is currently loaded, until
-    // the user edits it (only overwrite while it's empty to avoid clobbering typing).
-    setRestartModel((cur) => (cur ? cur : loadedModelId));
-  }, [loadedModelId]);
+    // Keep the restart selection seeded with server truth until the user edits it
+    // (don't clobber typing/selecting once they've interacted with the control).
+    if (!userEdited) setRestartModel(prefillValue);
+  }, [prefillValue, userEdited]);
 
   const handleRestart = async () => {
     const model = (restartModel || "").trim();
     if (!model) {
-      onToast?.("Enter a model path to restart with", "error");
+      onToast?.("Select or enter a model to restart with", "error");
       return;
     }
     if (!provider?.id) return;
@@ -366,27 +383,72 @@ function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider,
               vLLM serves one model per container — switching restarts it.
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                type="text"
-                value={restartModel}
-                onChange={(e) => setRestartModel(e.target.value)}
-                disabled={restarting}
-                placeholder="/models/Qwen3-Coder-30B-A3B-AWQ"
-                className="hover-border-accent"
-                style={{
-                  flex: 1, minWidth: 0, fontSize: 12, padding: "5px 8px", borderRadius: 6,
-                  border: "1px solid var(--cc-border, var(--border-color))",
-                  background: "var(--bg-surface)", color: "var(--text-primary)",
-                  opacity: restarting ? 0.6 : 1,
-                }}
-              />
+              {customPath ? (
+                <input
+                  type="text"
+                  value={restartModel}
+                  onChange={(e) => { setRestartModel(e.target.value); setUserEdited(true); }}
+                  disabled={restarting}
+                  placeholder="/models/Qwen3-Coder-30B-A3B-AWQ"
+                  className="hover-border-accent"
+                  style={{
+                    flex: 1, minWidth: 0, fontSize: 12, padding: "5px 8px", borderRadius: 6,
+                    border: "1px solid var(--cc-border, var(--border-color))",
+                    background: "var(--bg-surface)", color: "var(--text-primary)",
+                    opacity: restarting ? 0.6 : 1,
+                  }}
+                />
+              ) : (
+                <select
+                  aria-label="Model to restart with"
+                  value={restartModel}
+                  onChange={(e) => {
+                    if (e.target.value === "__custom__") {
+                      setCustomPath(true);
+                      setUserEdited(true);
+                      setRestartModel("");
+                      return;
+                    }
+                    setRestartModel(e.target.value);
+                    setUserEdited(true);
+                  }}
+                  disabled={restarting}
+                  className="hover-border-accent"
+                  style={{
+                    flex: 1, minWidth: 0, fontSize: 12, padding: "5px 8px", borderRadius: 6,
+                    border: "1px solid var(--cc-border, var(--border-color))",
+                    background: "var(--bg-surface)", color: "var(--text-primary)",
+                    opacity: restarting ? 0.6 : 1,
+                  }}
+                >
+                  {!prefillValue && <option value="">Select a model…</option>}
+                  {modelList.map((m) => {
+                    const value = m.container_path || m.id;
+                    const stateHint = m.state === "loaded" ? " · running" : m.state === "available" ? " · on disk" : "";
+                    return (
+                      <option key={value || m.id} value={value}>
+                        {(m.name || m.id || value) + stateHint}
+                      </option>
+                    );
+                  })}
+                  <option value="__custom__">custom path…</option>
+                </select>
+              )}
               <button
                 onClick={handleRestart}
-                disabled={restarting}
+                disabled={restarting || !(restartModel || "").trim()}
+                title={
+                  restarting
+                    ? undefined
+                    : (restartModel || "").trim()
+                      ? undefined
+                      : "Select or enter a model to restart with"
+                }
                 className="text-[11px] px-3 py-1 rounded-full transition-colors hover-bg-surface"
                 style={{
                   flexShrink: 0, color: "var(--accent)", border: "1px solid var(--accent)",
-                  background: "var(--bg-surface)", opacity: restarting ? 0.6 : 1,
+                  background: "var(--bg-surface)",
+                  opacity: (restarting || !(restartModel || "").trim()) ? 0.6 : 1,
                 }}
               >
                 {restarting ? "Restarting…" : "Restart with model"}
@@ -401,7 +463,12 @@ function DirectProviderConnectionCard({ localEnabled, setLocalEnabled, provider,
         )}
 
         {localEnabled && provider?.capabilities?.includes("model-discovery") && (
-          <ModelsFolderCard provider={provider} onToast={onToast} onModelsRefresh={onModelsRefresh} />
+          <ModelsFolderCard
+            provider={provider}
+            onToast={onToast}
+            onModelsRefresh={onModelsRefresh}
+            onCurrentModel={setCurrentModelFallback}
+          />
         )}
       </div>
     </Card>

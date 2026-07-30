@@ -24,6 +24,7 @@ function fmtCtx(n) {
 
 export default function LocalModelsPanel({
   models,
+  providerKind,
   controlEnabled = false,
   busyModelId = null,
   onLoad,
@@ -35,21 +36,31 @@ export default function LocalModelsPanel({
   // showing so the user can start one. Only treat this as a true "no data"
   // offline state when there's nothing to list either.
   const offline = (!models || models.reachable === false) && list.length === 0;
+  const reason = models?.reason || null;
 
   if (offline) {
+    let message = "Provider offline — no models data.";
+    if (reason === "unreachable") {
+      message = providerKind === "vllm"
+        ? "vLLM container isn't running — start it to see models."
+        : "Local server isn't running — start it with `lms server start`.";
+    }
     return (
       <div style={{ padding: "10px 12px" }}>
         <div className="text-[10px] uppercase tracking-wider" style={{ color: "var(--text-muted)", marginBottom: 6 }}>
           Models
         </div>
         <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-          Provider offline — no models data.
+          {message}
         </div>
       </div>
     );
   }
 
   const unreachableWithModels = models?.reachable === false && list.length > 0;
+  const diskOnlyMessage = reason === "server_offline_disk_only"
+    ? "Server offline — these models were found on disk."
+    : "Provider offline — models found on disk.";
 
   return (
     <div style={{ padding: "10px 12px" }}>
@@ -58,7 +69,7 @@ export default function LocalModelsPanel({
       </div>
       {unreachableWithModels && (
         <div className="text-xs" style={{ color: "var(--text-muted)", marginBottom: 6, fontStyle: "italic" }}>
-          Provider offline — models found on disk.
+          {diskOnlyMessage}
         </div>
       )}
       {list.length === 0 ? (
