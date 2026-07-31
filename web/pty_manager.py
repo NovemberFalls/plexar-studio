@@ -36,22 +36,32 @@ _INTER_CHUNK_DELAY = 0.010
 
 # Size at or below which a write goes out as ONE call, uncut.
 #
-# This was 200 bytes, which meant an ordinary bridge message (~700 bytes) was
-# sliced into four chunks — and the slicer cut at a blind byte offset, so a cut
-# could land *inside* the `\x1b[200~` / `\x1b[201~` bracketed-paste markers.  A
-# split marker means the receiving TUI never enters paste mode at all, so every
-# embedded newline submits separately and one message arrives as several
-# mangled fragments.  64 KB puts every realistic paste (and every bridge
-# message) on the single-write path.
+# HISTORY — this value has now been wrong in both directions, so read before
+# changing it.
 #
-# Chunking still exists above this ceiling, because ConPTY's input pipe really
-# does drop bytes on multi-thousand-line pastes — but it is now a safety valve
-# for genuinely huge payloads instead of the normal path, and its boundaries
-# are escape-aware (see _split_preserving_escapes).
-_SINGLE_WRITE_MAX = 65536
+# It was 200. I raised it to 65536 to fix the bridge: the slicer cut at blind
+# byte offsets, so a boundary could land *inside* the `\x1b[200~` / `\x1b[201~`
+# markers, and a split marker means the receiving TUI never enters paste mode.
+# That diagnosis was right, but the remedy was wrong. Removing the cut also
+# removed the PACING, and the pacing was load-bearing: ConPTY's input buffer
+# drops or overwrites when written faster than claude.exe drains it. The result
+# was a ~4 KB paste arriving with its HEAD missing and only its tail intact,
+# while every layer reported success.
+#
+# The actual fix for the bridge was never the large single write — it was
+# _split_preserving_escapes, which makes a boundary unable to bisect an escape.
+# With that in place the pacing can come back at its previously-proven size and
+# both properties hold at once: markers stay intact AND the pipe is not
+# overrun.
+#
+# So: 200 bytes per write with _INTER_CHUNK_DELAY between them, boundaries
+# escape-aware. A 4 KB paste is ~20 chunks ≈ 200 ms, which is not perceptible.
+# If this is raised again, the thing to verify is not "does the bridge work"
+# but "does a multi-KB paste arrive COMPLETE, head included."
+_SINGLE_WRITE_MAX = 200
 
-# Chunk size used only above _SINGLE_WRITE_MAX.
-_CHUNK_SIZE = 4096
+# Chunk size used above _SINGLE_WRITE_MAX.
+_CHUNK_SIZE = 200
 
 def _split_preserving_escapes(data: str, chunk_size: int) -> list[str]:
     """Split *data* into ~*chunk_size* pieces without ever cutting an escape.

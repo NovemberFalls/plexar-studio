@@ -57,15 +57,24 @@ def _assert_no_escape_bisected(data: str, chunks: list[str]) -> None:
         )
 
 
-def test_bridge_sized_payload_is_a_single_write():
-    """A realistic bridge message is far below the single-write ceiling.
+def test_bridge_sized_payload_keeps_its_markers_intact_while_chunked():
+    """A bridge message IS chunked — and its markers still survive.
 
-    This is the property that actually fixes the reported bug: if the payload
-    is never cut, the markers cannot be split.
+    This test previously asserted the opposite (that such a message goes out as
+    one uncut write, because the ceiling was 64 KB). That was the wrong fix for
+    the bridge bug: dropping the cut also dropped the pacing ConPTY needs, and
+    multi-KB pastes started arriving with their heads missing.
+
+    Escape-safe boundaries — not the absence of boundaries — are what keep the
+    markers whole, so the pacing can stay.
     """
     message = _BP_START + ("word " * 200) + _BP_END
-    assert len(message) < _SINGLE_WRITE_MAX
-    assert _split_preserving_escapes(message, _SINGLE_WRITE_MAX) == [message]
+    chunks = _split_preserving_escapes(message, _CHUNK_SIZE)
+
+    assert len(chunks) > 1, "a message this size must be paced, not sent in one burst"
+    _assert_no_escape_bisected(message, chunks)
+    assert chunks[0].startswith(_BP_START), "the start marker must survive whole"
+    assert chunks[-1].endswith(_BP_END), "the end marker must survive whole"
 
 
 def test_boundary_landing_inside_paste_end_marker_rewinds():
@@ -106,7 +115,10 @@ def test_plain_text_splits_at_the_requested_size():
     """No escapes present → boundaries are exactly where asked (no drift)."""
     data = "z" * 10_000
     chunks = _split_preserving_escapes(data, _CHUNK_SIZE)
-    assert [len(c) for c in chunks] == [_CHUNK_SIZE, _CHUNK_SIZE, 10_000 - 2 * _CHUNK_SIZE]
+    assert "".join(chunks) == data
+    # Every chunk but the last is exactly the requested size — no drift.
+    assert all(len(c) == _CHUNK_SIZE for c in chunks[:-1])
+    assert len(chunks[-1]) == 10_000 % _CHUNK_SIZE or len(chunks[-1]) == _CHUNK_SIZE
 
 
 def test_lone_esc_cannot_rewind_arbitrarily_far():

@@ -42,7 +42,37 @@ received bytes; it hung and I killed it rather than sink more time. So the
 **threshold is unknown** — 4 KB fails is inferred, not observed. Whoever picks
 this up should get that number first, because it sets the ceiling.
 
-## Proposed fix
+## RESOLVED (pending owner confirmation) — the pacing was load-bearing
+
+Owner ran the decisive test: copied ~50 lines, pasted into **Notepad** — the
+full text was there, so the CLIPBOARD AND THE COPY ARE FINE. The same paste into
+a Cockpit terminal delivered only the final ~4 lines.
+
+**The head was lost and the tail survived.** That is not truncation-on-write
+(which keeps the head and loses the tail); it is a receiver whose buffer was
+overrun and kept only what arrived last.
+
+Which makes the cause mine, and it is not the one this file originally proposed.
+Raising `_SINGLE_WRITE_MAX` to 64 KB did not merely remove an arbitrary cut — it
+removed the **pacing**. The old path wrote 200 bytes at a time with
+`_INTER_CHUNK_DELAY` (10 ms) between writes, and that delay is what kept ConPTY's
+input buffer from being written faster than claude.exe drains it. A ~4 KB paste
+went out as one burst, ConPTY kept the tail, and every layer reported success —
+`conpty.write()` returned the full byte count, `WriteFile` never failed, no log
+line anywhere.
+
+The escape-splitting diagnosis for the bridge was right; the remedy was wrong.
+The bridge is fixed by `_split_preserving_escapes` (boundaries cannot bisect a
+marker), NOT by the absence of boundaries. With that in place the pacing comes
+back at its previously-proven size and both properties hold at once.
+
+Fix: `_SINGLE_WRITE_MAX` and `_CHUNK_SIZE` back to 200, escape-aware boundaries
+retained. A 4 KB paste is ~20 chunks ≈ 200 ms.
+
+**If this ceiling is ever raised again, the test is not "does the bridge work"
+— it is "does a multi-KB paste arrive COMPLETE, head included."**
+
+## Original proposed fix (superseded — kept for the reasoning)
 
 The two requirements are not in conflict once the boundaries are escape-aware:
 
