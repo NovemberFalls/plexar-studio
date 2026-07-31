@@ -1384,11 +1384,12 @@ class PtyManager:
                         timeout=timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("PTY write timed out for %s — marking session dead", terminal_id)
-                    session.alive = False
+                    # A timeout means THIS write did not land; it does not prove
+                    # the process is gone. Confirm before declaring death.
+                    self._mark_dead_if_process_gone(session, terminal_id, "write timed out")
                     return False
                 except Exception:
-                    logger.debug("PTY async write error for %s", terminal_id)
+                    logger.warning("PTY async write error for %s", terminal_id, exc_info=True)
                     return False
 
             # Above the ceiling: chunk with async yields to let the pipe drain,
@@ -1405,14 +1406,13 @@ class PtyManager:
                     if not ok:
                         return False
                 except asyncio.TimeoutError:
-                    logger.warning(
-                        "PTY write timed out for %s at chunk %d/%d",
-                        terminal_id, chunk_index + 1, len(chunks),
+                    self._mark_dead_if_process_gone(
+                        session, terminal_id,
+                        f"write timed out at chunk {chunk_index + 1}/{len(chunks)}",
                     )
-                    session.alive = False
                     return False
                 except Exception:
-                    logger.debug("PTY async write error for %s", terminal_id)
+                    logger.warning("PTY async write error for %s", terminal_id, exc_info=True)
                     return False
                 # Yield to event loop between chunks so the ConPTY pipe can drain
                 # and heartbeats stay responsive.  A real delay (not just sleep(0))
@@ -1421,6 +1421,78 @@ class PtyManager:
                 if chunk_index + 1 < len(chunks):
                     await asyncio.sleep(_INTER_CHUNK_DELAY)
             return True
+
+    def _mark_dead_if_process_gone(self, session, terminal_id: str, why: str) -> bool:
+        """Declare a session dead ONLY if its process has actually exited.
+
+        Returns True if the session was marked dead.
+
+        This exists because the opposite — declaring death on any I/O failure —
+        produced a zombie that was worse than either real state. A transient
+        write error (a busy pipe while the child repaints a full-screen TUI, for
+        instance) used to set ``alive = False`` unconditionally. The WS forwarder
+        then printed "[Session ended]" and stopped, while ``pty.isalive()`` was
+        still True — so the dead-session purge, which requires BOTH flags, never
+        collected it. The user was left with a pane that said the session had
+        ended, refused input, and had a live claude.exe behind it.
+
+        The process is the source of truth. If it is still running, a failed
+        write is a failed write, not a death.
+        """
+        try:
+            still_running = session.pty.isalive()
+        except Exception:
+            # If we cannot even ask, assume the worst — an unqueryable PTY is
+            # not one we can keep forwarding to.
+            still_running = False
+
+        if still_running:
+            logger.warning(
+                "PTY %s for terminal %s, but the process is still alive — "
+                "failing this write only, session stays open",
+                why, terminal_id, exc_info=True,
+            )
+            return False
+
+        logger.warning(
+            "PTY %s for terminal %s and the process has exited — marking dead",
+            why, terminal_id,
+        )
+        session.alive = False
+        return True
+
+    def resync_alive(self, terminal_id: str) -> bool:
+        """Re-derive ``session.alive`` from the process, healing a stale flag.
+
+        Returns the reconciled liveness.
+
+        A session whose ``alive`` flag said False while its process was still
+        running could never recover: the WS forwarder's loop is gated on
+        ``session.alive``, so every reconnect exited immediately and re-sent the
+        "[Session ended]" banner, and the purge never collected it because the
+        process was up. Reconnecting is exactly the moment to re-ask the
+        question, so a user who hit that state gets their session back instead
+        of having to kill a pane whose process was healthy all along.
+        """
+        session = self.sessions.get(terminal_id)
+        if session is None:
+            return False
+        try:
+            running = session.pty.isalive()
+        except Exception:
+            logger.warning("Could not query liveness for %s", terminal_id, exc_info=True)
+            return session.alive
+
+        if running and not session.alive:
+            logger.warning(
+                "Terminal %s was flagged dead but its process is alive — restoring",
+                terminal_id,
+            )
+            session.alive = True
+        elif not running and session.alive:
+            logger.info("Terminal %s process has exited — marking dead", terminal_id)
+            session.alive = False
+        return session.alive
 
     def _write_pty_sync(self, terminal_id: str, data: str) -> bool:
         """Executor-safe PTY write (avoids isalive() kernel call on event loop)."""
@@ -1474,8 +1546,13 @@ class PtyManager:
                 retries += 1
             return True
         except Exception:
-            logger.debug("PTY write error for %s", terminal_id, exc_info=True)
-            session.alive = False
+            # Was: logger.debug(...) + unconditional session.alive = False.
+            # Both halves were wrong. DEBUG meant the only path that killed a
+            # session was invisible at the default INFO level, so this failure
+            # left no trace in the log at all; and killing the session on any
+            # exception created the zombie described in
+            # _mark_dead_if_process_gone.
+            self._mark_dead_if_process_gone(session, terminal_id, "write raised")
             return False
 
     def start_state_ticker(self) -> None:

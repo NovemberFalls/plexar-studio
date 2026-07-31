@@ -1210,6 +1210,12 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
         await websocket.close(code=4004, reason="Terminal not found")
         return
 
+    # Re-derive liveness from the process before forwarding. If a transient I/O
+    # error previously flagged this session dead while claude.exe kept running,
+    # the forwarder below would exit instantly and re-send "[Session ended]" on
+    # every reconnect — a pane that could never recover. See resync_alive.
+    pty_manager.resync_alive(terminal_id)
+
     # Bump the generation counter and capture this connection's generation value.
     # If another WS connects to the same terminal later it will bump again, making
     # this forwarder's my_generation stale — the check in pty_to_ws() will stop it.

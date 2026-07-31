@@ -154,12 +154,27 @@ class TestWritePtySync:
         assert self.mgr._write_pty_sync("t1", "hi") is False
         assert session.alive is False
 
-    def test_exception_marks_session_dead(self):
-        """write() raises OSError — marks session dead and returns False."""
+    def test_exception_with_live_process_fails_the_write_but_keeps_the_session(self):
+        """write() raises but the process is alive — fail the write, not the session.
+
+        CONTRACT CHANGE (was: any exception marked the session dead). That older
+        behaviour is the owner-reported "[Session ended]" bug: a transient write
+        error killed a session whose claude.exe was still running, and because
+        the dead-session purge requires the process to be gone too, the result
+        was an unpurgeable, unusable pane. See tests/test_pty_liveness.py.
+        """
         session = self._add_session("t1")
         session.pty.write.side_effect = OSError("pipe broken")
         result = self.mgr._write_pty_sync("t1", "hello")
         assert result is False
+        assert session.alive is True
+
+    def test_exception_with_exited_process_marks_session_dead(self):
+        """write() raises AND the process has exited — genuinely dead."""
+        session = self._add_session("t1")
+        session.pty.write.side_effect = OSError("pipe broken")
+        session.pty.isalive.return_value = False
+        assert self.mgr._write_pty_sync("t1", "hello") is False
         assert session.alive is False
 
     def test_multibyte_partial_write_at_clean_boundary(self):

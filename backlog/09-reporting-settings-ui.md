@@ -79,6 +79,24 @@ row.
 
 ---
 
+## Group E — Observability (raised by the "[Session ended]" hunt)
+
+### E1. The test suite writes into the user's real log file
+`~/.claude-cockpit/logs/cockpit.log` contains pytest tracebacks — deliberate
+error-path tests from `test_pricing_store.py` (including a literal
+`RuntimeError("something truly unexpected")`) sitting in the shipped log next to
+real events. Anyone reading the log to diagnose a live problem has to first work
+out which entries are fake. Tests should log to a tmp path.
+
+### E2. Session lifecycle needs a real audit trail
+Owner's words: *"if you are unable to track this we need a better built in audit
+log."* Correct. The `[Session ended]` bug logged at DEBUG, so the one code path
+that killed sessions was invisible at the shipped INFO level — the log looked
+clean while sessions were dying. That path is now WARNING, but the general point
+stands: **every transition of `session.alive` should be logged with its cause.**
+Right now several sites flip it with no record at all.
+
+
 ## Group D — Strategic, plan before touching
 
 Not actionable yet; recorded so they aren't rediscovered.

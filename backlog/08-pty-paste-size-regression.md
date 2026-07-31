@@ -58,6 +58,18 @@ Cockpit invented. The 200-byte number was arbitrary; the existence of a ceiling
 is not. The honest version of the ask is "no ceiling below what the pipe can
 take," which is what the fix above delivers.
 
+## Diagnosis is now possible (it was not before)
+
+While chasing the separate `[Session ended]` bug it turned out that
+`_write_pty_sync`'s failure path logged at **DEBUG** — invisible at the shipped
+INFO level. So if the paste failure went through a write error, it left no trace
+at all, which is why the log looked clean. That path now logs at WARNING with
+the exception, and partial writes / the safety valve already logged. **Retry the
+paste on the next build and read the log**: it will now say whether the write
+raised, wrote partially, tripped the 50-retry valve, or reported success (which
+would mean ConPTY accepted the bytes and dropped them silently — the original
+hypothesis, and the only one that leaves no log line).
+
 ## Regression test owed
 
 There is no test covering a large *user* paste end-to-end — the new
