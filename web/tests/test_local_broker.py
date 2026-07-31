@@ -328,7 +328,7 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
         "kind": "plexar",
         "scope": "local",
         "capabilities": ["models", "health", "instances", "reports", "gpus",
-                         "timeseries"],
+                         "timeseries", "model-control"],
         "endpoint_hint": "127.0.0.1:8760",
         "managed": False,
     }
@@ -406,6 +406,9 @@ async def test_provider_models_normalization(client, monkeypatch):
         "id": "sparse-model", "type": None, "arch": None, "quantization": None,
         "state": None, "max_context_length": None, "loaded_context_length": None,
         "container_path": None, "name": None, "host_path": None,
+        # Plexar addresses load/unload by instance; null for every other
+        # backend, and present rather than absent so the shape stays uniform.
+        "instance_id": None,
     }
 
 

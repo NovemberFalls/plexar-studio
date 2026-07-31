@@ -2979,9 +2979,13 @@ _PROVIDERS = {
         "broker_url": os.getenv("COCKPIT_PLEXAR_URL", "http://127.0.0.1:8760").rstrip("/"),
         "management_url": os.getenv("COCKPIT_PLEXAR_URL", "http://127.0.0.1:8760").rstrip("/"),
         "auth": {"type": "none"},
-        # Deliberately NOT "model-control": Plexar owns container lifecycle now.
-        # Cockpit offering a restart button for an engine it does not own is the
-        # false-advertising bug the vLLM entry above already documents.
+        # "model-control" was correctly ABSENT while Plexar owned lifecycle and
+        # exposed no way to drive it -- offering a button Cockpit could not
+        # honour is the false-advertising bug the vLLM entry documents. Plexar
+        # added POST /api/instances/{id}/{load,unload} on 2026-07-31, so the
+        # capability is now a promise Cockpit can actually keep. Note this is
+        # load/unload only: RESTART stays Plexar's, because Cockpit still does
+        # not own those containers.
         # "instances" / "reports" / "gpus" are Plexar-shaped reads that no other
         # provider serves. Cockpit KEEPS its own reporting; these are a second
         # source beside it, never a replacement -- and every Plexar figure
@@ -2990,7 +2994,7 @@ _PROVIDERS = {
         # structurally cannot provide -- so it is a separate promise, not an
         # implied part of the reporting one.
         "capabilities": ["models", "health", "instances", "reports", "gpus",
-                         "timeseries"],
+                         "timeseries", "model-control"],
     },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
@@ -4679,7 +4683,11 @@ async def get_local_status():
 # traces routes are new, all provider-keyed by construction.
 
 _MODEL_FIELDS = ("id", "type", "arch", "quantization", "state",
-                  "max_context_length", "loaded_context_length", "container_path")
+                  "max_context_length", "loaded_context_length", "container_path",
+                  # Plexar addresses load/unload by INSTANCE, not by model name:
+                  # its catalog can list the same served name more than once.
+                  # Null for every other backend.
+                  "instance_id")
 
 
 def _normalize_vllm_raw_model(m: dict) -> dict:
@@ -4746,6 +4754,11 @@ def _normalize_plexar_raw_model(m: dict) -> dict:
         # model is not servable should not have to re-derive it.
         out["reason"] = envelope.get("reason")
         out["eta_seconds"] = envelope.get("eta_seconds")
+        # Plexar's load/unload are keyed by INSTANCE, not by model name, and
+        # the catalog can carry the same served name twice. Carrying the id
+        # through is what lets a picker toggle a row without Cockpit guessing
+        # which instance a name meant.
+        out["instance_id"] = envelope.get("instance_id")
 
     if out.get("quantization") is None:
         sniff_source = m.get("id") or ""
@@ -5378,6 +5391,70 @@ async def _lms_load_bg(model_id: str) -> None:
         logger.error("lms load %s crashed", model_id, exc_info=True)
 
 
+def _plexar_instance_for_model(provider: dict, model_id: str):
+    """Resolve a served model name to the instance that serves it.
+
+    Cockpit's control routes are keyed by MODEL (that is what a picker row
+    is); Plexar's are keyed by INSTANCE. Its catalog can legitimately list the
+    same served name more than once, so this is a lookup, not a rename.
+
+    Returns ``(instance_id, None)`` or ``(None, JSONResponse)``. **Ambiguity is
+    refused, never resolved by picking the first match** — the two candidates
+    are different engines on different GPUs, and silently toggling whichever
+    happened to sort first is the class of guess that made the old container
+    name a lie.
+    """
+    try:
+        catalog = _mgmt_get(provider, "/v1/models")
+    except Exception:
+        logger.warning("Plexar catalog unreadable during model control", exc_info=True)
+        return None, JSONResponse(
+            {"error": "Plexar is not answering, so the instance could not be identified."},
+            status_code=502,
+        )
+
+    entries = catalog.get("data") if isinstance(catalog, dict) else None
+    if not isinstance(entries, list):
+        return None, JSONResponse({"error": "Plexar catalog was not catalog-shaped."},
+                                  status_code=502)
+
+    matches = [
+        e for e in entries
+        if isinstance(e, dict) and e.get("id") == model_id
+        and isinstance(e.get("plexar"), dict) and e["plexar"].get("instance_id")
+    ]
+    if not matches:
+        return None, JSONResponse(
+            {"error": f"no Plexar instance serves {model_id!r}"}, status_code=404)
+    if len(matches) > 1:
+        return None, JSONResponse(
+            {"error": (
+                f"{len(matches)} instances serve {model_id!r}; Cockpit will not guess "
+                "which one to control. Address it by instance in Plexar."
+            )},
+            status_code=409,
+        )
+    return matches[0]["plexar"]["instance_id"], None
+
+
+async def _plexar_control(provider: dict, model_id: str, action: str):
+    """Shared body for Plexar's load/unload."""
+    instance_id, err = _plexar_instance_for_model(provider, model_id)
+    if err is not None:
+        return err
+    result = await asyncio.to_thread(
+        plexar_client.control_instance, provider["management_url"], instance_id, action
+    )
+    if not result.get("ok"):
+        # A write that did not take must not answer 200 — the UI would show a
+        # toggle that moved while the GPU did nothing.
+        return JSONResponse(
+            {"error": result.get("detail") or f"{action} failed", "reason": result.get("reason")},
+            status_code=502,
+        )
+    return JSONResponse(result)
+
+
 @app.post("/api/local/{provider_id}/models/{model_id:path}/load")
 async def load_provider_model(provider_id: str, model_id: str):
     provider = _require_provider(provider_id)
@@ -5387,6 +5464,12 @@ async def load_provider_model(provider_id: str, model_id: str):
         return JSONResponse({"error": "capability not available"}, status_code=404)
     if provider.get("scope") != "local":
         return JSONResponse({"error": "control not available for remote providers"}, status_code=403)
+    if not _LOCAL_MODEL_ID_RE.match(model_id):
+        return JSONResponse({"error": "invalid model id"}, status_code=400)
+    if provider.get("kind") == "plexar":
+        # Plexar keeps an unloaded instance in /v1/models as `state: down`, so
+        # this genuinely is a load — not a create.
+        return await _plexar_control(provider, model_id, "load")
     if provider.get("kind") == "vllm":
         return JSONResponse(
             {"error": (
@@ -5413,6 +5496,13 @@ async def unload_provider_model(provider_id: str, model_id: str):
         return JSONResponse({"error": "capability not available"}, status_code=404)
     if provider.get("scope") != "local":
         return JSONResponse({"error": "control not available for remote providers"}, status_code=403)
+    if not _LOCAL_MODEL_ID_RE.match(model_id):
+        return JSONResponse({"error": "invalid model id"}, status_code=400)
+    if provider.get("kind") == "plexar":
+        # Frees the GPU but KEEPS the declaration, so the row stays in the
+        # picker as `state: down` and can be toggled back on. Deliberately not
+        # DELETE, which forgets the instance and its whole config.
+        return await _plexar_control(provider, model_id, "unload")
     if provider.get("kind") == "vllm":
         return JSONResponse(
             {"error": (

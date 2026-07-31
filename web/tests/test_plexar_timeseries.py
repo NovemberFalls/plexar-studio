@@ -221,3 +221,138 @@ async def test_route_404s_for_unknown_provider_and_missing_capability():
     resp = await server.get_provider_timeseries("lmstudio-local")
     assert resp.status_code == 404
     assert json.loads(resp.body)["error"] == "capability not available"
+
+
+# ---------------------------------------------------------------------------
+# Model control (load / unload) — Plexar shipped the routes 2026-07-31
+# ---------------------------------------------------------------------------
+#
+# Cockpit's control routes are keyed by MODEL (a picker row is a model);
+# Plexar's are keyed by INSTANCE, and its catalog can list the same served name
+# more than once. So there is a resolution step, and the interesting behaviour
+# is what it refuses.
+
+def _catalog(*entries):
+    return {"data": [
+        {"id": mid, "object": "model", "plexar": {"state": st, "instance_id": iid}}
+        for mid, st, iid in entries
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_unload_resolves_the_model_to_its_instance(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(server, "_mgmt_get",
+                        lambda p, path: _catalog(("qwen", "serving", "gpu-main")))
+    monkeypatch.setattr(
+        server.plexar_client, "control_instance",
+        lambda url, inst, action: sent.update(inst=inst, action=action) or {"ok": True},
+    )
+    resp = await server.unload_provider_model("plexar", "qwen")
+    assert resp.status_code == 200
+    assert sent == {"inst": "gpu-main", "action": "unload"}
+
+
+@pytest.mark.asyncio
+async def test_load_uses_the_load_verb(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(server, "_mgmt_get",
+                        lambda p, path: _catalog(("qwen", "down", "gpu-main")))
+    monkeypatch.setattr(
+        server.plexar_client, "control_instance",
+        lambda url, inst, action: sent.update(action=action) or {"ok": True},
+    )
+    await server.load_provider_model("plexar", "qwen")
+    assert sent["action"] == "load", "an unloaded instance is loaded, not created"
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_model_name_is_refused_not_guessed(monkeypatch):
+    """Two instances serving one name are different engines on different GPUs.
+
+    Taking the first match would toggle whichever happened to sort first --
+    the same class of guess that made the old container name a lie.
+    """
+    called = []
+    monkeypatch.setattr(
+        server, "_mgmt_get",
+        lambda p, path: _catalog(("qwen", "serving", "gpu-a"), ("qwen", "serving", "gpu-b")),
+    )
+    monkeypatch.setattr(server.plexar_client, "control_instance",
+                        lambda *a: called.append(a))
+    resp = await server.unload_provider_model("plexar", "qwen")
+
+    assert resp.status_code == 409
+    assert called == [], "nothing may be controlled while the target is ambiguous"
+    assert "will not guess" in json.loads(resp.body)["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_model_is_a_404(monkeypatch):
+    monkeypatch.setattr(server, "_mgmt_get",
+                        lambda p, path: _catalog(("qwen", "serving", "gpu-main")))
+    resp = await server.unload_provider_model("plexar", "llama")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_catalog_does_not_become_a_blind_write(monkeypatch):
+    called = []
+
+    def boom(p, path):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(server, "_mgmt_get", boom)
+    monkeypatch.setattr(server.plexar_client, "control_instance",
+                        lambda *a: called.append(a))
+    resp = await server.unload_provider_model("plexar", "qwen")
+    assert resp.status_code == 502
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_control_is_not_reported_as_success(monkeypatch):
+    """A toggle that moves while the GPU does nothing is worse than an error."""
+    monkeypatch.setattr(server, "_mgmt_get",
+                        lambda p, path: _catalog(("qwen", "serving", "gpu-main")))
+    monkeypatch.setattr(
+        server.plexar_client, "control_instance",
+        lambda url, inst, action: {"ok": False, "reason": "refused",
+                                   "detail": "instance is draining"},
+    )
+    resp = await server.unload_provider_model("plexar", "qwen")
+    assert resp.status_code == 502
+    assert "draining" in json.loads(resp.body)["error"]
+
+
+def test_delete_is_not_a_verb_cockpit_can_send():
+    """`unload` keeps the declaration; DELETE forgets the instance entirely.
+
+    A picker needs a list it can toggle, not one it can destroy, so the
+    destructive verb is not reachable from the control path at all.
+    """
+    import plexar_client as _pc
+    assert _pc.CONTROL_ACTIONS == ("load", "unload")
+    assert _pc.control_instance("http://x", "i", "delete")["reason"] == "bad_action"
+
+
+def test_instance_id_survives_normalization():
+    out = server._normalize_plexar_raw_model(
+        {"id": "qwen", "plexar": {"state": "serving", "instance_id": "gpu-main"}}
+    )
+    assert out["instance_id"] == "gpu-main"
+    assert "instance_id" in server._MODEL_FIELDS, (
+        "the field is whitelisted out of the /models response otherwise"
+    )
+
+
+def test_an_unloaded_instance_stays_in_the_catalog_as_not_loaded():
+    """Plexar keeps it listed as `state: down` on purpose -- that IS the picker.
+
+    It must not be dressed up as loaded, and must not vanish: a model that is
+    unloaded is not a model that does not exist.
+    """
+    out = server._normalize_plexar_raw_model(
+        {"id": "qwen", "plexar": {"state": "down", "instance_id": "gpu-main"}}
+    )
+    assert out["state"] == "down"

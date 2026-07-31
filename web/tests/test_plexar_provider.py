@@ -31,7 +31,7 @@ import server  # noqa: E402
 # Registry
 # ---------------------------------------------------------------------------
 
-def test_plexar_is_registered_without_queue_or_model_control():
+def test_plexar_is_registered_without_queue():
     p = server._PROVIDERS["plexar"]
     caps = p["capabilities"]
     assert "models" in caps and "health" in caps
@@ -39,10 +39,19 @@ def test_plexar_is_registered_without_queue_or_model_control():
         "Plexar has no lane broker in front of it — advertising `queue` is what "
         "makes the health route probe a /queue that does not exist"
     )
-    assert "model-control" not in caps, (
-        "Plexar owns container lifecycle; a Cockpit restart button for an engine "
-        "it does not own is false advertising"
-    )
+
+
+def test_plexar_advertises_model_control_now_that_it_can_honour_it():
+    """This assertion used to be its exact inverse, and both were right.
+
+    A capability is a PROMISE the matching route will answer. While Plexar
+    owned lifecycle and exposed no way to drive it, advertising `model-control`
+    would have put buttons in the UI that Cockpit could not honour. Plexar
+    shipped POST /api/instances/{id}/{load,unload} on 2026-07-31, so the promise
+    is now keepable — the capability follows the routes, not the other way
+    round.
+    """
+    assert "model-control" in server._PROVIDERS["plexar"]["capabilities"]
 
 
 def test_plexar_address_is_overridable():

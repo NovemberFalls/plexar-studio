@@ -343,6 +343,51 @@ def fetch_timeseries(
     }
 
 
+#: The only lifecycle verbs Cockpit is allowed to send. `unload` frees the GPU
+#: but KEEPS the declaration; `load` starts it again with no config re-supply.
+#: `DELETE /api/instances/{id}` is deliberately NOT here — it forgets the
+#: instance entirely, so re-running the same model would mean re-entering its
+#: whole config. A picker needs a list it can toggle, not one it can destroy,
+#: and a destructive verb behind a toggle is how data gets lost by accident.
+CONTROL_ACTIONS = ("load", "unload")
+
+
+def control_instance(base_url: str, instance_id: str, action: str) -> dict:
+    """POST ``/api/instances/{id}/{load|unload}``.
+
+    Unlike the read paths this is a WRITE, so it does not return a soft
+    availability envelope: a control that silently did nothing is worse than
+    one that reports failure, and the caller needs to know which happened.
+    """
+    if action not in CONTROL_ACTIONS:
+        return {"ok": False, "reason": "bad_action", "detail": f"unknown action {action!r}"}
+
+    url = f"{base_url}/api/instances/{urllib.parse.quote(instance_id)}/{action}"
+    req = urllib.request.Request(
+        url, data=b"", method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
+    try:
+        # Loading pulls a model onto the GPU and unloading drains in-flight
+        # requests first, so neither fits the 6s read timeout.
+        with urllib.request.urlopen(req, timeout=120.0) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        refusal = _refused(exc)
+        return {"ok": False, "reason": refusal["reason"], "detail": refusal["detail"]}
+    except urllib.error.URLError:
+        return {"ok": False, "reason": "unreachable",
+                "detail": "Plexar is not answering on its address."}
+    except Exception:
+        logger.warning("Plexar %s of %s failed", action, instance_id, exc_info=True)
+        return {"ok": False, "reason": "bad_response",
+                "detail": "Plexar returned something unreadable."}
+
+    logger.info("Plexar %s instance %s", action, instance_id)
+    return {"ok": True, "action": action, "instance_id": instance_id,
+            "result": body if isinstance(body, dict) else None}
+
+
 def fetch_gpus(base_url: str) -> dict:
     """Plexar's ``/api/planner/gpus`` — physical cards, VRAM, display usage."""
     try:
