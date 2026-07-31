@@ -110,6 +110,7 @@ def test_status_preserves_the_envelope_and_live_gauges(monkeypatch):
             "state": "unreachable", "available": False,
             "reason": "adopted an engine already answering",
             "action": "check logs, then restart", "eta_seconds": None,
+            "container": "vllm-bench", "container_reason": None,
             "live": {"available": False, "reason": "last sample is 1600s old",
                      "running": None, "tokens_per_sec": None},
         }],
@@ -124,6 +125,35 @@ def test_status_preserves_the_envelope_and_live_gauges(monkeypatch):
     assert inst["action"] == "check logs, then restart"
     assert inst["external"] is True
     assert inst["live"]["running"] is None, "a null gauge stays null, never 0"
+    assert inst["container"] == "vllm-bench", (
+        "the container is what a user needs for `docker logs` — Plexar now "
+        "identifies it from the daemon rather than assuming its own naming "
+        "convention applied to an engine it did not launch"
+    )
+
+
+def test_an_unidentified_container_keeps_the_reason_that_explains_the_null():
+    """A null container is 'we could not identify it', NOT 'there is none'.
+
+    Something is demonstrably answering — that is why it was adopted. Dropping
+    `container_reason` would make those two meanings indistinguishable, which
+    is the exact ambiguity Plexar added the field to remove.
+    """
+    payload = {"instances": [{
+        "id": "gpu-main", "state": "serving", "external": True,
+        "container": None,
+        "container_reason": "two containers publish this port; cannot disambiguate",
+    }]}
+    import plexar_client as _pc
+    orig = _pc._get
+    try:
+        _pc._get = lambda base, path: payload
+        inst = _pc.fetch_status("http://x")["instances"][0]
+    finally:
+        _pc._get = orig
+
+    assert inst["container"] is None
+    assert "disambiguate" in inst["container_reason"]
 
 
 def test_status_unreachable_reports_a_reason(monkeypatch):

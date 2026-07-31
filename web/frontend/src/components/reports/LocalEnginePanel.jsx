@@ -382,6 +382,21 @@ export default function LocalEnginePanel({ range }) {
                     adopted
                   </span>
                 )}
+                {/* The container is what a user needs to run `docker logs`, so
+                    a wrong name is worse than none. Plexar identifies it from
+                    the daemon now; when it cannot, it says why — and an
+                    unidentified container is NOT an absent one, so the reason
+                    is shown rather than the row silently going blank. */}
+                {inst.container ? (
+                  <code style={{ fontSize: 10, color: "var(--cc-muted)" }}>{inst.container}</code>
+                ) : inst.container_reason ? (
+                  <span
+                    style={{ fontSize: 10, color: "var(--cc-muted)", fontStyle: "italic" }}
+                    title={inst.container_reason}
+                  >
+                    container not identified
+                  </span>
+                ) : null}
               </div>
               {/* The reason/action are Plexar's own words — a restarting engine
                   says so, with its ETA, instead of reading as a flat failure. */}

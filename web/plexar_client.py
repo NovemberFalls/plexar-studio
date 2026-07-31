@@ -145,6 +145,21 @@ def fetch_status(base_url: str) -> dict:
             # therefore will not stop. Surfacing it stops a user wondering why
             # a restart control is absent.
             "external": inst.get("external"),
+            # SAFE TO SURFACE as of 2026-07-31, and it was not before: an
+            # adopted instance used to keep the name Plexar's own convention
+            # WOULD have given a container it launched (`plexar-vllm-<id>`),
+            # applied to one it demonstrably did not — `docker logs` against it
+            # fails. Plexar now asks the daemon which container actually
+            # publishes the port.
+            #
+            # A null is "we could not identify it", NEVER "there is no
+            # container" — something is demonstrably answering, which is why it
+            # was adopted at all. That is why `container_reason` has to travel
+            # with it: a null with no reason cannot be told apart from the
+            # other meaning, and dropping it here would recreate the exact
+            # ambiguity the fix removed.
+            "container": inst.get("container"),
+            "container_reason": inst.get("container_reason"),
             "in_flight": inst.get("in_flight"),
             "drift": inst.get("drift"),
             "live": inst.get("live"),

@@ -43,6 +43,8 @@ const INSTANCES = {
     reason: null,
     action: null,
     external: true,
+    container: "plexar-vllm-gpu-main",
+    container_reason: null,
     live: { available: true, running: 0, tokens_per_sec: 55.05 },
   }],
 };
@@ -169,6 +171,30 @@ describe("LocalEnginePanel", () => {
     render(<LocalEnginePanel range="all" />);
     expect(await screen.findByText("unreachable")).toBeInTheDocument();
     expect(screen.getByText(/check logs, then restart/)).toBeInTheDocument();
+  });
+
+  it("shows the container name, which is what `docker logs` needs", async () => {
+    mockRoutes();
+    render(<LocalEnginePanel range="all" />);
+    expect(await screen.findByText("plexar-vllm-gpu-main")).toBeInTheDocument();
+  });
+
+  it("says a container could not be identified rather than going blank", async () => {
+    // A null container means "we could not determine it", never "there is no
+    // container" — something is answering, which is why it was adopted.
+    mockRoutes({
+      instances: {
+        available: true,
+        instances: [{
+          id: "gpu-main", served_model_name: "qwen", state: "serving",
+          available: true, external: true, container: null,
+          container_reason: "two containers publish this port",
+        }],
+      },
+    });
+    render(<LocalEnginePanel range="all" />);
+    const marker = await screen.findByText("container not identified");
+    expect(marker).toHaveAttribute("title", "two containers publish this port");
   });
 
   it("shows a loading engine's ETA rather than a flat failure", async () => {
