@@ -231,8 +231,14 @@ async def test_successful_result_is_cached(creds, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_failures_are_not_cached(creds, monkeypatch):
-    """A transient failure must not pin the panel to 'unavailable' for a minute."""
+async def test_failures_are_cached_briefly(creds, monkeypatch):
+    """A persistent failure must not produce one upstream request per poll.
+
+    REGRESSION: failures were originally never cached, so a poll that started
+    erroring re-hit the API every single time — which is how a 60s poll earned
+    repeated HTTP 429s. The failure cache is deliberately SHORT so a one-off
+    blip still clears quickly.
+    """
     calls = []
 
     def handler(request):
@@ -242,4 +248,62 @@ async def test_failures_are_not_cached(creds, monkeypatch):
     _mock_transport(monkeypatch, handler)
     await anthropic_usage.fetch_usage()
     await anthropic_usage.fetch_usage()
-    assert len(calls) == 2
+    assert len(calls) == 1, "second call within the failure TTL must be cached"
+    assert anthropic_usage._FAILURE_CACHE_TTL < anthropic_usage._CACHE_TTL
+
+
+@pytest.mark.asyncio
+async def test_429_backs_off_and_stops_requesting(creds, monkeypatch):
+    """A 429 must halt requests, INCLUDING forced refreshes.
+
+    Letting force=True through would make the popover a way to keep hammering
+    an endpoint that has explicitly told us to stop.
+    """
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(429, json={"error": "slow down"})
+
+    _mock_transport(monkeypatch, handler)
+    first = await anthropic_usage.fetch_usage()
+    assert first["reason"] == "rate_limited"
+
+    await anthropic_usage.fetch_usage()
+    await anthropic_usage.fetch_usage(force=True)
+    assert len(calls) == 1, "backoff must suppress further requests, force included"
+
+
+@pytest.mark.asyncio
+async def test_429_honours_retry_after(creds, monkeypatch):
+    def handler(request):
+        return httpx.Response(429, headers={"retry-after": "42"}, json={})
+
+    _mock_transport(monkeypatch, handler)
+    await anthropic_usage.fetch_usage()
+    remaining = anthropic_usage._blocked_until - __import__("time").monotonic()
+    assert 0 < remaining <= 42, f"expected a ~42s backoff, got {remaining}"
+
+
+@pytest.mark.asyncio
+async def test_429_keeps_showing_the_last_good_reading(creds, monkeypatch):
+    """Being throttled says nothing about the user's quota.
+
+    Replacing real numbers with an error because WE polled too hard would
+    misreport the account's state.
+    """
+    state = {"limit": True}
+
+    def handler(request):
+        if state["limit"]:
+            return httpx.Response(200, json=_LIVE_SHAPE)
+        return httpx.Response(429, json={})
+
+    _mock_transport(monkeypatch, handler)
+    good = await anthropic_usage.fetch_usage()
+    assert good["available"] is True
+
+    state["limit"] = False
+    after = await anthropic_usage.fetch_usage(force=True)
+    assert after["available"] is True, "must keep the last real reading, not blank it"
+    assert after["limits"][0]["percent"] == 3.0

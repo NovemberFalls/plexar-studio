@@ -15,7 +15,11 @@ import { Gauge } from "lucide-react";
  * would be ceremony without a second reader to justify it.
  */
 
-const POLL_MS = 60_000;
+// 5 minutes. A 60s poll earned repeated HTTP 429s from Anthropic: this endpoint
+// is built for a human running /status occasionally, not a poller. Utilization
+// moves slowly enough that 5 minutes loses nothing, and opening the popover
+// forces a fresh read anyway.
+const POLL_MS = 300_000;
 
 /** Bar colour by how close to the cap we are. Severity comes from the API. */
 function toneFor(percent, severity) {

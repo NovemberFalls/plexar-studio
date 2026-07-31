@@ -53,7 +53,20 @@ _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=10.0)
 
 # Cache TTL. Utilization moves slowly and this is a remote authenticated call
 # on the user's own quota, so polling it hard would be rude and pointless.
-_CACHE_TTL = 60.0
+_CACHE_TTL = 300.0
+
+# How long a FAILURE is cached. Failures were originally not cached at all, so a
+# transient blip could not pin the panel to "unavailable" for a whole minute.
+# That reasoning is still right for one-off errors, but it made rate-limiting
+# self-perpetuating: every poll re-hit the API, which is what earned the 429 in
+# the first place. A short failure cache keeps the transient-blip property
+# (30s, not 5min) while removing the hammering.
+_FAILURE_CACHE_TTL = 30.0
+
+# Backoff after a 429. The upstream endpoint is built for a human running
+# /status occasionally, not for a poller. When it says slow down, slow down --
+# and honour Retry-After when it sends one.
+_RATE_LIMIT_BACKOFF = 900.0
 
 # Env override, mainly for tests and non-default CLI installs.
 _CREDENTIALS_ENV = "COCKPIT_CLAUDE_CREDENTIALS"
@@ -70,7 +83,12 @@ _KIND_LABELS = {
     "weekly_fable": "Current week (Fable)",
 }
 
-_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+_cache: dict[str, Any] = {"at": 0.0, "payload": None, "ttl": _CACHE_TTL}
+
+# Monotonic time before which no request may be made at all, set by a 429.
+# Enforced even against force=True: a manual refresh must not be a way to keep
+# hammering an endpoint that has explicitly asked us to stop.
+_blocked_until: float = 0.0
 
 
 def _credentials_path() -> pathlib.Path:
@@ -113,6 +131,32 @@ def _unavailable(reason: str, detail: str) -> dict:
         "limits": [],
         "fetched_at": None,
     }
+
+
+def _retry_after_seconds(resp) -> Optional[float]:
+    """Seconds from a Retry-After header, if it carries a usable delta."""
+    raw = resp.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        # Only the delta-seconds form is handled; an HTTP-date is rare here and
+        # falling back to the fixed backoff is safer than mis-parsing one.
+        return max(0.0, float(raw.strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _cache_failure(reason: str, detail: str) -> dict:
+    """Return an unavailable payload AND cache it briefly.
+
+    Caching failures stops a persistent error (an expired login, a down
+    network) from producing one upstream request per poll forever.
+    """
+    payload = _unavailable(reason, detail)
+    _cache["at"] = time.monotonic()
+    _cache["payload"] = payload
+    _cache["ttl"] = _FAILURE_CACHE_TTL
+    return payload
 
 
 def _label_for(kind: str) -> str:
@@ -190,9 +234,20 @@ async def fetch_usage(force: bool = False) -> dict:
         unreachable     — network/DNS/timeout.
         bad_response    — 200 with a payload that is not usage-shaped.
     """
+    global _blocked_until
+
     now = time.monotonic()
-    if not force and _cache["payload"] is not None and (now - _cache["at"]) < _CACHE_TTL:
+    if not force and _cache["payload"] is not None and (now - _cache["at"]) < _cache["ttl"]:
         return _cache["payload"]
+
+    # A 429 backoff outranks force= — see _blocked_until.
+    if now < _blocked_until:
+        if _cache["payload"] is not None:
+            return _cache["payload"]
+        return _unavailable(
+            "rate_limited",
+            "Anthropic is rate-limiting usage checks. Retrying shortly.",
+        )
 
     token = read_access_token()
     if not token:
@@ -214,34 +269,53 @@ async def fetch_usage(force: bool = False) -> dict:
             )
     except httpx.HTTPError as exc:
         logger.warning("Anthropic usage fetch failed: %s", exc)
-        return _unavailable("unreachable", "Could not reach the Anthropic usage API.")
+        return _cache_failure("unreachable", "Could not reach the Anthropic usage API.")
 
     if resp.status_code in (401, 403):
         # Deliberately not refreshing — see module docstring.
-        return _unavailable(
+        return _cache_failure(
             "expired",
             "Claude login has expired. Run any `claude` command to refresh it.",
         )
 
+    if resp.status_code == 429:
+        retry_after = _retry_after_seconds(resp) or _RATE_LIMIT_BACKOFF
+        _blocked_until = time.monotonic() + retry_after
+        logger.warning(
+            "Anthropic usage rate-limited (429) — backing off %.0fs", retry_after
+        )
+        # Keep showing the last good reading rather than replacing real numbers
+        # with an error: being throttled says nothing about the user's quota.
+        if _cache["payload"] is not None:
+            return _cache["payload"]
+        return _unavailable(
+            "rate_limited",
+            "Anthropic is rate-limiting usage checks. Retrying shortly.",
+        )
+
     if resp.status_code >= 400:
         logger.warning("Anthropic usage returned HTTP %s", resp.status_code)
-        return _unavailable("bad_response", f"Usage API returned HTTP {resp.status_code}.")
+        return _cache_failure("bad_response", f"Usage API returned HTTP {resp.status_code}.")
 
     try:
         raw = resp.json()
     except ValueError:
-        return _unavailable("bad_response", "Usage API returned a non-JSON body.")
+        return _cache_failure("bad_response", "Usage API returned a non-JSON body.")
 
     if not isinstance(raw, dict) or "limits" not in raw:
-        return _unavailable("bad_response", "Usage API response was not usage-shaped.")
+        return _cache_failure("bad_response", "Usage API response was not usage-shaped.")
 
     payload = _normalize(raw)
-    _cache["at"] = now
+    _cache["at"] = time.monotonic()
     _cache["payload"] = payload
+    _cache["ttl"] = _CACHE_TTL
     return payload
 
 
 def reset_cache() -> None:
-    """Drop the cached payload (used by tests and the force-refresh route)."""
+    """Drop the cached payload and any rate-limit backoff (tests / refresh)."""
+    global _blocked_until
     _cache["at"] = 0.0
     _cache["payload"] = None
+    _cache["ttl"] = _CACHE_TTL
+    _blocked_until = 0.0
