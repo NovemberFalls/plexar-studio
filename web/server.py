@@ -2955,6 +2955,28 @@ _PROVIDERS = {
         # into the broker metrics contract (cumulative-since-start; see adapter).
         "capabilities": ["models", "health", "metrics", "model-discovery"],
     },
+    "plexar": {
+        "id": "plexar", "label": "Plexar (vLLM)", "kind": "plexar",
+        "scope": "local",
+        # Plexar is a FIXED-BIND gateway in front of one or more vLLM
+        # containers: the address never changes, model swaps and restarts
+        # happen behind it, and a not-ready engine answers 503 + Retry-After
+        # rather than ECONNREFUSED. So there is exactly one URL here and
+        # Cockpit needs no changes when it goes multi-model — it just points at
+        # the address and reads /v1/models.
+        #
+        # broker_url is set to the same address only because the field is
+        # required by the registry shape; Plexar has NO broker in front of it
+        # and must never be queue-probed (see get_provider_health). That is
+        # what omitting the "queue" capability means.
+        "broker_url": os.getenv("COCKPIT_PLEXAR_URL", "http://127.0.0.1:8760").rstrip("/"),
+        "management_url": os.getenv("COCKPIT_PLEXAR_URL", "http://127.0.0.1:8760").rstrip("/"),
+        "auth": {"type": "none"},
+        # Deliberately NOT "model-control": Plexar owns container lifecycle now.
+        # Cockpit offering a restart button for an engine it does not own is the
+        # false-advertising bug the vLLM entry above already documents.
+        "capabilities": ["models", "health"],
+    },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
 
@@ -4636,6 +4658,42 @@ def _normalize_vllm_raw_model(m: dict) -> dict:
     return out
 
 
+def _normalize_plexar_raw_model(m: dict) -> dict:
+    """Map Plexar's /v1/models shape onto the common model-fields shape.
+
+    Plexar synthesises an OpenAI-shaped catalog and hangs its state envelope
+    off a ``plexar`` key rather than a top-level ``state``::
+
+        {"id": "...", "plexar": {"state": "serving", "available": true,
+                                 "reason": ..., "eta_seconds": ...}}
+
+    Without this, every Plexar model rendered ``state: null`` — so the UI
+    highlighted nothing and the catalog looked empty while an engine was
+    actively serving.
+
+    ``serving`` and ``degraded`` both map to "loaded" because both can take a
+    request. Anything else (``loading``, ``stopped``, ``failed``) is NOT loaded
+    and must not be dressed up as though it were — the point of Plexar's
+    envelope is that "not ready" carries a reason instead of masquerading as
+    either ready or absent.
+    """
+    out = dict(m)
+    envelope = m.get("plexar")
+    if isinstance(envelope, dict):
+        state = envelope.get("state")
+        out["state"] = "loaded" if state in ("serving", "degraded") else state
+        # Keep the envelope's own words — a UI that wants to explain WHY a
+        # model is not servable should not have to re-derive it.
+        out["reason"] = envelope.get("reason")
+        out["eta_seconds"] = envelope.get("eta_seconds")
+
+    if out.get("quantization") is None:
+        sniff_source = m.get("id") or ""
+        out["quantization"] = _sniff_quantization(sniff_source) if sniff_source else None
+
+    return out
+
+
 def _require_provider(provider_id: str):
     """Look up a provider by id, or None if unknown."""
     return _PROVIDERS.get(provider_id)
@@ -4983,6 +5041,11 @@ async def get_provider_models(provider_id: str):
             _normalize_vllm_raw_model(m) if isinstance(m, dict) else m
             for m in raw_models
         ]
+    elif provider.get("kind") == "plexar":
+        raw_models = [
+            _normalize_plexar_raw_model(m) if isinstance(m, dict) else m
+            for m in raw_models
+        ]
     models = [
         {
             **{field: m.get(field) if isinstance(m, dict) else None for field in _MODEL_FIELDS},
@@ -5021,10 +5084,45 @@ async def get_provider_models(provider_id: str):
 
 
 def _provider_models_loaded_count(data) -> int:
+    """How many of a provider's listed models are actually serving.
+
+    Three catalog dialects, and reading only LM Studio's meant every other
+    backend reported "0 models" while happily serving one:
+
+    * **LM Studio** tags each entry ``state: "loaded" | "not-loaded"`` — it
+      lists models it *could* load, so the filter is essential.
+    * **Plexar** nests the state envelope under a ``plexar`` key
+      (``{"plexar": {"state": "serving", "available": true}}``); there is no
+      top-level ``state``, so the LM Studio filter matched nothing.
+    * **Plain OpenAI-compatible** (vLLM direct) has no state field at all — one
+      process serves exactly the model it was launched with, so anything it
+      lists IS loaded. Counting 0 there was simply wrong.
+
+    Counting a serving engine as 0 is the same class of error as rendering an
+    unreachable backend as 0%: it makes a working system look broken.
+    """
     raw_models = data.get("data") if isinstance(data, dict) else None
     if not raw_models:
         return 0
-    return sum(1 for m in raw_models if isinstance(m, dict) and m.get("state") == "loaded")
+
+    count = 0
+    for m in raw_models:
+        if not isinstance(m, dict):
+            continue
+        plexar = m.get("plexar")
+        if isinstance(plexar, dict):
+            # Plexar states: only "serving" (and "degraded", still answering)
+            # can take a request. loading/stopped/failed cannot.
+            if plexar.get("state") in ("serving", "degraded"):
+                count += 1
+            continue
+        if "state" in m:
+            if m.get("state") == "loaded":
+                count += 1
+            continue
+        # No state reported anywhere: listed means served.
+        count += 1
+    return count
 
 
 @app.get("/api/local/{provider_id}/health")
@@ -5035,7 +5133,17 @@ async def get_provider_health(provider_id: str):
     if "health" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
 
+    # Only providers actually FRONTED by the lane broker get queue-probed.
+    # Probing /queue on a broker-less backend (vLLM direct, Plexar) 404s, and
+    # reporting that as `broker.reachable: false` is a false claim about a
+    # component that does not exist there — which then dragged `ok` to false
+    # for a perfectly healthy engine. The `queue` capability is the signal:
+    # it is exactly "there is a broker in front of this".
+    has_broker = "queue" in provider["capabilities"]
+
     async def probe_broker():
+        if not has_broker:
+            return None  # not applicable — distinct from "unreachable"
         try:
             await asyncio.to_thread(_broker_get, "/queue", "", provider["broker_url"])
             return True
@@ -5053,9 +5161,11 @@ async def get_provider_health(provider_id: str):
         probe_broker(), probe_provider()
     )
     return JSONResponse({
-        "broker": {"reachable": broker_reachable},
+        # `applicable: false` + `reachable: null` says "no broker here", which
+        # is not the same statement as "the broker is down".
+        "broker": {"applicable": has_broker, "reachable": broker_reachable},
         "provider": {"reachable": provider_reachable, "models_loaded": models_loaded},
-        "ok": bool(broker_reachable and provider_reachable),
+        "ok": bool(provider_reachable and (broker_reachable or not has_broker)),
     })
 
 

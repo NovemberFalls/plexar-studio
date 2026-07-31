@@ -314,6 +314,18 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
             "endpoint_hint": "127.0.0.1:8001",
             "managed": False,
         },
+        # Plexar is the vLLM face: a fixed-bind gateway that owns container
+        # lifecycle. No "queue" (it has no broker in front of it) and no
+        # "model-control" (Cockpit does not own its containers).
+        {
+            "id": "plexar",
+            "label": "Plexar (vLLM)",
+            "kind": "plexar",
+            "scope": "local",
+            "capabilities": ["models", "health"],
+            "endpoint_hint": "127.0.0.1:8760",
+            "managed": False,
+        },
     ]
     dumped = str(body)
     # SSRF stance: local providers may expose a display-only host:port
@@ -421,8 +433,11 @@ async def test_provider_health_aggregates_both_probes(client, monkeypatch):
     res = await client.get("/api/local/lmstudio-local/health")
     assert res.status_code == 200
     body = res.json()
+    # `applicable` distinguishes "no broker in front of this backend" from
+    # "the broker is down" -- collapsing them reported a healthy broker-less
+    # engine (vLLM direct, Plexar) as not ok.
     assert body == {
-        "broker": {"reachable": True},
+        "broker": {"applicable": True, "reachable": True},
         "provider": {"reachable": True, "models_loaded": 1},
         "ok": True,
     }
