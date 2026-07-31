@@ -53,6 +53,16 @@ export const DAY_SERIES = [
   { key: "local", label: "local", color: "var(--cc-idle)" },
 ];
 
+/**
+ * Reports' range ids -> Plexar's. Only "all" differs ("lifetime" there).
+ *
+ * Lives here rather than in the panel because a file that exports both a
+ * component and a helper breaks fast refresh.
+ */
+export function toPlexarRange(range) {
+  return range === "all" ? "lifetime" : range;
+}
+
 /** null / undefined / NaN / Infinity all mean "no value", never zero. */
 export function isMissing(v) {
   if (v === null || v === undefined) return true;

@@ -30,10 +30,17 @@
  * or a user with no prior window — no card renders a delta at all, because an
  * always-neutral 0% looks like a finding. Tone is per metric: see DELTA_RULES.
  *
- * What is deliberately NOT built, and why (each tab says this on screen):
- *   - Traces / Local engine tabs. There is no per-session trace endpoint, and
- *     live engine state belongs to Engine by design. Each renders an honest
- *     panel naming what will live there and where that information is today.
+ * What is deliberately NOT built, and why (the tab says this on screen):
+ *   - Traces. There is no per-session trace endpoint yet; the tab names what
+ *     will live there and where that information is today.
+ *
+ * LOCAL ENGINE is built, and is the one tab NOT sourced from the call above.
+ * It reads Plexar (the vLLM face) via /api/local/plexar/*, so it renders
+ * independently of this view's loading/error/empty state — a user with no
+ * Claude usage this range can still have engine history, and vice versa.
+ * Cockpit's reporting and Plexar's sit side by side, each labelled; they are
+ * never merged, because a Prometheus counter and a gateway request record mean
+ * different things by the same number.
  *
  * Props:
  *   onOpenTrace(terminalId)   optional; a session row click hands the terminal
@@ -52,6 +59,7 @@ import TokensByDayChart from "./TokensByDayChart.jsx";
 import SpendByModel from "./SpendByModel.jsx";
 import SessionsTable from "./SessionsTable.jsx";
 import ToolsBreakdown from "./ToolsBreakdown.jsx";
+import LocalEnginePanel from "./LocalEnginePanel.jsx";
 import {
   DASH,
   DEFAULT_RANGE,
@@ -92,12 +100,6 @@ const NOT_BUILT = {
       "One row per prompt, expandable into the runs it fanned out into, with tokens and wall time per node.",
     today:
       "Engine ▸ Traces, which reads the lane broker's own trace tree. Those traces cover local-engine runs only; there is no per-session trace endpoint for Claude API turns yet.",
-  },
-  "local-engine": {
-    will:
-      "Historical local-engine accounting — decode throughput, spill, and queue depth over time, alongside the API spend it displaced.",
-    today:
-      "Engine ▸ Live, which is the live view by design. Reports owns the past, so this tab waits on a stored history of engine metrics rather than mirroring a live panel.",
   },
 };
 
@@ -721,7 +723,12 @@ export default function ReportsView({
     tab === "overview" || tab === "sessions" || tab === "models" || tab === "tools";
 
   let body;
-  if (loading) {
+  if (tab === "local-engine") {
+    // Sourced from Plexar, not from /api/usage/report — so it must NOT be
+    // gated on that request's loading/error/empty state. A user with no Claude
+    // usage this range can still have engine history, and vice versa.
+    body = <LocalEnginePanel range={range} />;
+  } else if (loading) {
     body = (
       <div data-testid="reports-loading" style={{ fontSize: 11, color: "var(--cc-muted)", padding: 4 }}>
         Loading usage report…

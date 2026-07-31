@@ -240,6 +240,18 @@ Tool calls ARE available in Claude Code's JSONL — `jsonl_watcher.py` parses `t
 - **`previous: {available, kpis}`** is the equal-length preceding window, computed through the same `_window_rows`/`_compute_kpis` path as the current period so the two are comparable. `available: false` for `range=all` and for a genuinely empty prior window — the UI then renders no delta rather than a fabricated one.
 - Known asymmetry: `tool_events` dedupes on `uuid` alone while `usage_events` dedupes on `(jsonl_path, message_uuid)`. If a JSONL were copied to a second path, tool calls would dedupe correctly and usage rows would double-count. That is a pre-existing weakness on the usage side.
 
+## Plexar (the vLLM face) — `plexar_client.py`
+
+Plexar (`C:/Code/Personal/plexar-vllm`) owns vLLM container lifecycle and publishes a **fixed-bind** OpenAI-compatible gateway (default `127.0.0.1:8760`, override `COCKPIT_PLEXAR_URL`). Cockpit points at one address forever; model swaps and restarts happen behind it.
+
+- **THE GATEWAY BEING UP IS NOT THE ENGINE BEING ABLE TO SERVE.** Plexar answers `200` on `/v1/models` while the engine behind it is restarting or dead — a stable address is the whole product. Judging it by "did the HTTP call succeed" reports a dead engine as healthy, which is what Cockpit used to do. `/api/local/{id}/health` therefore carries an `engine` block (`{serving, total, state, available, reason, action, eta_seconds}`) for Plexar. **`ok` still means REACHABILITY for every provider** — callers that care whether work can run read `engine.available`. Worst state wins across instances.
+- **Plexar's model catalog nests its state envelope under a `plexar` key**, not a top-level `state`. `_normalize_plexar_raw_model` maps `serving|degraded` → `loaded` and keeps `reason`/`eta_seconds` for everything else. This also exposed that a plain OpenAI catalog (vLLM direct) has no state field at all and was counting **0 loaded models while serving**.
+- **Only providers with the `queue` capability are broker-probed.** Probing `/queue` on a broker-less backend 404s; reporting that as `broker.reachable: false` is a false claim about a component that does not exist. The shape is `{applicable: false, reachable: null}`.
+- **Routes:** `GET /api/local/{id}/instances` · `/reports?range=` · `/gpus`, all capability-gated, all 200-with-envelope.
+- **Two sources, NEVER merged.** `gateway-requests` = what consumers experienced (exact, real windows). `vllm-prometheus` = what the GPU did (cumulative since engine start, so only `lifetime` is exact). Every figure keeps its `source` and `window_exact` labels through Cockpit; `engine_unknown` is passed through because it is *why* a figure is missing. **Cockpit keeps its own reporting** — Plexar's sits beside it in Reports ▸ Local engine, labelled, never combined into one column.
+- Registered WITHOUT `model-control`: Plexar owns lifecycle, and a restart button for a container Cockpit does not own is false advertising.
+- `vllm-local` and `plexar` currently both point at the same physical engine (container `:8001` vs gateway `:8760`). That duplication is known and undecided — see the backlog.
+
 ## Retired surfaces (do not resurrect; know where the behavior went)
 
 `LocalBrokerView.jsx`, `LaneQueuePanel.jsx` and `LocalMetricsPanel.jsx` were deleted in the facelift. Their behavior was re-homed: spill thresholds → `settings/SpillPolicy.jsx` (intent), live queue → `engine/EngineRequests.jsx` + `engine/EngineLive.jsx` (now), reporting → `components/reports/` (the past), models folder → `settings/ProvidersSettings.jsx`.

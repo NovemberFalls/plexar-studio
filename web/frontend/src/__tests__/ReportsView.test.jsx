@@ -196,20 +196,23 @@ describe("ReportsView — tabs", () => {
     expect(screen.getByTestId("tools-breakdown")).toBeInTheDocument();
     expect(screen.queryByTestId("not-built-tools")).not.toBeInTheDocument();
 
-    // The two remaining unbuilt tabs name what will live there AND where it is
-    // today. Asserted inside the loop: only the active tab's panel is mounted.
-    const POINTS_AT = {
-      traces: /Engine ▸ Traces/,
-      "local-engine": /Engine ▸ Live/,
-    };
-    for (const id of ["traces", "local-engine"]) {
-      const label = REPORTS_TABS.find((t) => t.id === id).label;
-      fireEvent.click(screen.getByLabelText(`${label} report`));
-      const panel = screen.getByTestId(`not-built-${id}`);
-      expect(panel).toHaveTextContent(`${label} is not built yet`);
-      expect(panel).toHaveTextContent(/Today this lives in/);
-      expect(panel).toHaveTextContent(POINTS_AT[id]);
-    }
+    // Traces is the ONE remaining unbuilt tab: it names what will live there
+    // AND where that information is today.
+    fireEvent.click(screen.getByLabelText("Traces report"));
+    const traces = screen.getByTestId("not-built-traces");
+    expect(traces).toHaveTextContent("Traces is not built yet");
+    expect(traces).toHaveTextContent(/Today this lives in/);
+    expect(traces).toHaveTextContent(/Engine ▸ Traces/);
+
+    // Local engine is BUILT now, sourced from Plexar rather than from
+    // /api/usage/report. With no Plexar answering (the fetch mock returns the
+    // usage report only), it must render its honest unavailable state — NOT a
+    // stub, and NOT an empty table implying zero engine activity.
+    fireEvent.click(screen.getByLabelText("Local engine report"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("not-built-local-engine")).not.toBeInTheDocument()
+    );
+    expect(await screen.findByText(/No local engine history/i)).toBeInTheDocument();
   });
 });
 
