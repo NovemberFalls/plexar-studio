@@ -11,6 +11,7 @@ from __future__ import annotations
 import codecs
 import ctypes
 import ctypes.wintypes as wt
+import logging
 import os
 import shutil
 import subprocess
@@ -675,11 +676,22 @@ class PtyProcess:
             return ""
         return self._decoder.decode(buf.raw[: n.value])
 
-    def write(self, data: str) -> None:
-        """Write to the pseudo-console input.
+    def write(self, data: str) -> int:
+        """Write to the pseudo-console input. Returns BYTES ACTUALLY WRITTEN.
 
         Handles partial writes by looping until all bytes are sent.
         Large pastes are written in chunks to avoid overwhelming the pipe.
+
+        This used to return ``None`` unconditionally — including on the two
+        failure paths below, which abandon the remaining bytes. The caller
+        (``pty_manager._write_pty_sync``) treats ``None`` as "wrote everything",
+        so a paste that died halfway through was reported as a complete success
+        and never retried. That is a silent-truncation machine: the user sees
+        half their text and the log says the write succeeded.
+
+        Returning the true count means a short write is visible to the caller,
+        which retries the remainder and ultimately trips its own safety valve
+        rather than lying.
         """
         raw = data.encode("utf-8") if isinstance(data, str) else data
         total = len(raw)
@@ -692,25 +704,30 @@ class PtyProcess:
             with self._pipe_lock:
                 pipe = self._server_pipe
                 if pipe is None:
-                    return
+                    logging.getLogger("cockpit.pty").warning(
+                        "ConPTY input pipe is gone at offset %d/%d — %d bytes lost",
+                        offset, total, total - offset,
+                    )
+                    return offset
                 ok = kernel32.WriteFile(
                     wt.HANDLE(pipe), chunk, wt.DWORD(len(chunk)),
                     ctypes.byref(n), None,
                 )
             if not ok:
-                import logging
-                logging.getLogger("cockpit.pty").warning(
-                    "WriteFile failed at offset %d/%d (error %d)",
-                    offset, total, ctypes.get_last_error(),
+                logging.getLogger("cockpit.pty").error(
+                    "WriteFile failed at offset %d/%d (error %d) — %d bytes not written",
+                    offset, total, ctypes.get_last_error(), total - offset,
                 )
-                return
+                return offset
             if n.value == 0:
-                import logging
-                logging.getLogger("cockpit.pty").warning(
-                    "WriteFile wrote 0 bytes at offset %d/%d", offset, total,
+                logging.getLogger("cockpit.pty").error(
+                    "WriteFile wrote 0 bytes at offset %d/%d — %d bytes not written",
+                    offset, total, total - offset,
                 )
-                return
+                return offset
             offset += n.value
+
+        return offset
 
     def setwinsize(self, rows: int, cols: int) -> None:
         """Resize the pseudo-console."""
