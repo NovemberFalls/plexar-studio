@@ -2932,6 +2932,26 @@ COCKPIT_VLLM_GPU_UTIL = os.getenv("COCKPIT_VLLM_GPU_UTIL", "0.90")
 COCKPIT_VLLM_TOOL_PARSER = os.getenv("COCKPIT_VLLM_TOOL_PARSER", "qwen3_coder")
 _VLLM_URL = "http://127.0.0.1:" + COCKPIT_VLLM_PORT
 
+# The direct-to-vLLM provider, kept as a named constant rather than inlined
+# below because it can be DEREGISTERED at startup (see
+# _retire_vllm_local_if_unused) and re-registered by anyone who declares a
+# direct vLLM. Popping it out of _PROVIDERS must not destroy its definition.
+_VLLM_LOCAL_PROVIDER = {
+    "id": "vllm-local", "label": "vLLM (local)", "kind": "vllm",
+    "scope": "local",
+    # vLLM does its own continuous batching and must be served DIRECT --
+    # not through the broker (max_concurrent=1 would serialize requests
+    # and kill vLLM's throughput). Coexists beside the broker-fronted
+    # LM Studio provider; the user picks via ProviderPicker.
+    "broker_url": _VLLM_URL,
+    "management_url": _VLLM_URL,
+    "auth": {"type": "none"},
+    # vLLM does not serve the broker's queue/spill/traces shapes, but it
+    # DOES export a Prometheus /metrics endpoint that _vllm_metrics reshapes
+    # into the broker metrics contract (cumulative-since-start; see adapter).
+    "capabilities": ["models", "health", "metrics", "model-discovery"],
+}
+
 _PROVIDERS = {
     "lmstudio-local": {
         "id": "lmstudio-local", "label": "LM Studio (local)", "kind": "lmstudio",
@@ -2941,21 +2961,7 @@ _PROVIDERS = {
         "auth": {"type": "none"},
         "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
     },
-    "vllm-local": {
-        "id": "vllm-local", "label": "vLLM (local)", "kind": "vllm",
-        "scope": "local",
-        # vLLM does its own continuous batching and must be served DIRECT --
-        # not through the broker (max_concurrent=1 would serialize requests
-        # and kill vLLM's throughput). Coexists beside the broker-fronted
-        # LM Studio provider; the user picks via ProviderPicker.
-        "broker_url": _VLLM_URL,
-        "management_url": _VLLM_URL,
-        "auth": {"type": "none"},
-        # vLLM does not serve the broker's queue/spill/traces shapes, but it
-        # DOES export a Prometheus /metrics endpoint that _vllm_metrics reshapes
-        # into the broker metrics contract (cumulative-since-start; see adapter).
-        "capabilities": ["models", "health", "metrics", "model-discovery"],
-    },
+    "vllm-local": _VLLM_LOCAL_PROVIDER,
     "plexar": {
         "id": "plexar", "label": "Plexar (vLLM)", "kind": "plexar",
         "scope": "local",
@@ -2980,7 +2986,11 @@ _PROVIDERS = {
         # provider serves. Cockpit KEEPS its own reporting; these are a second
         # source beside it, never a replacement -- and every Plexar figure
         # carries its own source label so the two are never silently merged.
-        "capabilities": ["models", "health", "instances", "reports", "gpus"],
+        # "timeseries" is bucketed HISTORY, which "reports" (window totals)
+        # structurally cannot provide -- so it is a separate promise, not an
+        # implied part of the reporting one.
+        "capabilities": ["models", "health", "instances", "reports", "gpus",
+                         "timeseries"],
     },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
@@ -3146,6 +3156,51 @@ def _vllm_ownership() -> dict:
 async def get_vllm_ownership():
     """Ownership of the local vLLM process — see _vllm_ownership. Always 200."""
     return JSONResponse(_vllm_ownership())
+
+
+# ── Retiring `vllm-local` (2026-07-31) ───────────────────
+#
+# `vllm-local` points DIRECT at a vLLM container on COCKPIT_VLLM_PORT. Plexar
+# now owns vLLM lifecycle and publishes its containers loopback-only on a port
+# it allocates itself, reachable ONLY through its gateway — deliberately, so
+# nothing can bypass the gateway's auth, its request records, or the in-flight
+# accounting a drain waits on. So for a Plexar-managed engine the direct path
+# is not merely unused, it is structurally impossible to recreate.
+#
+# `vllm-local` and `plexar` are therefore NOT two views of one engine (which
+# would argue for deduping them). One is the current architecture and the other
+# is the thing it replaced. Left registered, it is a permanently unreachable
+# provider row — and a red row that is always red teaches people to ignore red
+# rows, which is the same argument the reporting honesty rules make.
+#
+# It is DEREGISTERED, not deleted: the managed-container lifecycle, the
+# Prometheus adapter and the restart path all still work, and anyone genuinely
+# running a direct vLLM keeps them by declaring so. Two ways back:
+#   * managed intent on (COCKPIT_MANAGED_VLLM=1 / providers.vllm.managed) —
+#     Cockpit launches that container itself, so the provider MUST exist;
+#   * COCKPIT_VLLM_DIRECT=1 — an external direct vLLM that Cockpit does not own.
+# Deleting the machinery outright is a separate, larger decision and is not
+# taken here.
+COCKPIT_VLLM_DIRECT = os.getenv("COCKPIT_VLLM_DIRECT", "")
+
+
+def _register_vllm_local() -> None:
+    """Put the direct-vLLM provider back. Idempotent."""
+    _PROVIDERS.setdefault("vllm-local", _VLLM_LOCAL_PROVIDER)
+
+
+def _retire_vllm_local_if_unused() -> None:
+    """Drop the direct-vLLM provider unless someone actually declared one."""
+    if COCKPIT_VLLM_DIRECT == "1" or _vllm_managed_intent():
+        return _register_vllm_local()
+    if _PROVIDERS.pop("vllm-local", None) is not None:
+        logger.info(
+            "vllm-local not registered: no direct vLLM declared "
+            "(set COCKPIT_VLLM_DIRECT=1 to keep it). Plexar serves vLLM."
+        )
+
+
+_retire_vllm_local_if_unused()
 
 
 def _refresh_vllm_model_control() -> None:
@@ -5241,6 +5296,43 @@ async def get_provider_reports(provider_id: str, range: str = "lifetime"):
     return JSONResponse(
         await asyncio.to_thread(
             plexar_client.fetch_reports, provider["management_url"], range
+        )
+    )
+
+
+@app.get("/api/local/{provider_id}/timeseries")
+async def get_provider_timeseries(
+    provider_id: str,
+    range: str = "24h",
+    bucket: str = None,
+    instance_id: str = None,
+):
+    """Bucketed engine history — the two sources as separate named series.
+
+    `reports` gives window totals; this gives their shape over time. Both
+    series arrive with their own `window_exact` flag and are never summed.
+    """
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "timeseries" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    # A bad range/bucket is a genuine client error and stays loud, matching
+    # both the sibling /reports route and Plexar's own behaviour.
+    if range not in plexar_client.TIMESERIES_RANGES:
+        return JSONResponse(
+            {"error": f"range must be one of {list(plexar_client.TIMESERIES_RANGES)}"},
+            status_code=400,
+        )
+    if bucket is not None and bucket not in plexar_client.TIMESERIES_BUCKETS:
+        return JSONResponse(
+            {"error": f"bucket must be one of {list(plexar_client.TIMESERIES_BUCKETS)}"},
+            status_code=400,
+        )
+    return JSONResponse(
+        await asyncio.to_thread(
+            plexar_client.fetch_timeseries,
+            provider["management_url"], range, bucket, instance_id,
         )
     )
 

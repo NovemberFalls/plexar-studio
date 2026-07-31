@@ -295,38 +295,43 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
     lms_caps = ["queue", "metrics", "spill", "models", "traces", "health"]
     if server_module._LMS_CLI:
         lms_caps.append("model-control")
-    assert body["providers"] == [
-        {
-            "id": "lmstudio-local",
-            "label": "LM Studio (local)",
-            "kind": "lmstudio",
-            "scope": "local",
-            "capabilities": lms_caps,
-            "endpoint_hint": "127.0.0.1:1234",
-            "managed": server_module._broker_is_managed(),
-        },
-        {
-            "id": "vllm-local",
-            "label": "vLLM (local)",
-            "kind": "vllm",
-            "scope": "local",
-            "capabilities": ["models", "health", "metrics", "model-discovery"],
-            "endpoint_hint": "127.0.0.1:8001",
-            "managed": False,
-        },
-        # Plexar is the vLLM face: a fixed-bind gateway that owns container
-        # lifecycle. No "queue" (it has no broker in front of it) and no
-        # "model-control" (Cockpit does not own its containers).
-        {
-            "id": "plexar",
-            "label": "Plexar (vLLM)",
-            "kind": "plexar",
-            "scope": "local",
-            "capabilities": ["models", "health", "instances", "reports", "gpus"],
-            "endpoint_hint": "127.0.0.1:8760",
-            "managed": False,
-        },
-    ]
+    # Keyed by id, not positional: `vllm-local` is deregistered at import
+    # unless a direct vLLM is declared (conftest puts it back for the suite),
+    # so registration ORDER is no longer a fact worth pinning — its presence
+    # and its shape are.
+    by_id = {p["id"]: p for p in body["providers"]}
+    assert by_id["lmstudio-local"] == {
+        "id": "lmstudio-local",
+        "label": "LM Studio (local)",
+        "kind": "lmstudio",
+        "scope": "local",
+        "capabilities": lms_caps,
+        "endpoint_hint": "127.0.0.1:1234",
+        "managed": server_module._broker_is_managed(),
+    }
+    assert by_id["vllm-local"] == {
+        "id": "vllm-local",
+        "label": "vLLM (local)",
+        "kind": "vllm",
+        "scope": "local",
+        "capabilities": ["models", "health", "metrics", "model-discovery"],
+        "endpoint_hint": "127.0.0.1:8001",
+        "managed": False,
+    }
+    # Plexar is the vLLM face: a fixed-bind gateway that owns container
+    # lifecycle. No "queue" (it has no broker in front of it) and no
+    # "model-control" (Cockpit does not own its containers). "timeseries" is
+    # bucketed history, which the "reports" totals cannot provide.
+    assert by_id["plexar"] == {
+        "id": "plexar",
+        "label": "Plexar (vLLM)",
+        "kind": "plexar",
+        "scope": "local",
+        "capabilities": ["models", "health", "instances", "reports", "gpus",
+                         "timeseries"],
+        "endpoint_hint": "127.0.0.1:8760",
+        "managed": False,
+    }
     dumped = str(body)
     # SSRF stance: local providers may expose a display-only host:port
     # (endpoint_hint) so the user knows where to boot the service, but the FULL

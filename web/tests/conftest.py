@@ -25,6 +25,18 @@ os.environ.setdefault(
 
 import server as server_module
 
+# `vllm-local` is DEREGISTERED at import unless a direct vLLM is declared
+# (COCKPIT_VLLM_DIRECT=1, or managed intent on) — Plexar owns vLLM now, and a
+# provider row pointing at a port nothing listens on is permanently red.
+#
+# The MACHINERY behind it is untouched and still supported, and the suites that
+# cover it (managed lifecycle, model-control, the Prometheus adapter, models-dir)
+# are testing real, reachable behaviour. So the entry is put back here for the
+# whole suite. The retirement itself is covered directly by
+# test_vllm_local_retirement.py, which drives _retire_vllm_local_if_unused and
+# restores the registry afterwards.
+server_module._register_vllm_local()
+
 
 @pytest.fixture()
 def vllm_ownership(monkeypatch):
