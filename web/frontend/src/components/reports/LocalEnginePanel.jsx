@@ -59,6 +59,136 @@ const SOURCE_META = {
 /** Engine states that can actually take a request. */
 const SERVABLE = new Set(["serving", "degraded"]);
 
+/**
+ * What each series plots, per source. Deliberately a per-source list rather
+ * than one shared set: the two sources do not measure the same things, and a
+ * chart that put them on one axis would be the merge this panel exists to
+ * refuse.
+ *
+ * `kind` decides how a missing value reads:
+ *   count — a bar. Zero is a real measurement and is drawn as zero height.
+ *   gauge — a line. A null BREAKS the line into a gap, because "nothing was
+ *           measured" must not slope through the axis as if it were low.
+ */
+const SERIES_SPECS = {
+  "gateway-requests": [
+    { key: "requests", label: "Requests", kind: "count", pick: (b) => b.requests },
+    { key: "errors", label: "Errors", kind: "count", pick: (b) => b.errors },
+    {
+      key: "ttft_p95",
+      label: "TTFT p95",
+      kind: "gauge",
+      unit: "ms",
+      pick: (b) => b.ttft_ms?.p95 ?? null,
+    },
+  ],
+  "vllm-prometheus": [
+    { key: "tps_avg", label: "Tokens/sec", kind: "gauge", pick: (b) => b.tps_avg },
+    {
+      key: "kv",
+      label: "KV cache",
+      kind: "gauge",
+      unit: "%",
+      pick: (b) => b.kv_cache_pct?.mean ?? null,
+    },
+  ],
+};
+
+const CHART_W = 260;
+const CHART_H = 34;
+
+/**
+ * One metric over time. Nulls are holes, not zeroes.
+ *
+ * Plexar emits EVERY bucket in the window, including empty ones, precisely so
+ * a client never has to guess whether a gap is "no traffic" or "no data". That
+ * only pays off if the renderer honours the difference, which is the entire
+ * job of the null handling below.
+ */
+function MiniChart({ spec, buckets }) {
+  const values = buckets.map(spec.pick);
+  const known = values.filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (known.length === 0) return null;
+
+  const max = Math.max(...known, spec.kind === "count" ? 1 : 0) || 1;
+  const n = values.length;
+  const x = (i) => (n === 1 ? 0 : (i / (n - 1)) * CHART_W);
+  const y = (v) => CHART_H - (v / max) * (CHART_H - 2) - 1;
+
+  // Contiguous runs of measured points. A gap between runs is a gap on screen.
+  const runs = [];
+  let run = [];
+  values.forEach((v, i) => {
+    if (typeof v === "number" && Number.isFinite(v)) {
+      run.push([x(i), y(v)]);
+    } else if (run.length) {
+      runs.push(run);
+      run = [];
+    }
+  });
+  if (run.length) runs.push(run);
+
+  const last = [...values].reverse().find((v) => typeof v === "number");
+
+  return (
+    <div style={{ padding: "8px 14px", borderTop: "1px solid var(--cc-line)" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 10,
+          color: "var(--cc-dim)",
+          marginBottom: 3,
+        }}
+      >
+        <span>{spec.label}</span>
+        <span style={{ color: "var(--cc-muted)" }}>
+          peak {fmtInt(Math.round(max))}
+          {spec.unit ? ` ${spec.unit}` : ""}
+          {typeof last === "number" ? ` · now ${fmtInt(Math.round(last))}` : ""}
+        </span>
+      </div>
+      <svg
+        width="100%"
+        height={CHART_H}
+        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={`${spec.label} over time`}
+        style={{ display: "block", overflow: "visible" }}
+      >
+        {spec.kind === "count"
+          ? values.map((v, i) =>
+              typeof v !== "number" ? null : (
+                <rect
+                  key={i}
+                  x={x(i)}
+                  // A measured zero still gets a visible baseline tick — it is
+                  // an observation, and drawing nothing there would make it
+                  // indistinguishable from a bucket we could not read.
+                  y={v === 0 ? CHART_H - 1 : y(v)}
+                  width={Math.max(1, CHART_W / n - 1)}
+                  height={v === 0 ? 1 : CHART_H - y(v) - 1}
+                  fill="var(--cc-accent)"
+                  opacity={v === 0 ? 0.35 : 0.75}
+                />
+              )
+            )
+          : runs.map((pts, i) => (
+              <polyline
+                key={i}
+                points={pts.map(([px, py]) => `${px},${py}`).join(" ")}
+                fill="none"
+                stroke="var(--cc-accent)"
+                strokeWidth="1.5"
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+      </svg>
+    </div>
+  );
+}
+
 function StatePill({ state, available }) {
   const tone = SERVABLE.has(state)
     ? "var(--cc-idle)"
@@ -138,7 +268,9 @@ export default function LocalEnginePanel({ range }) {
   // effect touched React state before its first await, which is a cascading
   // render — and a partially-updated set of three panels is a worse thing to
   // render than a slightly stale complete one.
-  const [snap, setSnap] = useState({ status: "loading", reports: null, instances: null, gpus: null });
+  const [snap, setSnap] = useState({
+    status: "loading", reports: null, instances: null, gpus: null, series: null,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -154,14 +286,18 @@ export default function LocalEnginePanel({ range }) {
     };
 
     (async () => {
-      const [reports, instances, gpus] = await Promise.all([
+      const [reports, instances, gpus, series] = await Promise.all([
         get(`/api/local/plexar/reports?range=${toPlexarRange(range)}`),
         get("/api/local/plexar/instances"),
         get("/api/local/plexar/gpus"),
+        // No `bucket`: Plexar derives it from the range and owns the rule that
+        // refuses a series it would have to truncate. Choosing one here would
+        // mean re-deriving that rule on the client, badly.
+        get(`/api/local/plexar/timeseries?range=${toPlexarRange(range)}`),
       ]);
       // A range change that resolves after unmount (or after a newer range)
       // must not overwrite what is on screen.
-      if (!cancelled) setSnap({ status: "ready", reports, instances, gpus });
+      if (!cancelled) setSnap({ status: "ready", reports, instances, gpus, series });
     })();
 
     return () => {
@@ -169,7 +305,7 @@ export default function LocalEnginePanel({ range }) {
     };
   }, [range]);
 
-  const { status, reports, instances, gpus } = snap;
+  const { status, reports, instances, gpus, series } = snap;
 
   if (status === "loading") {
     return <div style={{ fontSize: 11, color: "var(--cc-muted)" }}>Loading engine history…</div>;
@@ -202,7 +338,19 @@ export default function LocalEnginePanel({ range }) {
     (groups[key] = groups[key] || []).push(f);
   }
 
-  const inexactHere = figures.some((f) => f.window_exact === false);
+  // History, keyed by the SAME source names as the figures — that is what lets
+  // a chart sit under the totals it belongs to without either being restated
+  // in the other's terms.
+  const seriesBySource = (series?.available === true && series.series) || {};
+
+  // A source can have history without a summary figure (or the reverse), so
+  // the card list is the union. Driving it from `figures` alone would silently
+  // drop a whole chart.
+  const sources = [...new Set([...Object.keys(groups), ...Object.keys(seriesBySource)])];
+
+  const inexactHere =
+    figures.some((f) => f.window_exact === false) ||
+    Object.values(seriesBySource).some((s) => s?.window_exact === false);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -252,8 +400,11 @@ export default function LocalEnginePanel({ range }) {
       )}
 
       {/* Figures, grouped by source. Never merged into one column. */}
-      {Object.entries(groups).map(([source, rows]) => {
+      {sources.map((source) => {
+        const rows = groups[source] || [];
         const meta = SOURCE_META[source] || { label: source, blurb: null };
+        const buckets = seriesBySource[source]?.buckets || [];
+        const specs = SERIES_SPECS[source] || [];
         return (
           <div key={source} style={CARD}>
             <div style={{ padding: "9px 14px", borderBottom: "1px solid var(--cc-border)" }}>
@@ -282,9 +433,20 @@ export default function LocalEnginePanel({ range }) {
                 hint={f.note || undefined}
               />
             ))}
+            {buckets.length > 0 &&
+              specs.map((spec) => (
+                <MiniChart key={spec.key} spec={spec} buckets={buckets} />
+              ))}
           </div>
         );
       })}
+
+      {series?.truncated && (
+        <p style={{ fontSize: 11, color: "var(--cc-muted)", margin: 0, lineHeight: 1.6 }}>
+          History reaches only as far back as Plexar&apos;s retention, so this
+          range is clipped rather than complete.
+        </p>
+      )}
 
       {/* GPUs — physical capacity behind the engine. */}
       {gpus?.available && (gpus.gpus || []).length > 0 && (

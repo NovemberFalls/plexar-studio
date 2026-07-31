@@ -52,15 +52,45 @@ const GPUS = {
   gpus: [{ uuid: "GPU-1", name: "RTX 3090", total_mb: 24576, free_mb: 20314, used_by_display: true }],
 };
 
-function mockRoutes({ reports = REPORTS, instances = INSTANCES, gpus = GPUS } = {}) {
+const SERIES = {
+  available: true,
+  range: "lifetime",
+  bucket: "1d",
+  truncated: false,
+  series: {
+    "gateway-requests": {
+      window_exact: true,
+      buckets: [
+        { t: "1", requests: 12, errors: 1, ttft_ms: { p95: 400 } },
+        // A quiet hour: a MEASURED zero, and nothing measured.
+        { t: "2", requests: 0, errors: 0, ttft_ms: { p95: null } },
+        { t: "3", requests: 8, errors: 0, ttft_ms: { p95: 610 } },
+      ],
+    },
+    "vllm-prometheus": {
+      window_exact: false,
+      buckets: [
+        { t: "1", tps_avg: 40, kv_cache_pct: { mean: 20 } },
+        { t: "2", tps_avg: null, kv_cache_pct: { mean: null } },
+        { t: "3", tps_avg: 90, kv_cache_pct: { mean: 55 } },
+      ],
+    },
+  },
+};
+
+function mockRoutes({
+  reports = REPORTS, instances = INSTANCES, gpus = GPUS, series = SERIES,
+} = {}) {
   const seen = [];
   globalThis.fetch = vi.fn((url) => {
     seen.push(url);
-    const body = url.includes("/reports")
-      ? reports
-      : url.includes("/instances")
-        ? instances
-        : gpus;
+    const body = url.includes("/timeseries")
+      ? series
+      : url.includes("/reports")
+        ? reports
+        : url.includes("/instances")
+          ? instances
+          : gpus;
     if (body === null) return Promise.resolve({ ok: false, json: () => Promise.resolve(null) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
   });
@@ -103,6 +133,10 @@ describe("LocalEnginePanel", () => {
       reports: {
         ...REPORTS,
         figures: [{ key: "requests", value: 8, source: "gateway-requests", window_exact: true }],
+      },
+      series: {
+        available: true,
+        series: { "gateway-requests": { window_exact: true, buckets: [] } },
       },
     });
     render(<LocalEnginePanel range="7d" />);
@@ -206,5 +240,109 @@ describe("LocalEnginePanel", () => {
     render(<LocalEnginePanel range="all" />);
     expect(await screen.findByText("Gateway requests")).toBeInTheDocument();
     expect(screen.queryByText(/RTX 3090/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Bucketed history. `/reports` gives window totals; a client could otherwise
+ * only diff repeated polls, which is not history and dies on reload.
+ *
+ * The charts inherit every rule the figures already obey — and add one: an
+ * empty bucket is emitted by Plexar deliberately, so that a gap and a zero can
+ * be told apart. That only pays off if the renderer honours the difference.
+ */
+describe("LocalEnginePanel — history", () => {
+  it("draws each source's history inside that source's own card", async () => {
+    mockRoutes();
+    render(<LocalEnginePanel range="all" />);
+
+    expect(await screen.findByLabelText("Requests over time")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tokens/sec over time")).toBeInTheDocument();
+    // The rule this panel exists for: never one line drawn from both sources.
+    const gateway = screen.getByText("Gateway requests").closest("div").parentElement;
+    expect(gateway.querySelector('[aria-label="Tokens/sec over time"]')).toBeNull();
+  });
+
+  it("omits the bucket so Plexar keeps ownership of the 720-point rule", async () => {
+    const seen = mockRoutes();
+    render(<LocalEnginePanel range="all" />);
+    await screen.findByLabelText("Requests over time");
+    const ts = seen.find((u) => u.includes("/timeseries"));
+    expect(ts).toContain("range=lifetime");
+    expect(ts).not.toContain("bucket=");
+  });
+
+  it("breaks a gauge line at a null instead of sloping through the axis", async () => {
+    mockRoutes();
+    render(<LocalEnginePanel range="all" />);
+    const svg = await screen.findByLabelText("Tokens/sec over time");
+    // Two measured runs either side of the unmeasured bucket → two polylines.
+    expect(svg.querySelectorAll("polyline").length).toBe(2);
+  });
+
+  it("still draws a measured zero, because it is an observation", async () => {
+    mockRoutes();
+    render(<LocalEnginePanel range="all" />);
+    const svg = await screen.findByLabelText("Requests over time");
+    // All three buckets are measured (12, 0, 8) — the zero must not vanish, or
+    // it becomes indistinguishable from a bucket that could not be read.
+    expect(svg.querySelectorAll("rect").length).toBe(3);
+  });
+
+  it("renders nothing for a metric no bucket ever reported", async () => {
+    mockRoutes({
+      series: {
+        available: true,
+        series: {
+          "gateway-requests": {
+            window_exact: true,
+            buckets: [{ t: "1", requests: 5, ttft_ms: { p95: null } }],
+          },
+        },
+      },
+    });
+    render(<LocalEnginePanel range="all" />);
+    await screen.findByLabelText("Requests over time");
+    expect(screen.queryByLabelText("TTFT p95 over time")).toBeNull();
+  });
+
+  it("says so when history is clipped by retention", async () => {
+    mockRoutes({ series: { ...SERIES, truncated: true } });
+    render(<LocalEnginePanel range="all" />);
+    expect(await screen.findByText(/clipped rather than complete/i)).toBeInTheDocument();
+  });
+
+  it("shows the figures when history is unavailable, and vice versa", async () => {
+    mockRoutes({ series: { available: false, reason: "unreachable" } });
+    render(<LocalEnginePanel range="all" />);
+    expect(await screen.findByText("Gateway requests")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Requests over time")).toBeNull();
+  });
+
+  it("renders a source that has history but no summary figure", async () => {
+    mockRoutes({
+      reports: {
+        ...REPORTS,
+        figures: [{ key: "requests", value: 8, source: "gateway-requests", window_exact: true }],
+      },
+    });
+    render(<LocalEnginePanel range="all" />);
+    // vLLM contributes no figure in this window, but it does have history —
+    // keying the cards off figures alone would silently drop the whole chart.
+    expect(await screen.findByText("vLLM engine")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tokens/sec over time")).toBeInTheDocument();
+  });
+
+  it("warns when a series is cumulative, even if every figure was exact", async () => {
+    mockRoutes({
+      reports: {
+        ...REPORTS,
+        figures: [{ key: "requests", value: 8, source: "gateway-requests", window_exact: true }],
+      },
+    });
+    render(<LocalEnginePanel range="7d" />);
+    expect(
+      await screen.findByText(/cumulative since it last started/i)
+    ).toBeInTheDocument();
   });
 });

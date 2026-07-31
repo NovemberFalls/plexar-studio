@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
@@ -54,6 +55,15 @@ _SERVABLE_STATES = ("serving", "degraded")
 # Ranges Plexar's reporting routes accept. Validated here so a bad value is a
 # 400 from Cockpit rather than an opaque proxy error.
 REPORT_RANGES = ("lifetime", "24h", "7d", "30d")
+
+# The bucketed-history route accepts a WIDER set of ranges than the summary
+# route (it adds the two short ones), so it gets its own tuple rather than
+# reusing REPORT_RANGES. Collapsing them would silently refuse `1h`/`6h`.
+TIMESERIES_RANGES = ("1h", "6h", "24h", "7d", "30d", "lifetime")
+
+# Bucket widths Plexar accepts. Omitting `bucket` lets Plexar derive it from
+# the range, which is the better default -- it also owns the >720-point rule.
+TIMESERIES_BUCKETS = ("1m", "5m", "1h", "6h", "1d")
 
 _ENVELOPE_KEYS = ("state", "available", "reason", "action", "eta_seconds", "since")
 
@@ -78,6 +88,28 @@ def unavailable(reason: str, detail: str) -> dict:
     zero standing in for "unknown".
     """
     return {"available": False, "reason": reason, "detail": detail}
+
+
+def _refused(exc: "urllib.error.HTTPError") -> dict:
+    """Plexar answered, and its answer was a refusal.
+
+    ``HTTPError`` is a SUBCLASS of ``URLError``, so a bare ``except URLError``
+    swallows a ``400`` and reports it as ``unreachable`` -- which is a false
+    claim about a service that is up and just told us the request was wrong.
+    Plexar refuses loudly on purpose (a bad range, or a bucket that would
+    produce a truncated series), so that refusal has to survive the trip.
+    """
+    detail = None
+    try:
+        body = json.loads(exc.read().decode("utf-8"))
+        if isinstance(body, dict):
+            detail = body.get("detail") or body.get("error")
+    except Exception:
+        detail = None
+    return unavailable(
+        "refused",
+        detail or f"Plexar refused the request (HTTP {exc.code}).",
+    )
 
 
 def fetch_status(base_url: str) -> dict:
@@ -202,6 +234,8 @@ def fetch_reports(base_url: str, report_range: str = "lifetime") -> dict:
 
     try:
         data = _get(base_url, f"/api/reports/summary?range={report_range}")
+    except urllib.error.HTTPError as exc:
+        return _refused(exc)
     except urllib.error.URLError:
         return unavailable("unreachable", "Plexar is not answering on its address.")
     except Exception:
@@ -222,6 +256,75 @@ def fetch_reports(base_url: str, report_range: str = "lifetime") -> dict:
         # Present when Prometheus could not be read; Plexar reports the gap
         # rather than substituting zeros, and so do we.
         "engine_unknown": data.get("engine_unknown"),
+    }
+
+
+def fetch_timeseries(
+    base_url: str,
+    report_range: str = "24h",
+    bucket: Optional[str] = None,
+    instance_id: Optional[str] = None,
+) -> dict:
+    """Plexar's ``/api/reports/timeseries`` — bucketed history, two series.
+
+    ``/api/reports/summary`` returns window TOTALS, so the only history a
+    client could draw from it was "change observed while this page was open" —
+    a browser-side diff that vanishes on reload. This route is real stored
+    history, and it keeps the same two-source discipline as the summary: the
+    ``gateway-requests`` and ``vllm-prometheus`` series are separate, each with
+    its own ``window_exact`` flag, and are **never summed**.
+
+    Three of Plexar's rules matter to whatever draws this, and are preserved
+    here rather than smoothed away:
+
+    * **Empty buckets are emitted.** A gap and a zero mean different things,
+      so the grid is filled from the window start and the client never has to
+      guess which it is looking at.
+    * **A null is unknown, never zero.** An hour with no requests reports
+      ``requests: 0`` (measured) but ``ttft_ms`` nulls (nothing was measured).
+      A chart must draw a gap there, not a dip to the axis.
+    * **Percentiles below their sample floor are null.** A p99 over four rows
+      is one sample wearing a percentile's name; Plexar returns null instead,
+      and that null is not a value to interpolate across.
+    """
+    if report_range not in TIMESERIES_RANGES:
+        return unavailable("bad_range", f"range must be one of {list(TIMESERIES_RANGES)}")
+    if bucket is not None and bucket not in TIMESERIES_BUCKETS:
+        return unavailable("bad_bucket", f"bucket must be one of {list(TIMESERIES_BUCKETS)}")
+
+    query = f"?range={urllib.parse.quote(report_range)}"
+    if bucket:
+        query += f"&bucket={urllib.parse.quote(bucket)}"
+    if instance_id:
+        query += f"&instance_id={urllib.parse.quote(instance_id)}"
+
+    try:
+        data = _get(base_url, f"/api/reports/timeseries{query}")
+    except urllib.error.HTTPError as exc:
+        # A 400 here is Plexar refusing a series it would have to truncate.
+        # That is a real answer and must not read as "Plexar is down".
+        return _refused(exc)
+    except urllib.error.URLError:
+        return unavailable("unreachable", "Plexar is not answering on its address.")
+    except Exception:
+        logger.warning("Plexar timeseries read failed", exc_info=True)
+        return unavailable("bad_response", "Plexar returned something unreadable.")
+
+    if not isinstance(data, dict) or not isinstance(data.get("series"), dict):
+        return unavailable("bad_response", "Plexar timeseries was not series-shaped.")
+
+    return {
+        "available": True,
+        "reason": None,
+        "detail": None,
+        "range": data.get("range"),
+        "bucket": data.get("bucket"),
+        "bucket_seconds": data.get("bucket_seconds"),
+        "generated": data.get("generated"),
+        # `lifetime` is bounded by Plexar's retention, and it says so here.
+        # Dropping this would present a retention-clipped series as complete.
+        "truncated": data.get("truncated"),
+        "series": data.get("series"),
     }
 
 
