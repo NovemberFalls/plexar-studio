@@ -42,6 +42,7 @@ from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  #
 # same pattern.
 from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E402 -- _paste_and_submit, never _wrap: the submit CR must be a separate write or the TUI eats it as pasted content
 import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
+import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
 from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other local-module imports above
 import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the other local-module imports above
@@ -2975,7 +2976,11 @@ _PROVIDERS = {
         # Deliberately NOT "model-control": Plexar owns container lifecycle now.
         # Cockpit offering a restart button for an engine it does not own is the
         # false-advertising bug the vLLM entry above already documents.
-        "capabilities": ["models", "health"],
+        # "instances" / "reports" / "gpus" are Plexar-shaped reads that no other
+        # provider serves. Cockpit KEEPS its own reporting; these are a second
+        # source beside it, never a replacement -- and every Plexar figure
+        # carries its own source label so the two are never silently merged.
+        "capabilities": ["models", "health", "instances", "reports", "gpus"],
     },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
@@ -5153,20 +5158,104 @@ async def get_provider_health(provider_id: str):
     async def probe_provider():
         try:
             data = await asyncio.to_thread(_mgmt_get, provider, _models_path(provider))
-            return True, _provider_models_loaded_count(data)
+            return True, _provider_models_loaded_count(data), data
         except Exception:
-            return False, 0
+            return False, 0, None
 
-    broker_reachable, (provider_reachable, models_loaded) = await asyncio.gather(
+    broker_reachable, (provider_reachable, models_loaded, raw) = await asyncio.gather(
         probe_broker(), probe_provider()
     )
-    return JSONResponse({
+
+    body = {
         # `applicable: false` + `reachable: null` says "no broker here", which
         # is not the same statement as "the broker is down".
         "broker": {"applicable": has_broker, "reachable": broker_reachable},
         "provider": {"reachable": provider_reachable, "models_loaded": models_loaded},
         "ok": bool(provider_reachable and (broker_reachable or not has_broker)),
-    })
+    }
+
+    # Plexar is a GATEWAY: it answers 200 on /v1/models even while the engine
+    # behind it is restarting or dead, because a stable address is the whole
+    # product. So `provider.reachable` here means "the gateway answered", NOT
+    # "you can send a request" — and reporting only the former would call a
+    # dead engine healthy. The envelope says which of serving / loading /
+    # unreachable / stopped / failed it actually is, why, and the ETA.
+    #
+    # `ok` deliberately keeps meaning REACHABILITY across every provider rather
+    # than quietly meaning something different for one of them. Callers that
+    # care whether work can actually run read `engine.available`.
+    if provider.get("kind") == "plexar" and raw is not None:
+        body["engine"] = plexar_client.engine_summary(raw)
+    elif provider.get("kind") == "plexar":
+        body["engine"] = {
+            "serving": 0, "total": 0, "state": None, "available": False,
+            "reason": "Plexar is not answering on its address.",
+            "action": "Start Plexar, or check COCKPIT_PLEXAR_URL.",
+            "eta_seconds": None,
+        }
+
+    return JSONResponse(body)
+
+
+# ── Plexar reads (instances · reports · GPUs) ─────────────
+#
+# Cockpit KEEPS its own reporting. These are a SECOND source beside it, not a
+# replacement: Plexar knows what the GPU did and what consumers experienced at
+# the gateway; Cockpit knows sessions, tokens and cost. Every Plexar figure
+# arrives carrying its own `source` and `window_exact` labels, and those are
+# passed through untouched — merging the two without saying which is which
+# produces numbers nobody can defend.
+#
+# All three ALWAYS return 200 with an availability envelope, like
+# /api/spend/status: these feed inline panels, and an HTTP error would blank a
+# panel rather than explain itself.
+
+
+@app.get("/api/local/{provider_id}/instances")
+async def get_provider_instances(provider_id: str):
+    """Engine instances with their state envelope and live gauges."""
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "instances" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    return JSONResponse(
+        await asyncio.to_thread(plexar_client.fetch_status, provider["management_url"])
+    )
+
+
+@app.get("/api/local/{provider_id}/reports")
+async def get_provider_reports(provider_id: str, range: str = "lifetime"):
+    """Plexar's own reporting summary — both sources, each figure labelled."""
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "reports" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    # A bad range is a real client error and should be loud, not an envelope.
+    if range not in plexar_client.REPORT_RANGES:
+        return JSONResponse(
+            {"error": f"range must be one of {list(plexar_client.REPORT_RANGES)}"},
+            status_code=400,
+        )
+    return JSONResponse(
+        await asyncio.to_thread(
+            plexar_client.fetch_reports, provider["management_url"], range
+        )
+    )
+
+
+@app.get("/api/local/{provider_id}/gpus")
+async def get_provider_gpus(provider_id: str):
+    """Physical GPUs behind the provider: VRAM totals, free, display usage."""
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "gpus" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    return JSONResponse(
+        await asyncio.to_thread(plexar_client.fetch_gpus, provider["management_url"])
+    )
 
 
 # ── Model control (load / unload / restart) ───────────────

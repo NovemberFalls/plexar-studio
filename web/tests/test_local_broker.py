@@ -322,7 +322,7 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
             "label": "Plexar (vLLM)",
             "kind": "plexar",
             "scope": "local",
-            "capabilities": ["models", "health"],
+            "capabilities": ["models", "health", "instances", "reports", "gpus"],
             "endpoint_hint": "127.0.0.1:8760",
             "managed": False,
         },
