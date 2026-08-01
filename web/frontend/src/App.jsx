@@ -12,6 +12,7 @@ import FleetView from "./components/FleetView";
 import ProviderPicker from "./components/ProviderPicker";
 import EngineView from "./components/engine/EngineView";
 import ReportsView from "./components/reports/ReportsView";
+import ChatView from "./components/chat/ChatView";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
 import { computeEndEvents, formatEndEventToast, buildBusyTerminalIds, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 // Redesigned shell chrome (design handoff "Workspace — the approved shell").
@@ -2354,6 +2355,10 @@ export default function App() {
             {/* REPORTS owns "the past" (Phase 7). Clicking a session row obeys
                 the handoff's navigation rule — go to Workspace and focus that
                 session — rather than opening a trace view that does not exist. */}
+            {/* Chat owns the full content area, like Reports and Engine —
+                it is a destination, not an overlay on the Workspace grid. */}
+            {activeSection === "chat" && <ChatView />}
+
             {activeSection === "reports" && (
               <ReportsView
                 statusByTerminalId={reportsStatusByTerminal}

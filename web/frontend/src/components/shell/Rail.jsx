@@ -1,7 +1,10 @@
-import { LayoutGrid, FolderOpen, List, Cpu, ChartColumn, Settings } from "lucide-react";
+import { LayoutGrid, FolderOpen, List, Cpu, ChartColumn, Settings, MessageSquare } from "lucide-react";
 import { LogoMark } from "../ActivityRail";
 
 const SECTIONS = [
+  // Chat sits ABOVE Work deliberately: it is the surface you arrive at to ask
+  // something, where Work is the surface you go to in order to run something.
+  { id: "chat", label: "CHAT", icon: MessageSquare },
   { id: "work", label: "WORK", icon: LayoutGrid },
   { id: "projects", label: "PROJECTS", icon: FolderOpen },
   { id: "fleet", label: "FLEET", icon: List },
