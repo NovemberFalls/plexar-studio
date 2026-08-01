@@ -74,7 +74,7 @@ describe("ChatView", () => {
     await screen.findByText("hello");
 
     fireEvent.change(screen.getByLabelText("Message"), { target: { value: "second" } });
-    fireEvent.click(screen.getByText("Send"));
+    fireEvent.click(screen.getByLabelText("Send"));
 
     await waitFor(() => {
       const posts = calls.filter((c) => c.method === "POST" && c.url.includes("/messages"));
@@ -99,7 +99,7 @@ describe("ChatView", () => {
     fireEvent.click(await screen.findByText("First chat"));
     const box = screen.getByLabelText("Message");
     fireEvent.change(box, { target: { value: "enormous" } });
-    fireEvent.click(screen.getByText("Send"));
+    fireEvent.click(screen.getByLabelText("Send"));
 
     expect(await screen.findByText(/still in the box/i)).toBeInTheDocument();
     expect(box).toHaveValue("enormous");

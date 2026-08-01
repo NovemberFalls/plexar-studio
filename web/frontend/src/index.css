@@ -15,6 +15,17 @@
   --cc-surface: #212121;
   --cc-elev: #262626;
   --cc-term: #181818;
+
+  /* Artifact TYPE tones — the only hue in the Chat surface (CHAT.md §1).
+     Low chroma, and used on the type icon and type label ONLY: never as a
+     fill, a card background, or a status colour. Hierarchy everywhere else
+     comes from BRIGHTNESS, because artifact type is the one thing users scan
+     by category rather than by urgency. */
+  --cc-a-diff: #8098b0;
+  --cc-a-run: #b58d80;
+  --cc-a-code: #b3a47e;
+  --cc-a-chart: #8ea88c;
+  --cc-a-image: #a390ab;
   --cc-border: rgba(255, 255, 255, .08);
   --cc-line: rgba(255, 255, 255, .06);
   --cc-fg: #d7d6d3;

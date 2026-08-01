@@ -290,3 +290,57 @@ exposed by a guest — the user is exposed by their own chat.
    is a genuinely different design (latency, conflict, partial writes), so the
    honest first step is local-path choice plus EXPORT to object storage, not
    pretending SQLite can live on S3.
+
+---
+
+## G. Chat design 6a — handoff received 2026-08-01
+
+Spec copied into the repo as `backlog/CHAT-design-6a.md` (it arrived in
+Downloads, which is not a durable home for a binding contract).
+
+**6a is NEUTRAL and is what gets built. 5a is reference only.** The difference
+is not taste — it is a rule: *hierarchy comes from BRIGHTNESS, not hue.* A thing
+that needs the user is `--cc-fg`; a resolved thing falls to `--cc-dim` then
+`--cc-muted`. Concretely, 5a's glowing amber permission gate, blue primary
+buttons, coloured badges/pills, coloured filter chips, multi-hue chart bars and
+syntax rainbow are all OUT.
+
+The single exception is the five artifact TYPE tones, on a type icon and its
+label only — never a fill, a card background or a status colour — because type
+is the one thing scanned by category rather than urgency.
+
+### Landed
+
+- Five artifact tones added to `index.css` (`--cc-a-diff|run|code|chart|image`).
+  Every other token the spec names already existed.
+- Four-column shell: 272 list · flexible transcript (min 560) · 288 artifacts
+  rail, collapsible from the header. `minHeight: 0` on the scrolling body,
+  which the spec flags as required — without it a long thread pushes the
+  composer off-screen.
+- Conversation list at 56px rows, three lines, brightness-encoded state.
+- Transcript at `gap:18px`, `padding:16px 26px 0`, prose measure 620px.
+- Composer per §7, and **the model selector moved OUT of the header into the
+  bottom bar** — model and permission mode are the two things changed
+  per-message.
+- Send is a 30px circle with an arrow, so its tests query the accessible name
+  rather than button text.
+
+### NOT built — build order 5–12
+
+Streaming (deltas, caret, auto-scroll rule, Interrupt), tool-call strip,
+**permission gate** (§6, the most important component in the spec), artifact
+full screen 6b, message actions (edit & re-run with its consequence warning,
+retry-with, fork), `@` and `/` pickers, drag-drop, voice, agent registration.
+
+All of those depend on a model actually replying, which is still the gating
+piece. The surfaces say so rather than rendering convincing empty furniture.
+
+### Two spec details worth not losing
+
+- **Only two engine facts are allowed in Chat**: context remaining and tok/s.
+  No spill, queue depth, lane class or cost — those live in Engine and
+  Settings. Cost appears exactly once, in the retry-with menu, because there it
+  is a decision.
+- **Edit & re-run must show its consequence before committing** ("discards 6
+  later messages and 2 artifacts") with a Fork-instead escape. Never destroy
+  history silently — the same rule the group-delete behaviour already follows.
