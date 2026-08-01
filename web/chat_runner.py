@@ -148,6 +148,59 @@ def _extract_text(event: dict) -> str:
     return ""
 
 
+def _extract_tools(event: dict) -> list[dict]:
+    """Pull tool CALLS out of one event, as ``[{id, verb, targets}]``.
+
+    CHAT.md §6 renders these as a quiet log — "a bordered group ... never a set
+    of coloured cards" — so what a caller needs is the verb and what it touched,
+    not the raw arguments. Reading the whole input blob into the transcript
+    would leak file contents and prompts into a surface that is meant to be
+    scannable.
+    """
+    if not isinstance(event, dict) or event.get("type") != "assistant":
+        return []
+    content = (event.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return []
+
+    out = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        args = block.get("input") if isinstance(block.get("input"), dict) else {}
+        # The fields that name WHAT was touched, in the order the CLI's tools
+        # actually use. Anything else stays out of the transcript.
+        targets = [
+            str(args[k]) for k in ("file_path", "path", "pattern", "command", "url")
+            if args.get(k)
+        ]
+        out.append({
+            "id": block.get("id"),
+            # A tool call with no name still happened; "unknown" beats dropping
+            # it, which is the same call usage_tracker makes for tool_events.
+            "verb": block.get("name") or "unknown",
+            "targets": targets,
+        })
+    return out
+
+
+def _extract_tool_results(event: dict) -> list[dict]:
+    """Pull tool RESULTS out of a user-role event: ``[{id, is_error}]``.
+
+    Only the outcome, never the payload — a tool result can be an entire file.
+    """
+    if not isinstance(event, dict) or event.get("type") != "user":
+        return []
+    content = (event.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return []
+    return [
+        {"id": b.get("tool_use_id"), "is_error": bool(b.get("is_error"))}
+        for b in content
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
+
+
 async def stream_reply(
     prompt: str,
     *,
@@ -207,6 +260,11 @@ async def stream_reply(
 
             if event.get("session_id"):
                 yield {"type": "session", "session_id": event["session_id"]}
+
+            for call in _extract_tools(event):
+                yield {"type": "tool", **call}
+            for res in _extract_tool_results(event):
+                yield {"type": "tool_result", **res}
 
             chunk = _extract_text(event)
             if chunk:

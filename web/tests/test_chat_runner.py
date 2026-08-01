@@ -245,3 +245,80 @@ async def test_a_hung_harness_is_killed_and_reported(monkeypatch):
     events = await _collect(monkeypatch, proc, timeout_s=0.01)
     assert events[-1]["type"] == "error"
     assert proc.killed, "a hung harness must not be left running"
+
+
+# ---------------------------------------------------------------------------
+# Tool calls (CHAT.md §6) — a quiet log, not a transcript of arguments
+# ---------------------------------------------------------------------------
+
+def test_a_tool_call_yields_its_verb_and_targets():
+    ev = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "t1", "name": "Read",
+         "input": {"file_path": "queue.py"}},
+    ]}}
+    assert cr._extract_tools(ev) == [
+        {"id": "t1", "verb": "Read", "targets": ["queue.py"]}
+    ]
+
+
+def test_tool_arguments_beyond_the_target_stay_out_of_the_transcript():
+    """A tool input can carry file contents or a whole prompt. The strip is
+    meant to be scannable, and dumping the blob leaks into a surface that
+    should only say what was touched."""
+    ev = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "t1", "name": "Write", "input": {
+            "file_path": "a.py", "content": "SECRET PAYLOAD", "extra": "noise",
+        }},
+    ]}}
+    call = cr._extract_tools(ev)[0]
+    assert call["targets"] == ["a.py"]
+    assert "SECRET PAYLOAD" not in str(call)
+
+
+def test_an_unnamed_tool_call_is_recorded_not_dropped():
+    """It still happened; "unknown" beats a silent gap."""
+    ev = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "t1", "input": {}},
+    ]}}
+    assert cr._extract_tools(ev)[0]["verb"] == "unknown"
+
+
+def test_text_blocks_are_not_mistaken_for_tool_calls():
+    ev = {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}
+    assert cr._extract_tools(ev) == []
+
+
+def test_malformed_events_yield_no_tool_calls():
+    for ev in (None, "nope", {}, {"type": "assistant"},
+               {"type": "assistant", "message": {"content": "no"}}):
+        assert cr._extract_tools(ev) == []
+        assert cr._extract_tool_results(ev) == []
+
+
+def test_a_tool_result_reports_only_its_outcome():
+    """A result can be an entire file; only success/failure belongs here."""
+    ev = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+         "content": "a whole file's worth of text"},
+    ]}}
+    assert cr._extract_tool_results(ev) == [{"id": "t1", "is_error": True}]
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_are_streamed_alongside_text(monkeypatch):
+    proc = _FakeProc(_lines(
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Grep",
+             "input": {"pattern": "_inflight"}}]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": False}]}},
+        {"type": "stream_event",
+         "event": {"delta": {"type": "text_delta", "text": "Found it"}}},
+        {"type": "result", "result": "Found it", "session_id": "s1"},
+    ))
+    events = await _collect(monkeypatch, proc)
+    kinds = [e["type"] for e in events]
+
+    assert "tool" in kinds and "tool_result" in kinds
+    tool = [e for e in events if e["type"] == "tool"][0]
+    assert tool["verb"] == "Grep" and tool["targets"] == ["_inflight"]

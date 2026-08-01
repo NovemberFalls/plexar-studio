@@ -40,6 +40,7 @@ import {
 import ChatMessage from "./ChatMessage.jsx";
 import ChatModelPicker from "./ChatModelPicker.jsx";
 import ChatStreak from "./ChatStreak.jsx";
+import ToolStrip from "./ToolStrip.jsx";
 
 const LIST_W = 272;      // §3
 const ARTIFACTS_W = 288; // §3
@@ -86,6 +87,10 @@ export default function ChatView() {
   // Live reply text. Held separately from `thread` because it is NOT yet
   // persisted — the store owns the turn that survives a reload.
   const [streaming, setStreaming] = useState("");
+  // Tool calls for the turn IN FLIGHT. Cleared per send: they belong to
+  // the reply being produced, not to the conversation, which does not
+  // persist them yet.
+  const [liveTools, setLiveTools] = useState([]);
   const [artifactsOpen, setArtifactsOpen] = useState(true);
   const endRef = useRef(null);
 
@@ -195,6 +200,7 @@ export default function ChatView() {
     setBusy(true);
     setError(null);
     setStreaming("");
+    setLiveTools([]);
     try {
       // ONE call sends and replies. Two calls would let a failure between them
       // leave the user's message saved with nothing answering it, which the UI
@@ -235,6 +241,14 @@ export default function ChatView() {
           if (ev.type === "delta") {
             acc += ev.text;
             setStreaming(acc);
+          } else if (ev.type === "tool") {
+            setLiveTools((prev) => [...prev, ev]);
+          } else if (ev.type === "tool_result") {
+            // Matched by id so a result lands on ITS call rather than the
+            // most recent one — tools can overlap.
+            setLiveTools((prev) => prev.map(
+              (t) => (t.id === ev.id ? { ...t, is_error: ev.is_error } : t)
+            ));
           } else if (ev.type === "error") {
             setError(ev.detail || "The reply failed.");
           }
@@ -384,6 +398,7 @@ export default function ChatView() {
                   Nothing here yet. Anything you send is stored verbatim.
                 </p>
               )}
+              {liveTools.length > 0 && <ToolStrip calls={liveTools} />}
               {streaming && (
                 <div style={{ fontSize: 14, lineHeight: 1.65, maxWidth: 620,
                               color: "var(--cc-muted)", whiteSpace: "pre-wrap" }}>
