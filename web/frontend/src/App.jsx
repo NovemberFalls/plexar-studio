@@ -1963,6 +1963,7 @@ export default function App() {
               </div>
             )}
 
+            {activeSection !== "chat" && (
             <LaneStrip
               sessions={sessions}
               paneSlotById={paneSlotBySession}
@@ -1979,6 +1980,7 @@ export default function App() {
               onToggleSpill={toggleSpillEnabled}
               onOpenSpillDetails={() => setActiveSection("engine")}
             />
+            )}
 
           <div className="flex flex-1 min-h-0">
             {/* Chat is a focused destination: no Projects tree beside it. The
@@ -2369,7 +2371,15 @@ export default function App() {
                 session — rather than opening a trace view that does not exist. */}
             {/* Chat owns the full content area, like Reports and Engine —
                 it is a destination, not an overlay on the Workspace grid. */}
-            {activeSection === "chat" && <ChatView />}
+            {/* `flex-1 min-w-0` is load-bearing, not decoration: without it
+                ChatView is sized by its content inside the content flex row
+                and renders as a narrow column with dead space beside it.
+                Engine's wrapper has the same two classes for the same reason. */}
+            {activeSection === "chat" && (
+              <div className="flex-1 min-w-0 flex flex-col" style={{ background: "var(--cc-bg)" }}>
+                <ChatView />
+              </div>
+            )}
 
             {activeSection === "reports" && (
               <ReportsView
