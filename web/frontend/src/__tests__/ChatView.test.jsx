@@ -33,6 +33,7 @@ function mockApi(overrides = {}) {
     calls.push({ url, method: opts.method || "GET", body: opts.body });
     const key = Object.keys(overrides).find((k) => url.includes(k));
     if (key) return Promise.resolve(overrides[key]);
+    if (url.includes("/respond")) return sse([{ type: "done", text: "ok" }]);
     if (url.includes("/groups")) return ok(GROUPS);
     if (url.includes("/conversations/cnv_1")) return ok(THREAD);
     if (url.includes("/conversations")) return ok(CONVS);
@@ -41,6 +42,23 @@ function mockApi(overrides = {}) {
   return calls;
 }
 const ok = (body) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+
+/** An SSE response whose body is a real reader, which is what send() consumes. */
+function sse(frames) {
+  const enc = new TextEncoder();
+  const nl = String.fromCharCode(10);
+  const chunks = frames.map((f) => enc.encode("data: " + JSON.stringify(f) + nl + nl));
+  let i = 0;
+  return Promise.resolve({
+    ok: true,
+    body: { getReader: () => ({
+      read: () => Promise.resolve(
+        i < chunks.length ? { done: false, value: chunks[i++] } : { done: true }
+      ),
+    }) },
+    json: () => Promise.resolve({}),
+  });
+}
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -56,18 +74,19 @@ describe("ChatView", () => {
     expect(screen.getAllByText("Work").length).toBeGreaterThan(0);
   });
 
-  it("says plainly that nothing will reply yet", async () => {
-    // A chat surface with no model behind it must not accept messages into a
-    // void and look like it is working.
+  it("states the tool posture rather than leaving it implicit", async () => {
+    // These tools run on THIS machine with the user's privileges, so the
+    // read-only default is worth saying out loud, not burying in a setting.
     mockApi();
     render(<ChatView />);
     fireEvent.click(await screen.findByText("First chat"));
-    expect(await screen.findByText(/No model is wired to Chat yet/i)).toBeInTheDocument();
+    expect(await screen.findByText(/READ-ONLY/i)).toBeInTheDocument();
   });
 
   it("re-reads from the server after sending rather than appending locally", async () => {
     // The server owns `seq`. Rendering an optimistic message would show one
-    // the store may not have accepted.
+    // the store may not have accepted. Send and reply are ONE call now, so a
+    // failure between them cannot orphan the user's message.
     const calls = mockApi();
     render(<ChatView />);
     fireEvent.click(await screen.findByText("First chat"));
@@ -77,7 +96,7 @@ describe("ChatView", () => {
     fireEvent.click(screen.getByLabelText("Send"));
 
     await waitFor(() => {
-      const posts = calls.filter((c) => c.method === "POST" && c.url.includes("/messages"));
+      const posts = calls.filter((c) => c.method === "POST" && c.url.includes("/respond"));
       expect(posts).toHaveLength(1);
       // A GET of the thread AFTER the POST is the re-read.
       const idx = calls.indexOf(posts[0]);
@@ -90,7 +109,7 @@ describe("ChatView", () => {
     // A 413 means nothing was saved. Clearing the composer would destroy the
     // very thing that was too big to store.
     mockApi({
-      "/messages": Promise.resolve({
+      "/respond": Promise.resolve({
         ok: false, status: 413,
         json: () => Promise.resolve({ error: "message is too large" }),
       }),

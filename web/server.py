@@ -43,6 +43,7 @@ from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  #
 from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E402 -- _paste_and_submit, never _wrap: the submit CR must be a separate write or the TUI eats it as pasted content
 import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
 import chat_store  # noqa: E402 -- grouped with the other local-module imports above
+import chat_runner  # noqa: E402 -- grouped with the other local-module imports above
 import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
 import voice_service  # noqa: E402 -- free to import: every ML dependency inside it is lazy
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
@@ -5485,6 +5486,105 @@ async def add_chat_message(conversation_id: str, body: dict):
             return JSONResponse({"error": text}, status_code=404)
         return JSONResponse({"error": text}, status_code=400)
     return JSONResponse(msg)
+
+
+@app.post("/api/chat/conversations/{conversation_id}/respond")
+async def respond_in_chat(conversation_id: str, body: dict):
+    """Persist the user's message and STREAM a reply back as SSE.
+
+    One route rather than two, deliberately: if the send and the reply were
+    separate calls, a failure between them would leave a user message saved
+    with nothing ever answering it, and the UI could not tell that apart from
+    a slow model.
+
+    The tool allow-list is read from the CONVERSATION, never from the request
+    body. A client that could ask for `Bash` by setting a flag would make the
+    server-side rail decorative — these tools run on this machine with the
+    user's own privileges.
+    """
+    store = _chat()
+    conv = await asyncio.to_thread(store.get_conversation, conversation_id)
+    if conv is None:
+        return JSONResponse({"error": "unknown conversation"}, status_code=404)
+
+    content = body.get("content") or ""
+    if not content.strip():
+        return JSONResponse({"error": "content must not be empty"}, status_code=400)
+
+    try:
+        await asyncio.to_thread(store.add_message, conversation_id, "user", content)
+    except ValueError as exc:
+        text = str(exc)
+        code = 413 if "over the" in text else 400
+        return JSONResponse({"error": text}, status_code=code)
+
+    async def events():
+        def sse(payload: dict) -> bytes:
+            # SSE frames end with a BLANK line; the terminator is built from
+            # chr(10) rather than an escape so it survives every layer of
+            # tooling that has rewritten this file.
+            nl = chr(10)
+            return ("data: " + json.dumps(payload) + nl + nl).encode("utf-8")
+
+        parts: list[str] = []
+        session_id = conv.get("harness_session_id")
+        try:
+            async for ev in chat_runner.stream_reply(
+                content,
+                model=conv.get("model") or None,
+                session_id=session_id,
+                # Read-only unless this conversation was explicitly opted in.
+                # Not yet settable from the UI, which is the honest state: the
+                # capability exists and nothing grants it by accident.
+                allow_write=False, allow_exec=False, allow_net=False,
+            ):
+                if ev["type"] == "session" and ev.get("session_id"):
+                    session_id = ev["session_id"]
+                yield sse(ev)
+
+                if ev["type"] == "delta":
+                    parts.append(ev["text"])
+                elif ev["type"] == "done":
+                    text = ev.get("text") or "".join(parts)
+                    # Persist only a turn that actually produced something. An
+                    # empty assistant row would render as the model replying
+                    # with silence.
+                    if text.strip():
+                        await asyncio.to_thread(
+                            store.add_message, conversation_id, "assistant", text,
+                            conv.get("model"),
+                        )
+                    if ev.get("session_id") or session_id:
+                        await asyncio.to_thread(
+                            store.set_harness_session, conversation_id,
+                            ev.get("session_id") or session_id,
+                        )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("chat respond failed", exc_info=True)
+            yield sse({"type": "error", "detail": str(exc)})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        # Buffering an event stream defeats the point of streaming it.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/chat/harness")
+async def get_chat_harness():
+    """Whether a reply is possible at all, and why not if not. Always 200."""
+    cli = await asyncio.to_thread(chat_runner.resolve_cli)
+    return JSONResponse({
+        "available": bool(cli),
+        "reason": None if cli else "cli_not_found",
+        "detail": (
+            "Replies run through the local `claude` CLI."
+            if cli else
+            "The `claude` CLI was not found on PATH, so Chat cannot produce replies."
+        ),
+        "read_only_tools": list(chat_runner.READ_ONLY_TOOLS),
+    })
 
 
 @app.post("/api/chat/conversations/{conversation_id}/attachments")

@@ -20,10 +20,15 @@
  *     optimistic local state — the store owns `seq`;
  *   · a 413 keeps the user's text in the composer, because nothing was saved.
  *
- * HONEST GAPS. No model is wired, so nothing replies; there is no streaming,
- * no tool strip, no permission gate and no artifacts yet. Those are build-order
- * steps 5–12 in CHAT.md. The surfaces say so rather than rendering convincing
- * empty furniture.
+ * Replies stream from `/respond`, which sends and answers in ONE call — split
+ * across two, a failure between them leaves the user's message saved with
+ * nothing answering it, and the UI cannot tell that apart from a slow model.
+ * The streamed text is held OUTSIDE `thread` because it is not yet persisted;
+ * the turn that survives a reload is the one the store returns.
+ *
+ * HONEST GAPS. No tool strip, no permission gate, no artifacts, no message
+ * actions and no voice — build-order steps 6–12 in CHAT.md. The surfaces say
+ * so rather than rendering convincing empty furniture.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -44,6 +49,10 @@ const HEADER_H = 52;     // §3
 const ROOT = { id: "root", name: "Ungrouped" };
 
 const MONO = "'JetBrains Mono', ui-monospace, monospace";
+
+/** SSE line terminator, built from a char code so no tooling layer can rewrite
+ *  it into a literal newline inside the source. */
+const NL = String.fromCharCode(10);
 
 /** §2 — section labels: mono, 9.5px, wide tracking, uppercase, muted. */
 const LABEL = {
@@ -74,6 +83,9 @@ export default function ChatView() {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // Live reply text. Held separately from `thread` because it is NOT yet
+  // persisted — the store owns the turn that survives a reload.
+  const [streaming, setStreaming] = useState("");
   const [artifactsOpen, setArtifactsOpen] = useState(true);
   const endRef = useRef(null);
 
@@ -182,14 +194,55 @@ export default function ChatView() {
     if (!content.trim() || !activeId || busy) return;
     setBusy(true);
     setError(null);
+    setStreaming("");
     try {
-      await api(`/conversations/${activeId}/messages`, {
-        method: "POST", body: JSON.stringify({ role: "user", content }),
+      // ONE call sends and replies. Two calls would let a failure between them
+      // leave the user's message saved with nothing answering it, which the UI
+      // cannot tell apart from a slow model.
+      const res = await fetch(`/api/chat/conversations/${activeId}/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
       });
-      // Re-read: the server owns `seq`, and showing a message the store did
-      // not accept is the one failure a system of record must not have.
-      setThread(await api(`/conversations/${activeId}`));
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        const err = new Error(body?.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      // The message was accepted, so the composer can clear. Re-read now so
+      // the user's own turn appears immediately rather than after the reply.
       setDraft("");
+      setThread(await api(`/conversations/${activeId}`));
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let acc = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line; a partial frame stays in
+        // the buffer rather than being parsed as truncated JSON.
+        const frames = buf.split(NL + NL);
+        buf = frames.pop() || "";
+        for (const frame of frames) {
+          const line = frame.split(NL).find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          if (ev.type === "delta") {
+            acc += ev.text;
+            setStreaming(acc);
+          } else if (ev.type === "error") {
+            setError(ev.detail || "The reply failed.");
+          }
+        }
+      }
+      // Re-read rather than keeping the streamed text: the store owns `seq`,
+      // and the persisted turn is the one that survives a reload.
+      setThread(await api(`/conversations/${activeId}`));
       refreshLists();
     } catch (e) {
       setError(
@@ -197,7 +250,10 @@ export default function ChatView() {
           ? "That message is too large to store. Nothing was saved — your text is still in the box."
           : e.message
       );
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+      setStreaming("");
+    }
   };
 
   const onKeyDown = (e) => {
@@ -328,6 +384,15 @@ export default function ChatView() {
                   Nothing here yet. Anything you send is stored verbatim.
                 </p>
               )}
+              {streaming && (
+                <div style={{ fontSize: 14, lineHeight: 1.65, maxWidth: 620,
+                              color: "var(--cc-muted)", whiteSpace: "pre-wrap" }}>
+                  {streaming}
+                  <span style={{ display: "inline-block", width: 7, height: 15,
+                                 marginLeft: 2, verticalAlign: "text-bottom",
+                                 background: "var(--cc-dim)" }} />
+                </div>
+              )}
               <div ref={endRef} />
             </div>
 
@@ -338,7 +403,7 @@ export default function ChatView() {
                 {/* Only two engine facts are allowed in Chat (§7): context and
                     tok/s. No spill, queue depth, lane class or cost. Neither is
                     known until a model is wired, so neither is invented. */}
-                <span>not generating</span>
+                <span>{busy ? "generating" : "not generating"}</span>
                 <span style={{ flex: 1 }} />
                 <span style={{ fontFamily: MONO }}>context —</span>
               </div>
@@ -346,9 +411,9 @@ export default function ChatView() {
               <div style={{ marginBottom: 8, padding: "6px 10px", fontSize: 10,
                             lineHeight: 1.5, color: "var(--cc-dim)",
                             border: "1px solid var(--cc-border)", borderRadius: 8 }}>
-                No model is wired to Chat yet — messages are stored, but nothing
-                replies. Streaming, tool calls, permission gates and artifacts
-                follow in build order.
+                Replies run through your local `claude` CLI with a READ-ONLY
+                tool set. Tool calls, permission gates and artifacts follow in
+                build order.
               </div>
 
               {error && (
