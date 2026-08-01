@@ -30,7 +30,7 @@ export default class ErrorBoundary extends Component {
               Something went wrong
             </h1>
             <p style={{ fontSize: "14px", color: "#888", marginBottom: "24px" }}>
-              Claude Cockpit encountered an unexpected error.
+              Plexar encountered an unexpected error.
             </p>
             <pre style={{
               fontSize: "12px", color: "#ff9999",

@@ -562,7 +562,7 @@ export default function Sidebar({
               }}
             >
               <p className="text-xs font-semibold mb-3" style={{ color: "var(--cc-fg)" }}>
-                Welcome to Claude Cockpit
+                Welcome to Plexar
               </p>
               <ul className="space-y-2 text-xs" style={{ color: "var(--cc-dim)" }}>
                 <li>• Run multiple Claude Code sessions side-by-side</li>

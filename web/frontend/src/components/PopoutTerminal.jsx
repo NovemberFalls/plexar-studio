@@ -38,7 +38,7 @@ export default function PopoutTerminal({ terminalId, name, model }) {
   xtermThemeInputsRef.current = { theme, accent, tokenOverrides };
 
   useEffect(() => {
-    document.title = `${name} — Claude Cockpit`;
+    document.title = `${name} — Plexar`;
   }, [name]);
 
   // Safe fit: guard against zero-dimension containers and send resize to PTY.

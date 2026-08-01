@@ -277,7 +277,7 @@ export function buildOpenApi(routes) {
   return {
     openapi: "3.1.0",
     info: {
-      title: "Claude Cockpit — local engine HTTP surface",
+      title: "Plexar — local engine HTTP surface",
       version: "1",
       description:
         "Generated from Cockpit's Engine ▸ API route catalogue. Same-origin routes only: the lane " +

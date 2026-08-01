@@ -171,3 +171,65 @@ with a directory migration and a deliberate updater story.
 5. Artifacts.
 6. Voice, per the decision in (2).
 7. Rename, in the three tiers.
+
+---
+
+## D. Chat's model backend — PROVEN 2026-08-01: route through the harness
+
+Question raised: *"if users send artifacts through the harness, does Claude Code
+also give us its tools and abilities?"*
+
+**Yes, and it changes three decisions at once.** Verified live, not assumed:
+
+```
+claude -p "Read probe.csv and reply with only the total of the numbers" \
+       --output-format json --allowedTools Read
+  -> exit 0, result "10", is_error false, session_id present
+```
+
+It read a file off disk with its own `Read` tool and did the arithmetic. That
+is the full Claude Code toolset — Read, Write, Edit, Bash, WebFetch, agents —
+available to Chat by driving the CLI headlessly rather than calling a model API.
+
+### What this settles
+
+1. **The xlsx parser question (§A) largely dissolves.** We do not need SheetJS
+   to interpret a spreadsheet: hand the model the PATH and it reads the file
+   with its own tools. `chat_store` already stores attachments as paths, not
+   bytes, which is exactly the shape this wants. A renderer is then only needed
+   for *display*, not comprehension — a much smaller decision.
+2. **NO API KEY IS NEEDED.** The probe ran with no `ANTHROPIC_API_KEY` in the
+   environment; the CLI used the existing subscription OAuth in
+   `~/.claude/.credentials.json`. Chat inherits the user's own auth, the same
+   credential Cockpit already reads for the usage pill. The "get the right API
+   key" problem does not apply on this path at all.
+3. **Cost is reported per turn** (`total_cost_usd`), so Chat can feed the same
+   spend/reporting surfaces Cockpit already has. Note under a subscription that
+   figure is API-EQUIVALENT, not money billed — `spend_guard`'s existing
+   real-vs-equivalent split already draws that line correctly.
+
+### The flags that matter
+
+- `-p` non-interactive, `--output-format json` (or `stream-json` +
+  `--include-partial-messages` for token-by-token streaming into the UI).
+- `--session-id` / `--resume` for continuity, so a Chat conversation maps onto
+  a real harness session rather than re-sending history every turn.
+- `--allowedTools` is the permission surface. **This is the security decision
+  that replaces the HTML-sandbox one**: a chat that can run `Bash` is a chat
+  that can do anything the user can. Chat should start with a READ-ONLY tool
+  set and require an explicit opt-in per conversation for anything that writes.
+
+### Gotcha found while probing
+
+`--allowedTools` is variadic (`<tools...>`), so it swallows a following
+positional prompt and the CLI then fails with *"Input must be provided either
+through stdin or as a prompt argument"*. The prompt must come BEFORE it, or be
+passed on stdin. Whoever builds the spawn path should pass the prompt on stdin
+and keep argv flag-only — it also avoids every quoting problem with a
+multi-thousand-line paste.
+
+### Consequence for §B (voice)
+
+The voice loop's LLM leg can be the same harness call, which means voice
+inherits tools too. It also means the "which model" question is answered by the
+user's own `claude` config rather than by a second setting in Cockpit.

@@ -1320,7 +1320,7 @@ export default function App() {
         const label = `popout-${terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
         const webview = new WebviewWindow(label, {
           url,
-          title: `${session.name} — Claude Cockpit`,
+          title: `${session.name} — Plexar`,
           width: 900,
           height: 700,
           minWidth: 600,
