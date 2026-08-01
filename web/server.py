@@ -44,6 +44,7 @@ from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E40
 import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
 import chat_store  # noqa: E402 -- grouped with the other local-module imports above
 import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
+import voice_service  # noqa: E402 -- free to import: every ML dependency inside it is lazy
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
 from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other local-module imports above
 import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the other local-module imports above
@@ -5280,6 +5281,47 @@ async def get_provider_health(provider_id: str):
         }
 
     return JSONResponse(body)
+
+
+# ── Voice (status · voices) ───────────────────────────────
+#
+# Voice is an OPTIONAL capability. Its ML dependencies are deliberately NOT
+# bundled — the sidecar is ~48 MB and torch alone would add ~2 GB — so on a
+# fresh install the engine is simply absent. `import voice_service` is free
+# (~0.05s, no heavy imports, no network, no disk), which is why it can sit at
+# module scope beside everything else.
+#
+# Both routes ALWAYS return 200. "Voice is not installed" is a normal state to
+# report, not an HTTP error: a 503 here would make an inline panel blank out
+# rather than explain itself, which is the same stance /api/spend/status and
+# /api/anthropic/usage already take.
+
+
+@app.get("/api/voice/status")
+async def get_voice_status():
+    """What voice can actually do on this machine, and why not, if not.
+
+    The `reason` is the whole point and the UI must switch on it — the four
+    values imply four DIFFERENT user actions:
+      not_installed -> pip install; model_missing -> download the weights;
+      unsupported   -> this desktop build has no interpreter to install into;
+      check_failed  -> we could not determine, which is NOT "it is broken".
+    Collapsing them into "voice unavailable" sends people to fix the wrong
+    thing.
+    """
+    return JSONResponse(await asyncio.to_thread(voice_service.availability))
+
+
+@app.get("/api/voice/voices")
+async def get_voice_voices():
+    """Available voices, or an empty list WITH the reason it is empty.
+
+    An empty picker with no explanation reads as "this model has no voices",
+    which is a different claim from "the voicepack is not downloaded" or "the
+    file is corrupt" — and a corrupt pack must not send the user to re-download
+    a file they already have.
+    """
+    return JSONResponse(await asyncio.to_thread(voice_service.list_voices))
 
 
 # ── Chat (groups · conversations · messages · attachments) ─────

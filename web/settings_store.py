@@ -263,6 +263,28 @@ DEFAULT_SETTINGS = {
         "enforce_on": {"bridges": True, "new_sessions": False},
     },
     "system": {"keybindings": {}},
+    # Voice mode. OFF by default and deliberately so: the ML dependencies are
+    # NOT bundled (the sidecar is 48 MB; torch would add ~2 GB), so on a fresh
+    # install voice is simply not present. A default of True would advertise a
+    # feature whose engine has to be downloaded first.
+    #
+    # `voice_id` is empty rather than a guessed default -- naming a Kokoro
+    # voicepack that may not be on disk would make the UI show a selection the
+    # engine cannot honour. Empty means "ask the engine what it has".
+    "voice": {
+        "enabled": False,
+        "voice_id": "",
+        # The brief's "pause for about 5 seconds to continue" cue. Tunable
+        # because conversational pace is personal: too short cuts people off
+        # mid-thought, too long feels unresponsive.
+        "silence_continue_seconds": 5.0,
+        # Barge-in -- speech while the assistant is talking stops it. This is
+        # the whole point of conversational voice, so it defaults ON whenever
+        # voice is on at all.
+        "barge_in": True,
+        "input_device": "",      # "" = system default
+        "output_device": "",
+    },
     # Terminal (xterm.js) options. These are Cockpit's own -- the `claude` CLI
     # neither sees nor restricts them. NOT yet read by TerminalPane, which still
     # hard-codes its values; the Settings page says so rather than implying they
@@ -292,6 +314,9 @@ _NUMERIC_BOUNDS = {
     "data.retention_days": (1, 3650),
     "spend.monthly_reset_day": (1, 28),
     "spend.alert_at_percent": (1, 100),
+    # Below ~0.5s a natural mid-sentence breath ends the turn; past 30s the
+    # "still listening" state is indistinguishable from a hang.
+    "voice.silence_continue_seconds": (0.5, 30.0),
     # 8 is the smallest legible mono size; past ~28 a pane holds too few columns
     # to be useful. Scrollback is per-pane and Cockpit runs up to 8 of them, so
     # the ceiling is a memory bound, not a preference.

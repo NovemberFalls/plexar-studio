@@ -363,3 +363,45 @@ async def test_reveal_endpoint_returns_200_on_failure(client, isolated_settings,
     body = resp.json()
     assert body["ok"] is False
     assert "no file manager here" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# Voice — an OPTIONAL capability whose engine is not bundled
+# ---------------------------------------------------------------------------
+
+def test_voice_is_off_by_default():
+    """The ML deps are not shipped (the sidecar is 48 MB; torch is ~2 GB).
+
+    Defaulting to on would advertise a feature whose engine has to be
+    downloaded before it can do anything.
+    """
+    assert settings_store.DEFAULT_SETTINGS["voice"]["enabled"] is False
+
+
+def test_no_voice_is_guessed_by_default():
+    """Naming a voicepack that may not be on disk would show the user a
+    selection the engine cannot honour. Empty means 'ask the engine'."""
+    assert settings_store.DEFAULT_SETTINGS["voice"]["voice_id"] == ""
+
+
+def test_barge_in_defaults_on():
+    """Speaking over the assistant IS conversational voice; an install where
+    you cannot interrupt is the feature without its point."""
+    assert settings_store.DEFAULT_SETTINGS["voice"]["barge_in"] is True
+
+
+def test_the_continue_pause_is_five_seconds_and_bounded(isolated_settings):
+    assert settings_store.DEFAULT_SETTINGS["voice"]["silence_continue_seconds"] == 5.0
+
+    # Below ~0.5s a normal breath ends the turn; past 30s "listening" is
+    # indistinguishable from a hang.
+    with pytest.raises(ValueError):
+        settings_store.update_settings({"voice": {"silence_continue_seconds": 0.1}})
+    with pytest.raises(ValueError):
+        settings_store.update_settings({"voice": {"silence_continue_seconds": 120}})
+
+    effective = settings_store.update_settings(
+        {"voice": {"silence_continue_seconds": 2.5}}
+    )
+    assert effective["voice"]["silence_continue_seconds"] == 2.5
+    assert effective["voice"]["barge_in"] is True, "a bounded edit must not clobber siblings"
