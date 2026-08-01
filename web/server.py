@@ -2468,6 +2468,88 @@ async def set_anthropic_settings(request: Request):
     return JSONResponse({"ok": True, "configured": True, "source": "ui", "masked": masked})
 
 
+@app.get("/api/settings/plexar")
+async def get_plexar_settings():
+    """Where Plexar-vLLM is and whether a credential is configured.
+
+    The key itself is NEVER returned — only a mask and its source, the same
+    stance as every other provider key. `authenticated` is deliberately absent:
+    whether the key WORKS is what /api/local/plexar-vllm/identity answers, and
+    conflating "configured" with "accepted" is how a rejected key reads as a
+    missing one.
+    """
+    url, _auth = _plexar_config()
+    key, source = settings_store.resolve_provider_key("plexar")
+    return JSONResponse({
+        "base_url": url,
+        "configured": bool(key),
+        "source": source,
+        "masked": settings_store.mask_key(key) if key else None,
+        # Cloudflare Access is being retired; the tunnel stays. Reported so the
+        # UI can say whether the legacy pair is still in play rather than
+        # guessing from the URL.
+        "cf_configured": bool(os.getenv("COCKPIT_PLEXAR_CF_CLIENT_ID")
+                              and os.getenv("COCKPIT_PLEXAR_CF_CLIENT_SECRET")),
+    })
+
+
+@app.post("/api/settings/plexar")
+async def set_plexar_settings(body: dict):
+    """Set the Plexar URL and/or key. Either may be sent alone."""
+    if "key" in body:
+        key = body.get("key")
+        if not isinstance(key, str) or not key.strip():
+            return JSONResponse({"ok": False, "error": "key must not be empty"},
+                                status_code=400)
+        key = key.strip()
+        if any(ch.isspace() for ch in key):
+            return JSONResponse({"ok": False, "error": "key must not contain whitespace"},
+                                status_code=400)
+        settings_store.set_provider_ui_key("plexar", key)
+        logger.info("Plexar key saved (masked: %s)", settings_store.mask_key(key))
+
+    if "base_url" in body:
+        url = body.get("base_url")
+        if not isinstance(url, str):
+            return JSONResponse({"ok": False, "error": "base_url must be a string"},
+                                status_code=400)
+        url = url.strip().rstrip("/")
+        # An empty string is MEANINGFUL: it clears the override and falls back
+        # to the environment, then loopback. Refusing it would make the stored
+        # value impossible to undo from the UI.
+        if url and not url.startswith(("http://", "https://")):
+            return JSONResponse({"ok": False, "error": "base_url must start with http:// or https://"},
+                                status_code=400)
+        settings_store.update_settings({"providers": {"plexar": {"base_url": url}}})
+
+    url, _auth = _plexar_config()
+    key, source = settings_store.resolve_provider_key("plexar")
+    return JSONResponse({
+        "ok": True, "base_url": url, "configured": bool(key), "source": source,
+        "masked": settings_store.mask_key(key) if key else None,
+    })
+
+
+@app.delete("/api/settings/plexar")
+async def delete_plexar_key():
+    """Remove the UI-configured Plexar key.
+
+    A key from COCKPIT_PLEXAR_KEY cannot be removed here — the server does not
+    own the caller's environment. Saying so beats reporting success and leaving
+    the key in force.
+    """
+    settings_store.delete_provider_ui_key("plexar")
+    key, source = settings_store.resolve_provider_key("plexar")
+    if source == "env":
+        return JSONResponse({
+            "ok": False, "configured": True, "source": "env",
+            "masked": settings_store.mask_key(key),
+            "error": ("This key comes from the COCKPIT_PLEXAR_KEY environment "
+                      "variable, which Cockpit cannot unset."),
+        })
+    return JSONResponse({"ok": True, "configured": False, "source": None})
+
+
 @app.delete("/api/settings/anthropic")
 async def delete_anthropic_settings():
     """Remove the UI-configured Anthropic key.
@@ -4786,9 +4868,54 @@ def _normalize_plexar_raw_model(m: dict) -> dict:
     return out
 
 
+def _plexar_config() -> tuple[str, dict]:
+    """Resolve Plexar's URL and auth at CALL time, not at import.
+
+    The key can be set from Settings, and a value read once at import would
+    mean a freshly-entered key does nothing until the app is restarted -- which
+    reads as "the key does not work". Precedence matches every other provider
+    key: a UI-configured value beats the environment variable.
+    """
+    stored_url = ""
+    try:
+        stored_url = (settings_store.read_settings()
+                      .get("providers", {}).get("plexar", {}).get("base_url") or "")
+    except Exception:
+        logger.warning("Could not read the stored Plexar URL", exc_info=True)
+
+    url = (stored_url or os.getenv("COCKPIT_PLEXAR_URL")
+           or "http://127.0.0.1:8760").rstrip("/")
+
+    key = None
+    try:
+        key, _source = settings_store.resolve_provider_key("plexar")
+    except Exception:
+        logger.warning("Could not resolve the Plexar key", exc_info=True)
+
+    return url, {
+        "type": "bearer",
+        "bearer": key or "",
+        # Cloudflare Access is being retired in favour of the tunnel alone. The
+        # pair stays supported because half a service token must still never be
+        # sent, and a deployment that has not migrated yet keeps working.
+        "cf_client_id": os.getenv("COCKPIT_PLEXAR_CF_CLIENT_ID", ""),
+        "cf_client_secret": os.getenv("COCKPIT_PLEXAR_CF_CLIENT_SECRET", ""),
+    }
+
+
 def _require_provider(provider_id: str):
-    """Look up a provider by id, or None if unknown."""
-    return _PROVIDERS.get(provider_id)
+    """Look up a provider by id, or None if unknown.
+
+    Plexar's URL and credential are refreshed here rather than baked in at
+    import, so this is the ONE place every route picks them up.
+    """
+    provider = _PROVIDERS.get(provider_id)
+    if provider is not None and provider.get("kind") == "plexar":
+        url, auth = _plexar_config()
+        provider["broker_url"] = url
+        provider["management_url"] = url
+        provider["auth"] = auth
+    return provider
 
 
 # ── Tier 2: local-provider ANTHROPIC_BASE_URL resolution ──
