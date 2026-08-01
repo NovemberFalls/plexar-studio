@@ -3892,7 +3892,19 @@ def _mgmt_get(provider: dict, path: str) -> dict:
     import urllib.request
 
     url = f"{provider['management_url']}{path}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    # THE CREDENTIAL BELONGS HERE TOO. This helper predates any authenticated
+    # provider and sent only an Accept header, so every route through it
+    # (/models, /health) reached an authenticated Plexar anonymously, got a
+    # 401, and reported a healthy engine as UNREACHABLE — while /identity,
+    # which goes via plexar_client, authenticated fine. The two disagreeing was
+    # the symptom.
+    #
+    # auth_headers is reused rather than reimplemented so the both-or-neither
+    # rule for the Cloudflare pair holds on this path as well; a provider with
+    # no auth block gets exactly the old headers back.
+    req = urllib.request.Request(
+        url, headers=plexar_client.auth_headers(provider.get("auth"))
+    )
     with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
