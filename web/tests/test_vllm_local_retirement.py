@@ -58,7 +58,7 @@ def test_it_is_gone_by_default(monkeypatch, registry):
 def test_plexar_is_untouched(monkeypatch, registry):
     """The retirement must not take the replacement with it."""
     _run(monkeypatch)
-    assert "plexar" in registry
+    assert "plexar-vllm" in registry
     assert "lmstudio-local" in registry, "the lane-broker path is unrelated"
 
 

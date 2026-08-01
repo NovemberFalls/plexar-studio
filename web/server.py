@@ -2963,8 +2963,8 @@ _PROVIDERS = {
         "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
     },
     "vllm-local": _VLLM_LOCAL_PROVIDER,
-    "plexar": {
-        "id": "plexar", "label": "Plexar (vLLM)", "kind": "plexar",
+    "plexar-vllm": {
+        "id": "plexar-vllm", "label": "Plexar-vLLM", "kind": "plexar",
         "scope": "local",
         # Plexar is a FIXED-BIND gateway in front of one or more vLLM
         # containers: the address never changes, model swaps and restarts

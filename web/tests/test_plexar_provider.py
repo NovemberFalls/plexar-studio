@@ -32,7 +32,7 @@ import server  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def test_plexar_is_registered_without_queue():
-    p = server._PROVIDERS["plexar"]
+    p = server._PROVIDERS["plexar-vllm"]
     caps = p["capabilities"]
     assert "models" in caps and "health" in caps
     assert "queue" not in caps, (
@@ -51,7 +51,7 @@ def test_plexar_advertises_model_control_now_that_it_can_honour_it():
     is now keepable — the capability follows the routes, not the other way
     round.
     """
-    assert "model-control" in server._PROVIDERS["plexar"]["capabilities"]
+    assert "model-control" in server._PROVIDERS["plexar-vllm"]["capabilities"]
 
 
 def test_plexar_address_is_overridable():
@@ -162,7 +162,7 @@ async def test_brokerless_provider_is_not_queue_probed(monkeypatch):
         lambda provider, path: {"data": [{"id": "m", "plexar": {"state": "serving"}}]},
     )
 
-    resp = await server.get_provider_health("plexar")
+    resp = await server.get_provider_health("plexar-vllm")
     import json as _json
     body = _json.loads(resp.body)
 
@@ -200,7 +200,7 @@ async def test_unreachable_plexar_reports_not_ok(monkeypatch):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(server, "_mgmt_get", boom)
-    resp = await server.get_provider_health("plexar")
+    resp = await server.get_provider_health("plexar-vllm")
     import json as _json
     body = _json.loads(resp.body)
 

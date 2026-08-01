@@ -322,9 +322,9 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
     # lifecycle. No "queue" (it has no broker in front of it) and no
     # "model-control" (Cockpit does not own its containers). "timeseries" is
     # bucketed history, which the "reports" totals cannot provide.
-    assert by_id["plexar"] == {
-        "id": "plexar",
-        "label": "Plexar (vLLM)",
+    assert by_id["plexar-vllm"] == {
+        "id": "plexar-vllm",
+        "label": "Plexar-vLLM",
         "kind": "plexar",
         "scope": "local",
         "capabilities": ["models", "health", "instances", "reports", "gpus",

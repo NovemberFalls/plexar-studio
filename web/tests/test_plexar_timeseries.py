@@ -188,7 +188,7 @@ def test_summary_route_also_distinguishes_a_refusal(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_plexar_advertises_timeseries_but_lmstudio_does_not():
-    assert "timeseries" in server._PROVIDERS["plexar"]["capabilities"]
+    assert "timeseries" in server._PROVIDERS["plexar-vllm"]["capabilities"]
     assert "timeseries" not in server._PROVIDERS["lmstudio-local"]["capabilities"], (
         "a capability is a promise the route will answer; the lane broker "
         "serves no bucketed history"
@@ -201,7 +201,7 @@ async def test_route_passes_the_series_through(monkeypatch):
         server.plexar_client, "fetch_timeseries",
         lambda url, rng, bucket, inst, auth=None: {"available": True, "series": PAYLOAD["series"]},
     )
-    resp = await server.get_provider_timeseries("plexar", range="24h")
+    resp = await server.get_provider_timeseries("plexar-vllm", range="24h")
     body = json.loads(resp.body)
     assert set(body["series"]) == {"gateway-requests", "vllm-prometheus"}
 
@@ -209,9 +209,9 @@ async def test_route_passes_the_series_through(monkeypatch):
 @pytest.mark.asyncio
 async def test_route_rejects_a_bad_range_and_bucket_loudly():
     """An envelope is for a service that failed. A bad param is the caller's."""
-    assert (await server.get_provider_timeseries("plexar", range="nope")).status_code == 400
+    assert (await server.get_provider_timeseries("plexar-vllm", range="nope")).status_code == 400
     assert (
-        await server.get_provider_timeseries("plexar", range="24h", bucket="3s")
+        await server.get_provider_timeseries("plexar-vllm", range="24h", bucket="3s")
     ).status_code == 400
 
 
@@ -248,7 +248,7 @@ async def test_unload_resolves_the_model_to_its_instance(monkeypatch):
         server.plexar_client, "control_instance",
         lambda url, inst, action, auth=None: sent.update(inst=inst, action=action) or {"ok": True},
     )
-    resp = await server.unload_provider_model("plexar", "qwen")
+    resp = await server.unload_provider_model("plexar-vllm", "qwen")
     assert resp.status_code == 200
     assert sent == {"inst": "gpu-main", "action": "unload"}
 
@@ -262,7 +262,7 @@ async def test_load_uses_the_load_verb(monkeypatch):
         server.plexar_client, "control_instance",
         lambda url, inst, action, auth=None: sent.update(action=action) or {"ok": True},
     )
-    await server.load_provider_model("plexar", "qwen")
+    await server.load_provider_model("plexar-vllm", "qwen")
     assert sent["action"] == "load", "an unloaded instance is loaded, not created"
 
 
@@ -280,7 +280,7 @@ async def test_an_ambiguous_model_name_is_refused_not_guessed(monkeypatch):
     )
     monkeypatch.setattr(server.plexar_client, "control_instance",
                         lambda *a: called.append(a))
-    resp = await server.unload_provider_model("plexar", "qwen")
+    resp = await server.unload_provider_model("plexar-vllm", "qwen")
 
     assert resp.status_code == 409
     assert called == [], "nothing may be controlled while the target is ambiguous"
@@ -291,7 +291,7 @@ async def test_an_ambiguous_model_name_is_refused_not_guessed(monkeypatch):
 async def test_an_unknown_model_is_a_404(monkeypatch):
     monkeypatch.setattr(server, "_mgmt_get",
                         lambda p, path: _catalog(("qwen", "serving", "gpu-main")))
-    resp = await server.unload_provider_model("plexar", "llama")
+    resp = await server.unload_provider_model("plexar-vllm", "llama")
     assert resp.status_code == 404
 
 
@@ -305,7 +305,7 @@ async def test_an_unreadable_catalog_does_not_become_a_blind_write(monkeypatch):
     monkeypatch.setattr(server, "_mgmt_get", boom)
     monkeypatch.setattr(server.plexar_client, "control_instance",
                         lambda *a: called.append(a))
-    resp = await server.unload_provider_model("plexar", "qwen")
+    resp = await server.unload_provider_model("plexar-vllm", "qwen")
     assert resp.status_code == 502
     assert called == []
 
@@ -320,7 +320,7 @@ async def test_a_failed_control_is_not_reported_as_success(monkeypatch):
         lambda url, inst, action, auth=None: {"ok": False, "reason": "refused",
                                    "detail": "instance is draining"},
     )
-    resp = await server.unload_provider_model("plexar", "qwen")
+    resp = await server.unload_provider_model("plexar-vllm", "qwen")
     assert resp.status_code == 502
     assert "draining" in json.loads(resp.body)["error"]
 
@@ -468,14 +468,14 @@ def test_scope_prose_comes_from_the_server(monkeypatch):
 
 
 def test_identity_route_is_capability_gated():
-    assert "identity" in server._PROVIDERS["plexar"]["capabilities"]
+    assert "identity" in server._PROVIDERS["plexar-vllm"]["capabilities"]
 
 
 @pytest.mark.asyncio
 async def test_identity_route_answers_200_even_unauthenticated(monkeypatch):
     monkeypatch.setattr(server.plexar_client, "fetch_me",
                         lambda url, auth: {"available": True, "authenticated": False})
-    resp = await server.get_provider_identity("plexar")
+    resp = await server.get_provider_identity("plexar-vllm")
     assert resp.status_code == 200
     assert json.loads(resp.body)["authenticated"] is False
 

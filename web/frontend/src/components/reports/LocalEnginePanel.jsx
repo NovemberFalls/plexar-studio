@@ -287,13 +287,13 @@ export default function LocalEnginePanel({ range }) {
 
     (async () => {
       const [reports, instances, gpus, series] = await Promise.all([
-        get(`/api/local/plexar/reports?range=${toPlexarRange(range)}`),
-        get("/api/local/plexar/instances"),
-        get("/api/local/plexar/gpus"),
+        get(`/api/local/plexar-vllm/reports?range=${toPlexarRange(range)}`),
+        get("/api/local/plexar-vllm/instances"),
+        get("/api/local/plexar-vllm/gpus"),
         // No `bucket`: Plexar derives it from the range and owns the rule that
         // refuses a series it would have to truncate. Choosing one here would
         // mean re-deriving that rule on the client, badly.
-        get(`/api/local/plexar/timeseries?range=${toPlexarRange(range)}`),
+        get(`/api/local/plexar-vllm/timeseries?range=${toPlexarRange(range)}`),
       ]);
       // A range change that resolves after unmount (or after a newer range)
       // must not overwrite what is on screen.
@@ -313,7 +313,7 @@ export default function LocalEnginePanel({ range }) {
 
   // Plexar absent or unreachable is a legitimate state, not an error: a user
   // with no local engine should read that plainly rather than see a broken tab.
-  // Require an EXPLICIT available:true. Every /api/local/plexar/* response
+  // Require an EXPLICIT available:true. Every /api/local/plexar-vllm/* response
   // carries the envelope, so anything else — a null fetch, an error body, some
   // other endpoint's payload — is not a reading and must not be rendered as
   // one. Checking only `=== false` would let a shapeless 200 fall through into

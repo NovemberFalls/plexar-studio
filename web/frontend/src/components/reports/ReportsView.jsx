@@ -35,7 +35,7 @@
  *     will live there and where that information is today.
  *
  * LOCAL ENGINE is built, and is the one tab NOT sourced from the call above.
- * It reads Plexar (the vLLM face) via /api/local/plexar/*, so it renders
+ * It reads Plexar (the vLLM face) via /api/local/plexar-vllm/*, so it renders
  * independently of this view's loading/error/empty state — a user with no
  * Claude usage this range can still have engine history, and vice versa.
  * Cockpit's reporting and Plexar's sit side by side, each labelled; they are

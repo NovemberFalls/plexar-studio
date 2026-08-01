@@ -240,7 +240,9 @@ Tool calls ARE available in Claude Code's JSONL — `jsonl_watcher.py` parses `t
 - **`previous: {available, kpis}`** is the equal-length preceding window, computed through the same `_window_rows`/`_compute_kpis` path as the current period so the two are comparable. `available: false` for `range=all` and for a genuinely empty prior window — the UI then renders no delta rather than a fabricated one.
 - Known asymmetry: `tool_events` dedupes on `uuid` alone while `usage_events` dedupes on `(jsonl_path, message_uuid)`. If a JSONL were copied to a second path, tool calls would dedupe correctly and usage rows would double-count. That is a pre-existing weakness on the usage side.
 
-## Plexar (the vLLM face) — `plexar_client.py`
+## Plexar-vLLM (the model side) — `plexar_client.py`
+
+**Naming, settled 2026-07-31:** **Plexar is the PLATFORM** — this application, formerly Claude Cockpit. **Plexar-vLLM is the MODEL side**, the provider. The registry id is therefore `plexar-vllm`, not `plexar`; the app does not name a provider after itself. Note two things that deliberately did NOT change: `kind: "plexar"` (the backend family) and the `plexar` key in `/v1/models` entries (Plexar-vLLM's own **wire format** — renaming that would break parsing). A stored `localProviderId` of `plexar` self-heals because `ProviderPicker` falls back to a real provider when the id is unknown; pinned by `ProviderPicker.staleId.test.jsx`, so no migration was needed.
 
 Plexar (`C:/Code/Personal/plexar-vllm`) owns vLLM container lifecycle and publishes a **fixed-bind** OpenAI-compatible gateway (default `127.0.0.1:8760`, override `COCKPIT_PLEXAR_URL`). Cockpit points at one address forever; model swaps and restarts happen behind it.
 
