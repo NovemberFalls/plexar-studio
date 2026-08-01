@@ -1,0 +1,498 @@
+"""Persistence for the Chat surface — groups, conversations, messages, files.
+
+Cockpit's other stores record what ALREADY happened somewhere else (a JSONL a
+CLI wrote, a price a vendor published). This one is different: it is the system
+of record. If a row is wrong here, the user's own words are wrong, and there is
+no upstream to re-ingest from. That asymmetry drives most of the decisions
+below.
+
+Ordering is by ``seq``, never by timestamp
+------------------------------------------
+Two messages can land in the same millisecond — a paste that triggers an
+immediate reply, an assistant turn split into parts. Sorting a conversation by
+``created_at`` would then be non-deterministic, and a chat that renders in a
+different order on reload is broken in a way users do not forgive. ``seq`` is a
+per-conversation counter allocated under the write lock.
+
+Content is stored VERBATIM
+--------------------------
+The brief calls for pasting thousands of lines. Nothing here truncates,
+normalises whitespace, or re-encodes: a store that quietly shortens what the
+user typed is worse than one that refuses the write. Size is bounded by
+``MAX_MESSAGE_BYTES`` and a violation is a loud error, never a silent trim.
+
+Deleting a group does NOT delete its conversations
+--------------------------------------------------
+A group is a shelf, not a container. Removing a shelf must not destroy what sat
+on it — a single mis-click would otherwise take a month of chats with it. The
+conversations are re-parented to the root, and re-filing them is a two-second
+job where recovering them would be impossible.
+
+Attachments store a PATH, not bytes
+------------------------------------
+A 40 MB spreadsheet inside a row makes every conversation read pay for it. The
+file lives on disk (the existing upload dir); this table records what it was,
+where it went, and which message referenced it.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+logger = logging.getLogger("cockpit.chat")
+
+#: Refuse a single message larger than this. Generous by design — the brief
+#: asks for thousands of lines, and 4 MB is roughly 50k lines of code — but
+#: NOT unbounded: an accidental binary paste should fail loudly at the door
+#: rather than wedge the UI rendering it.
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+
+#: Roles a message may carry. `system` is stored so a conversation can be
+#: replayed exactly as it was sent, not reconstructed from assumptions.
+ROLES = ("user", "assistant", "system")
+
+#: The root group. Conversations with `group_id = None` live here; it is not a
+#: row, so it cannot be renamed, moved or deleted.
+ROOT_GROUP = None
+
+#: Distinguishes "caller did not mention group_id" from "caller said None".
+#: `None` is a MEANINGFUL value on update — it means "move to the root" — so a
+#: plain-None default would make moving a conversation OUT of a group
+#: impossible to express.
+_UNSET = object()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+def _default_db_path() -> Path:
+    return Path.home() / ".claude-cockpit" / "chat.sqlite3"
+
+
+class ChatStore:
+    """SQLite-backed store for the Chat surface.
+
+    One connection, guarded by a lock: chat writes are user-paced (a keystroke
+    burst at worst), so contention is not the problem to optimise for —
+    correctness of `seq` allocation is, and that needs the lock anyway.
+    """
+
+    def __init__(self, db_path: Optional[Path | str] = None) -> None:
+        self.db_path = Path(db_path) if db_path else _default_db_path()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # REENTRANT on purpose: add_message() takes the lock and calls
+        # get_conversation(), which takes it too. A plain Lock deadlocks
+        # there. And EVERY connection touch is guarded, reads included --
+        # one sqlite3 connection shared across threads is not safe for
+        # concurrent use even with check_same_thread=False, and an
+        # unguarded read racing a write raises 'bad parameter or other
+        # API misuse', which surfaces as a message the user sent going
+        # missing.
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            # A chat is the system of record for the user's own words; a
+            # half-written message surviving a crash is not acceptable here.
+            self._conn.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.Error:
+            logger.warning("Failed to set PRAGMAs on %s", self.db_path, exc_info=True)
+        self._init_schema()
+
+    # -- schema ---------------------------------------------------------------
+
+    def _init_schema(self) -> None:
+        with self._lock, self._conn:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS chat_groups (
+                    id          TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    parent_id   TEXT,
+                    created_at  TEXT NOT NULL,
+                    sort_order  INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (parent_id) REFERENCES chat_groups(id) ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id          TEXT PRIMARY KEY,
+                    group_id    TEXT,
+                    title       TEXT NOT NULL,
+                    model       TEXT,
+                    provider    TEXT,
+                    created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL,
+                    archived    INTEGER NOT NULL DEFAULT 0,
+                    -- Denormalised so a conversation LIST does not have to
+                    -- open every conversation to show a preview.
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    last_message_at TEXT,
+                    FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    id              TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    seq             INTEGER NOT NULL,
+                    role            TEXT NOT NULL,
+                    content         TEXT NOT NULL,
+                    model           TEXT,
+                    created_at      TEXT NOT NULL,
+                    input_tokens    INTEGER,
+                    output_tokens   INTEGER,
+                    UNIQUE (conversation_id, seq),
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS attachments (
+                    id              TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    message_id      TEXT,
+                    filename        TEXT NOT NULL,
+                    kind            TEXT NOT NULL,
+                    mime            TEXT,
+                    size_bytes      INTEGER,
+                    path            TEXT NOT NULL,
+                    created_at      TEXT NOT NULL,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_messages_conv
+                    ON messages(conversation_id, seq);
+                CREATE INDEX IF NOT EXISTS ix_conv_group
+                    ON conversations(group_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS ix_attach_conv
+                    ON attachments(conversation_id);
+                """
+            )
+
+    # -- groups ---------------------------------------------------------------
+
+    def create_group(self, name: str, parent_id: Optional[str] = None) -> dict:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("group name must not be empty")
+        if parent_id is not None and self.get_group(parent_id) is None:
+            raise ValueError(f"unknown parent group {parent_id!r}")
+        gid = _new_id("grp")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO chat_groups (id, name, parent_id, created_at) VALUES (?,?,?,?)",
+                (gid, name, parent_id, _now()),
+            )
+        return self.get_group(gid)
+
+    def get_group(self, group_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM chat_groups WHERE id = ?", (group_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_groups(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM chat_groups ORDER BY sort_order, name"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def rename_group(self, group_id: str, name: str) -> Optional[dict]:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("group name must not be empty")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE chat_groups SET name = ? WHERE id = ?", (name, group_id)
+            )
+        return self.get_group(group_id)
+
+    def delete_group(self, group_id: str) -> dict:
+        """Remove a group. Its conversations are RE-PARENTED, never deleted.
+
+        A group is a shelf, not a container. One mis-click must not be able to
+        take a month of conversations with it, and re-filing them is trivial
+        where recovering them would be impossible. Child groups are lifted to
+        the root for the same reason.
+
+        Returns a count of what moved, so the UI can say so rather than leaving
+        the user to discover it.
+        """
+        with self._lock, self._conn:
+            moved = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM conversations WHERE group_id = ?", (group_id,)
+            ).fetchone()["n"]
+            orphaned = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM chat_groups WHERE parent_id = ?", (group_id,)
+            ).fetchone()["n"]
+            self._conn.execute(
+                "UPDATE conversations SET group_id = NULL WHERE group_id = ?", (group_id,)
+            )
+            self._conn.execute(
+                "UPDATE chat_groups SET parent_id = NULL WHERE parent_id = ?", (group_id,)
+            )
+            self._conn.execute("DELETE FROM chat_groups WHERE id = ?", (group_id,))
+        return {"deleted": group_id, "conversations_moved": moved,
+                "groups_moved": orphaned}
+
+    # -- conversations --------------------------------------------------------
+
+    def create_conversation(
+        self,
+        title: str = "New chat",
+        group_id: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> dict:
+        if group_id is not None and self.get_group(group_id) is None:
+            raise ValueError(f"unknown group {group_id!r}")
+        cid = _new_id("cnv")
+        ts = _now()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO conversations "
+                "(id, group_id, title, model, provider, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (cid, group_id, (title or "New chat").strip() or "New chat",
+                 model, provider, ts, ts),
+            )
+        return self.get_conversation(cid)
+
+    def get_conversation(self, conversation_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_conversations(
+        self, group_id: Optional[str] = None, include_archived: bool = False,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Conversations, newest activity first.
+
+        ``group_id`` is a FILTER, and `None` means "all groups" rather than
+        "the root group" — the root is reached with ``group_id="root"``. Those
+        are different questions and conflating them makes the root unreachable.
+        """
+        clauses, params = [], []
+        if group_id == "root":
+            clauses.append("group_id IS NULL")
+        elif group_id is not None:
+            clauses.append("group_id = ?")
+            params.append(group_id)
+        if not include_archived:
+            clauses.append("archived = 0")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM conversations {where} ORDER BY updated_at DESC LIMIT ?",
+                (*params, max(1, min(int(limit), 1000))),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_conversation(
+        self, conversation_id: str, *, title: Optional[str] = None,
+        group_id: Any = _UNSET, archived: Optional[bool] = None,
+        model: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Patch a conversation. Moving between groups is an UPDATE, never a copy.
+
+        ``group_id`` uses a sentinel rather than ``None`` as its default,
+        because `None` is a MEANINGFUL value here — "move to the root". A
+        plain-None default would make moving a conversation out of a group
+        impossible to express.
+        """
+        if self.get_conversation(conversation_id) is None:
+            return None
+        sets, params = [], []
+        if title is not None:
+            t = title.strip()
+            if not t:
+                raise ValueError("title must not be empty")
+            sets.append("title = ?")
+            params.append(t)
+        if group_id is not _UNSET:
+            if group_id is not None and self.get_group(group_id) is None:
+                raise ValueError(f"unknown group {group_id!r}")
+            sets.append("group_id = ?")
+            params.append(group_id)
+        if archived is not None:
+            sets.append("archived = ?")
+            params.append(1 if archived else 0)
+        if model is not None:
+            sets.append("model = ?")
+            params.append(model)
+        if not sets:
+            return self.get_conversation(conversation_id)
+        sets.append("updated_at = ?")
+        params.append(_now())
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE conversations SET {', '.join(sets)} WHERE id = ?",
+                (*params, conversation_id),
+            )
+        return self.get_conversation(conversation_id)
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """Delete a conversation and its messages. This one IS destructive.
+
+        Unlike a group, a conversation genuinely contains its messages, so
+        cascade is the honest behaviour. The UI is responsible for confirming.
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+            )
+        return cur.rowcount > 0
+
+    # -- messages -------------------------------------------------------------
+
+    def add_message(
+        self, conversation_id: str, role: str, content: str,
+        model: Optional[str] = None, input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+    ) -> dict:
+        """Append a message and return it, with its allocated ``seq``.
+
+        The whole body runs under the lock: ``seq`` is MAX+1, so two concurrent
+        appends outside it would race to the same number and the UNIQUE
+        constraint would reject one of them — losing a message the user
+        actually sent.
+        """
+        if role not in ROLES:
+            raise ValueError(f"role must be one of {ROLES}")
+        if content is None:
+            raise ValueError("content must not be None")
+        size = len(content.encode("utf-8"))
+        if size > MAX_MESSAGE_BYTES:
+            # Loud, never a silent trim: a store that shortens what the user
+            # typed is worse than one that refuses the write.
+            raise ValueError(
+                f"message is {size} bytes, over the {MAX_MESSAGE_BYTES} limit"
+            )
+        if self.get_conversation(conversation_id) is None:
+            raise ValueError(f"unknown conversation {conversation_id!r}")
+
+        mid = _new_id("msg")
+        ts = _now()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS s FROM messages WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+            seq = row["s"] + 1
+            self._conn.execute(
+                "INSERT INTO messages (id, conversation_id, seq, role, content, model, "
+                "created_at, input_tokens, output_tokens) VALUES (?,?,?,?,?,?,?,?,?)",
+                (mid, conversation_id, seq, role, content, model, ts,
+                 input_tokens, output_tokens),
+            )
+            self._conn.execute(
+                "UPDATE conversations SET updated_at = ?, last_message_at = ?, "
+                "message_count = message_count + 1 WHERE id = ?",
+                (ts, ts, conversation_id),
+            )
+        return self.get_message(mid)
+
+    def get_message(self, message_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_messages(self, conversation_id: str, limit: int = 2000) -> list[dict]:
+        """Full history in ``seq`` order — the reason ``seq`` exists."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq LIMIT ?",
+                (conversation_id, max(1, min(int(limit), 10000))),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_message(self, message_id: str) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+        return cur.rowcount > 0
+
+    # -- attachments ----------------------------------------------------------
+
+    def add_attachment(
+        self, conversation_id: str, filename: str, path: str,
+        kind: str = "file", mime: Optional[str] = None,
+        size_bytes: Optional[int] = None, message_id: Optional[str] = None,
+    ) -> dict:
+        if self.get_conversation(conversation_id) is None:
+            raise ValueError(f"unknown conversation {conversation_id!r}")
+        aid = _new_id("att")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO attachments (id, conversation_id, message_id, filename, "
+                "kind, mime, size_bytes, path, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (aid, conversation_id, message_id, filename, kind, mime,
+                 size_bytes, path, _now()),
+            )
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM attachments WHERE id = ?", (aid,)
+            ).fetchone()
+        return dict(row)
+
+    def list_attachments(self, conversation_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM attachments WHERE conversation_id = ? ORDER BY created_at",
+                (conversation_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- export ---------------------------------------------------------------
+
+    def export_conversation(self, conversation_id: str) -> Optional[dict]:
+        """Everything needed to reconstruct a conversation elsewhere.
+
+        The user's words are theirs; a chat store with no way out is a trap.
+        """
+        conv = self.get_conversation(conversation_id)
+        if conv is None:
+            return None
+        return {
+            "conversation": conv,
+            "messages": self.list_messages(conversation_id, limit=10000),
+            "attachments": self.list_attachments(conversation_id),
+            "exported_at": _now(),
+        }
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
+#: Process-wide singleton, created lazily so importing this module touches no
+#: disk (mirrors pricing_store / usage_tracker).
+_store: Optional[ChatStore] = None
+_store_lock = threading.Lock()
+
+
+def get_store() -> ChatStore:
+    global _store
+    if _store is None:
+        with _store_lock:
+            if _store is None:
+                _store = ChatStore()
+    return _store

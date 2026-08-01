@@ -42,6 +42,7 @@ from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  #
 # same pattern.
 from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E402 -- _paste_and_submit, never _wrap: the submit CR must be a separate write or the TUI eats it as pasted content
 import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
+import chat_store  # noqa: E402 -- grouped with the other local-module imports above
 import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
 from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other local-module imports above
@@ -5279,6 +5280,189 @@ async def get_provider_health(provider_id: str):
         }
 
     return JSONResponse(body)
+
+
+# ── Chat (groups · conversations · messages · attachments) ─────
+#
+# Cockpit's FIRST system of record. Every other store here re-reads something
+# that exists elsewhere; this one holds the user's own words, so the failure
+# modes that matter are "lost" and "reordered", not "stale".
+#
+# The routes are thin: validation and shape live in chat_store, because a rule
+# enforced in a route is a rule the next caller skips.
+
+
+def _chat():
+    return chat_store.get_store()
+
+
+@app.get("/api/chat/groups")
+async def list_chat_groups():
+    return JSONResponse({"groups": await asyncio.to_thread(_chat().list_groups)})
+
+
+@app.post("/api/chat/groups")
+async def create_chat_group(body: dict):
+    try:
+        group = await asyncio.to_thread(
+            _chat().create_group, body.get("name", ""), body.get("parent_id")
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(group)
+
+
+@app.patch("/api/chat/groups/{group_id}")
+async def rename_chat_group(group_id: str, body: dict):
+    try:
+        group = await asyncio.to_thread(
+            _chat().rename_group, group_id, body.get("name", "")
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if group is None:
+        return JSONResponse({"error": "unknown group"}, status_code=404)
+    return JSONResponse(group)
+
+
+@app.delete("/api/chat/groups/{group_id}")
+async def delete_chat_group(group_id: str):
+    """Delete a group. Its conversations are RE-PARENTED, never deleted.
+
+    The response reports how many moved so the UI can say so — a silent
+    re-home leaves the user hunting for chats they think they lost.
+    """
+    if await asyncio.to_thread(_chat().get_group, group_id) is None:
+        return JSONResponse({"error": "unknown group"}, status_code=404)
+    return JSONResponse(await asyncio.to_thread(_chat().delete_group, group_id))
+
+
+@app.get("/api/chat/conversations")
+async def list_chat_conversations(group_id: str = None, include_archived: bool = False):
+    """List conversations. `group_id=root` is the ungrouped shelf.
+
+    Omitting group_id means ALL groups, which is a different question from
+    "the root" — conflating them makes the root unreachable.
+    """
+    convs = await asyncio.to_thread(
+        _chat().list_conversations, group_id, include_archived
+    )
+    return JSONResponse({"conversations": convs})
+
+
+@app.post("/api/chat/conversations")
+async def create_chat_conversation(body: dict):
+    try:
+        conv = await asyncio.to_thread(
+            _chat().create_conversation,
+            body.get("title", "New chat"), body.get("group_id"),
+            body.get("model"), body.get("provider"),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(conv)
+
+
+@app.get("/api/chat/conversations/{conversation_id}")
+async def get_chat_conversation(conversation_id: str):
+    """A conversation and its full history — the 'serve up their history' ask."""
+    store = _chat()
+    conv = await asyncio.to_thread(store.get_conversation, conversation_id)
+    if conv is None:
+        return JSONResponse({"error": "unknown conversation"}, status_code=404)
+    return JSONResponse({
+        "conversation": conv,
+        "messages": await asyncio.to_thread(store.list_messages, conversation_id),
+        "attachments": await asyncio.to_thread(store.list_attachments, conversation_id),
+    })
+
+
+@app.patch("/api/chat/conversations/{conversation_id}")
+async def update_chat_conversation(conversation_id: str, body: dict):
+    """Retitle, archive, re-model, or MOVE a conversation between groups.
+
+    `group_id` is only applied when the key is PRESENT in the body: `null` is a
+    meaningful value ("move to the root"), so it cannot double as "unspecified".
+    """
+    kwargs = {}
+    if "title" in body:
+        kwargs["title"] = body["title"]
+    if "archived" in body:
+        kwargs["archived"] = bool(body["archived"])
+    if "model" in body:
+        kwargs["model"] = body["model"]
+    if "group_id" in body:
+        kwargs["group_id"] = body["group_id"]
+    try:
+        conv = await asyncio.to_thread(
+            lambda: _chat().update_conversation(conversation_id, **kwargs)
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if conv is None:
+        return JSONResponse({"error": "unknown conversation"}, status_code=404)
+    return JSONResponse(conv)
+
+
+@app.delete("/api/chat/conversations/{conversation_id}")
+async def delete_chat_conversation(conversation_id: str):
+    """Genuinely destructive — a conversation DOES contain its messages."""
+    ok = await asyncio.to_thread(_chat().delete_conversation, conversation_id)
+    if not ok:
+        return JSONResponse({"error": "unknown conversation"}, status_code=404)
+    return JSONResponse({"ok": True, "deleted": conversation_id})
+
+
+@app.get("/api/chat/conversations/{conversation_id}/export")
+async def export_chat_conversation(conversation_id: str):
+    """A chat store with no way out is a trap. These are the user's words."""
+    out = await asyncio.to_thread(_chat().export_conversation, conversation_id)
+    if out is None:
+        return JSONResponse({"error": "unknown conversation"}, status_code=404)
+    return JSONResponse(out)
+
+
+@app.post("/api/chat/conversations/{conversation_id}/messages")
+async def add_chat_message(conversation_id: str, body: dict):
+    """Append one message. Content is stored VERBATIM — never trimmed.
+
+    An oversized paste is a loud 413, not a silent truncation: shortening what
+    someone typed and reporting success is the worst outcome available here.
+    """
+    try:
+        msg = await asyncio.to_thread(
+            _chat().add_message, conversation_id,
+            body.get("role", "user"), body.get("content", ""),
+            body.get("model"), body.get("input_tokens"), body.get("output_tokens"),
+        )
+    except ValueError as exc:
+        text = str(exc)
+        if "over the" in text:
+            return JSONResponse({"error": text}, status_code=413)
+        if "unknown conversation" in text:
+            return JSONResponse({"error": text}, status_code=404)
+        return JSONResponse({"error": text}, status_code=400)
+    return JSONResponse(msg)
+
+
+@app.post("/api/chat/conversations/{conversation_id}/attachments")
+async def add_chat_attachment(conversation_id: str, body: dict):
+    """Record a file against a conversation. The BYTES are already on disk.
+
+    Upload goes through the existing /api/upload; this records what it was and
+    where it went, so a 40 MB workbook does not sit inside a row that every
+    conversation read has to pay for.
+    """
+    try:
+        att = await asyncio.to_thread(
+            _chat().add_attachment, conversation_id,
+            body.get("filename", "file"), body.get("path", ""),
+            body.get("kind", "file"), body.get("mime"),
+            body.get("size_bytes"), body.get("message_id"),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(att)
 
 
 # ── Plexar reads (instances · reports · GPUs) ─────────────
