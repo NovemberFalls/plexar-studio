@@ -11,6 +11,8 @@ Nothing in this module ever logs or returns a full key -- see ``mask_key``.
 
 from __future__ import annotations
 
+import app_paths
+
 import json
 import logging
 import os
@@ -19,7 +21,12 @@ from pathlib import Path
 
 logger = logging.getLogger("cockpit.settings")
 
-CONFIG_DIR = Path.home() / ".claude-cockpit"
+# Resolved through app_paths like every other store. This module was MISSED in
+# the Claude Cockpit -> Plexar move, which is why both directories kept
+# existing: the four data stores migrated and settings/config carried on
+# writing to the old one, so the migration warning fired on every start and a
+# key entered in Settings landed somewhere the rest of the app had left.
+CONFIG_DIR = app_paths.data_dir()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 # Sibling of config.json. config.json holds SECRETS (the OpenRouter key);
 # settings.json holds only non-secret user preferences and is safe to export.
@@ -32,9 +39,17 @@ _ANTHROPIC_KEY_FIELD = "anthropic_api_key"
 
 # Both provider keys live in config.json (secrets), NEVER in settings.json --
 # settings.json is user-exportable by design, so a key must never land there.
+_PLEXAR_KEY_FIELD = "plexar_api_key"
+
 _KEY_FIELDS = {
     "openrouter": (_KEY_FIELD, "OPENROUTER_API_KEY"),
     "anthropic": (_ANTHROPIC_KEY_FIELD, "ANTHROPIC_API_KEY"),
+    # Plexar-vLLM's app key. It belongs HERE rather than in a .env beside the
+    # source, because .env is loaded relative to the working directory and is
+    # not bundled -- so it reaches `python server.py` and never reaches the
+    # installed desktop app. A credential a packaged user cannot set is not
+    # configuration, it is a dead end.
+    "plexar": (_PLEXAR_KEY_FIELD, "COCKPIT_PLEXAR_KEY"),
 }
 
 
@@ -231,6 +246,11 @@ DEFAULT_SETTINGS = {
         "vllm": {"base_url": "http://127.0.0.1:8001", "managed": False, "launch_command": "", "gpu_util": 0.90},
         "ollama": {"base_url": "http://127.0.0.1:11434", "enabled": False},
         "openrouter": {"enabled": False},
+        # Plexar-vLLM. The URL is NOT a secret and lives here; the key lives in
+        # config.json beside the other provider keys. Empty means "fall back to
+        # COCKPIT_PLEXAR_URL, then loopback" -- a stored empty string must not
+        # beat an env var an operator deliberately set.
+        "plexar": {"base_url": ""},
     },
     "claude_cli": {"binary_path": "", "detected_version": None},
     "sessions": {"model": None, "permission_mode": None, "effort": None, "fast": False, "max_sessions": 8},
