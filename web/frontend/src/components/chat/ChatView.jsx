@@ -334,9 +334,10 @@ export default function ChatView() {
 
         <div style={{ ...LABEL, height: 34, display: "flex", alignItems: "center",
                       justifyContent: "space-between", padding: "0 14px",
-                      borderTop: "1px solid var(--cc-line)" }}>
-          <span>Prompt library</span>
-          <span>Ctrl+K</span>
+                      borderTop: "1px solid var(--cc-line)" }}
+             title="Conversations are stored locally in a SQLite database under your Plexar data folder. Nothing is uploaded.">
+          <span>Stored locally</span>
+          <span>on this machine</span>
         </div>
       </aside>
 
@@ -462,10 +463,26 @@ export default function ChatView() {
                     you change per-message. */}
                 <div style={{ height: 44, display: "flex", alignItems: "center", gap: 10,
                               padding: "0 12px", borderTop: "1px solid var(--cc-line)" }}>
-                  <AtSign size={13} style={{ color: "var(--cc-dim)" }} />
-                  <Paperclip size={13} style={{ color: "var(--cc-dim)" }} />
-                  <ImageIcon size={13} style={{ color: "var(--cc-dim)" }} />
-                  <Slash size={13} style={{ color: "var(--cc-dim)" }} />
+                  {/* NOT WIRED YET. Rendered dimmed and disabled rather than
+                      looking clickable: a control that does nothing when
+                      pressed is worse than an absent one, because the user
+                      spends time deciding whether they did it wrong. Build
+                      order 10 wires @ and /; the attach pair rides with
+                      artifacts. */}
+                  {[
+                    [AtSign, "Mention a file — not wired yet"],
+                    [Paperclip, "Attach a file — not wired yet"],
+                    [ImageIcon, "Attach an image — not wired yet"],
+                    [Slash, "Commands — not wired yet"],
+                  ].map(([Icon, label], i) => (
+                    <Icon
+                      key={i}
+                      size={13}
+                      aria-label={label}
+                      role="img"
+                      style={{ color: "var(--cc-muted)", opacity: 0.4, cursor: "default" }}
+                    />
+                  ))}
                   <span style={{ flex: 1 }} />
                   <ChatModelPicker
                     model={conv?.model}

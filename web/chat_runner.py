@@ -244,7 +244,14 @@ async def stream_reply(
     except Exception:
         logger.warning("Failed writing the prompt to the harness", exc_info=True)
 
-    text_parts: list[str] = []
+    # THE TWO MUST BE KEPT APART. With --include-partial-messages the CLI emits
+    # the token deltas AND, at the end of the block, the complete `assistant`
+    # message carrying the same text. Accumulating both duplicated every reply
+    # verbatim — observed live as an answer printed twice, end to end, with no
+    # separator. Deltas are the truth; the whole message is only a FALLBACK for
+    # the case where no deltas arrived at all.
+    delta_parts: list[str] = []
+    message_parts: list[str] = []
     result: dict = {}
     try:
         while True:
@@ -266,10 +273,19 @@ async def stream_reply(
             for res in _extract_tool_results(event):
                 yield {"type": "tool_result", **res}
 
-            chunk = _extract_text(event)
-            if chunk:
-                text_parts.append(chunk)
-                yield {"type": "delta", "text": chunk}
+            etype = event.get("type")
+            if etype == "stream_event":
+                chunk = _extract_text(event)
+                if chunk:
+                    delta_parts.append(chunk)
+                    yield {"type": "delta", "text": chunk}
+            elif etype == "assistant":
+                # Collected but NOT yielded: this is the same text the deltas
+                # already streamed. Emitting it would double the reply on
+                # screen as well as in the store.
+                whole = _extract_text(event)
+                if whole:
+                    message_parts.append(whole)
 
             if event.get("type") == "result":
                 result = event
@@ -293,7 +309,13 @@ async def stream_reply(
                "detail": stderr or f"The harness exited with code {proc.returncode}."}
         return
 
-    text = "".join(text_parts) or (result.get("result") or "")
+    # Deltas first, then the whole-message fallback, then the result summary.
+    # Never a concatenation of two of them — that is the doubling bug.
+    text = (
+        "".join(delta_parts)
+        or "".join(message_parts)
+        or (result.get("result") or "")
+    )
     yield {
         "type": "done",
         "text": text,

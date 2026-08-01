@@ -322,3 +322,67 @@ async def test_tool_calls_are_streamed_alongside_text(monkeypatch):
     assert "tool" in kinds and "tool_result" in kinds
     tool = [e for e in events if e["type"] == "tool"][0]
     assert tool["verb"] == "Grep" and tool["targets"] == ["_inflight"]
+
+
+# ---------------------------------------------------------------------------
+# The doubling regression
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_reply_is_not_doubled_by_its_own_completion_event(monkeypatch):
+    """THE bug, seen live: every answer printed twice, end to end.
+
+    --include-partial-messages emits the token deltas AND, when the block
+    closes, the complete `assistant` message carrying the same text. Counting
+    both concatenated the reply to itself.
+    """
+    proc = _FakeProc(_lines(
+        {"type": "stream_event",
+         "event": {"delta": {"type": "text_delta", "text": "Doing well, "}}},
+        {"type": "stream_event",
+         "event": {"delta": {"type": "text_delta", "text": "thanks."}}},
+        # The same text again, as the completed message.
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Doing well, thanks."}]}},
+        {"type": "result", "result": "Doing well, thanks.", "session_id": "s1"},
+    ))
+    events = await _collect(monkeypatch, proc)
+
+    done = [e for e in events if e["type"] == "done"][0]
+    assert done["text"] == "Doing well, thanks."
+    assert done["text"].count("Doing well") == 1, "the reply must appear ONCE"
+
+    # And it must not be doubled on screen either: the completed message is
+    # collected, never re-emitted as a delta.
+    streamed = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert streamed == "Doing well, thanks."
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_no_deltas_still_produces_its_text(monkeypatch):
+    """The whole-message path is a FALLBACK, not dead code: if the CLI ever
+    stops emitting partials, the reply must still arrive."""
+    proc = _FakeProc(_lines(
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "only whole"}]}},
+        {"type": "result", "session_id": "s1"},
+    ))
+    events = await _collect(monkeypatch, proc)
+    assert [e for e in events if e["type"] == "done"][0]["text"] == "only whole"
+
+
+@pytest.mark.asyncio
+async def test_multi_block_replies_concatenate_once_each(monkeypatch):
+    """A turn can emit text, call a tool, then emit more text. Each block's
+    completion event must not re-add what its deltas already carried."""
+    proc = _FakeProc(_lines(
+        {"type": "stream_event",
+         "event": {"delta": {"type": "text_delta", "text": "first "}}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "first "}]}},
+        {"type": "stream_event",
+         "event": {"delta": {"type": "text_delta", "text": "second"}}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "second"}]}},
+        {"type": "result", "session_id": "s1"},
+    ))
+    events = await _collect(monkeypatch, proc)
+    assert [e for e in events if e["type"] == "done"][0]["text"] == "first second"
