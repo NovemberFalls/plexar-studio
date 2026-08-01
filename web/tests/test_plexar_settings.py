@@ -175,3 +175,70 @@ async def test_half_a_cloudflare_token_is_still_never_sent(client, monkeypatch):
     import plexar_client
     headers = plexar_client.auth_headers(auth)
     assert not any(h.startswith("CF-") for h in headers)
+
+
+# ---------------------------------------------------------------------------
+# The credential must ride on EVERY path, not just plexar_client's
+# ---------------------------------------------------------------------------
+
+def test_the_management_getter_sends_the_credential(monkeypatch):
+    """THE bug this closes: _mgmt_get predates authenticated providers and sent
+    only an Accept header.
+
+    So /models and /health reached an authenticated Plexar anonymously, got a
+    401, and reported a healthy engine as UNREACHABLE -- while /identity, which
+    goes through plexar_client, authenticated fine. Two routes disagreeing about
+    the same server was the symptom.
+    """
+    seen = {}
+
+    class _Resp:
+        def read(self):
+            return b'{"data": []}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            seen["headers"] = dict(req.header_items())
+            return _Resp()
+
+    monkeypatch.setattr(server_module, "_NO_REDIRECT_OPENER", _Opener())
+    provider = {
+        "management_url": "http://x",
+        "auth": {"type": "bearer", "bearer": "plx_live",
+                 "cf_client_id": "", "cf_client_secret": ""},
+    }
+    server_module._mgmt_get(provider, "/v1/models")
+
+    lowered = {k.lower(): v for k, v in seen["headers"].items()}
+    assert lowered.get("authorization") == "Bearer plx_live"
+
+
+def test_a_provider_without_auth_is_unchanged(monkeypatch):
+    """LM Studio and the lane broker have no credential; adding one must not
+    start sending an empty Authorization header."""
+    seen = {}
+
+    class _Resp:
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            seen["headers"] = {k.lower() for k in dict(req.header_items())}
+            return _Resp()
+
+    monkeypatch.setattr(server_module, "_NO_REDIRECT_OPENER", _Opener())
+    server_module._mgmt_get({"management_url": "http://x"}, "/models")
+    assert "authorization" not in seen["headers"]
