@@ -386,3 +386,47 @@ async def test_multi_block_replies_concatenate_once_each(monkeypatch):
     ))
     events = await _collect(monkeypatch, proc)
     assert [e for e in events if e["type"] == "done"][0]["text"] == "first second"
+
+
+# ---------------------------------------------------------------------------
+# Context accounting
+# ---------------------------------------------------------------------------
+
+def test_context_counts_cached_tokens_not_just_fresh_input():
+    """MEASURED on a real turn: input_tokens=2, cache_read=20592.
+
+    Reading input_tokens alone reports 2 tokens of context for a conversation
+    carrying ~20.6k — a meter that looks near-empty right up until the model
+    refuses. Context in flight is every token the model had to be given.
+    """
+    out = cr._usage({"usage": {
+        "input_tokens": 2, "cache_read_input_tokens": 20592,
+        "cache_creation_input_tokens": 100, "output_tokens": 4,
+    }})
+    assert out["context_tokens"] == 20694
+    assert out["output_tokens"] == 4
+
+
+def test_absent_usage_is_null_never_zero():
+    """A 0 shows a reassuring empty bar on a conversation about to overflow."""
+    for bad in ({}, {"usage": None}, {"usage": "nope"}):
+        out = cr._usage(bad)
+        assert out["context_tokens"] is None
+        assert out["output_tokens"] is None
+
+
+def test_partial_usage_still_counts_what_it_was_given():
+    out = cr._usage({"usage": {"cache_read_input_tokens": 500}})
+    assert out["context_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_usage_rides_on_the_done_event(monkeypatch):
+    proc = _FakeProc(_lines(
+        {"type": "result", "result": "ok", "session_id": "s1",
+         "usage": {"input_tokens": 10, "cache_read_input_tokens": 90,
+                   "output_tokens": 7}},
+    ))
+    done = [e for e in await _collect(monkeypatch, proc) if e["type"] == "done"][0]
+    assert done["context_tokens"] == 100
+    assert done["output_tokens"] == 7

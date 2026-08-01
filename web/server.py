@@ -5550,9 +5550,13 @@ async def respond_in_chat(conversation_id: str, body: dict):
                     # empty assistant row would render as the model replying
                     # with silence.
                     if text.strip():
+                        # Token counts ride WITH the message so the context
+                        # meter survives a reload — a figure held only in
+                        # component state is gone the moment you navigate away.
                         await asyncio.to_thread(
                             store.add_message, conversation_id, "assistant", text,
-                            conv.get("model"),
+                            conv.get("model"), ev.get("context_tokens"),
+                            ev.get("output_tokens"),
                         )
                     if ev.get("session_id") or session_id:
                         await asyncio.to_thread(

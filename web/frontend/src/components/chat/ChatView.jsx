@@ -41,6 +41,7 @@ import ChatMessage from "./ChatMessage.jsx";
 import ChatModelPicker from "./ChatModelPicker.jsx";
 import ChatStreak from "./ChatStreak.jsx";
 import ToolStrip from "./ToolStrip.jsx";
+import { meter } from "./contextMeter.js";
 
 const LIST_W = 272;      // §3
 const ARTIFACTS_W = 288; // §3
@@ -421,7 +422,31 @@ export default function ChatView() {
                     known until a model is wired, so neither is invented. */}
                 <span>{busy ? "generating" : "not generating"}</span>
                 <span style={{ flex: 1 }} />
-                <span style={{ fontFamily: MONO }}>context —</span>
+                {(() => {
+                  const m = meter(thread?.messages, conv?.model);
+                  return (
+                    <>
+                      {/* No bar when the limit is unknown: a bar implies a
+                          proportion, and inventing a denominator would make the
+                          most reassuring reading the one shown when we
+                          understand the least. */}
+                      {m.pct != null && (
+                        <span style={{ width: 70, height: 4, borderRadius: 2,
+                                       background: "var(--cc-elev)", overflow: "hidden" }}>
+                          <span style={{
+                            display: "block", height: "100%",
+                            width: `${m.pct}%`,
+                            background: m.over ? "var(--cc-fg)" : "var(--cc-dim)",
+                          }} />
+                        </span>
+                      )}
+                      <span style={{ fontFamily: MONO,
+                                     color: m.over ? "var(--cc-fg)" : "var(--cc-muted)" }}>
+                        {m.label}
+                      </span>
+                    </>
+                  );
+                })()}
               </div>
 
               <div style={{ marginBottom: 8, padding: "6px 10px", fontSize: 10,

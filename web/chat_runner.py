@@ -325,4 +325,35 @@ async def stream_reply(
         # redraw it.
         "cost_usd": result.get("total_cost_usd"),
         "is_error": bool(result.get("is_error")),
+        **_usage(result),
+    }
+
+
+def _usage(result: dict) -> dict:
+    """Context and output tokens for the turn, or nulls.
+
+    THE TRAP, measured rather than assumed: on a real turn ``input_tokens`` was
+    **2** while ``cache_read_input_tokens`` was **20592**. Reading input_tokens
+    alone would report 2 tokens of context for a conversation actually carrying
+    ~20.6k — a meter that reads near-empty right up until the model refuses.
+
+    Context in flight is therefore input + cache_read + cache_creation: every
+    token the model had to be given, however it was billed.
+
+    A missing usage block yields ``None``, never 0. "We were not told" and
+    "the context is empty" are opposite claims, and a 0 here would show a
+    reassuring empty bar on a conversation about to overflow.
+    """
+    u = result.get("usage")
+    if not isinstance(u, dict):
+        return {"context_tokens": None, "output_tokens": None}
+
+    def n(key):
+        v = u.get(key)
+        return v if isinstance(v, int) else 0
+
+    total = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")
+    return {
+        "context_tokens": total or None,
+        "output_tokens": u.get("output_tokens") if isinstance(u.get("output_tokens"), int) else None,
     }
