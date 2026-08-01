@@ -233,3 +233,60 @@ multi-thousand-line paste.
 The voice loop's LLM leg can be the same harness call, which means voice
 inherits tools too. It also means the "which model" question is answered by the
 user's own `claude` config rather than by a second setting in Cockpit.
+
+---
+
+## E. Threat model — TWO different ones, and conflating them is the risk
+
+Raised 2026-08-01: *"vLLM lives in Docker, so even if my uncle uses it, it
+shouldn't be able to do anything to my main PC."*
+
+**Correct for the engine, and it does not cover the dangerous path.**
+
+| | who | where code runs | risk |
+|---|---|---|---|
+| **1. Remote guest → Plexar-vLLM** | uncle, via the tunnel | inside the container | LOW. Inference only; no tools. Container escape is the only path, and the gateway exposes no filesystem. The instinct is right. |
+| **2. Local user → Chat → harness** | the Cockpit owner | **the host machine, NOT Docker** | HIGH if unguarded. |
+
+Path 2 is the one that needs rails. `claude -p` executes its tools **on the
+machine running Cockpit** — Docker is nowhere in that path. `Bash` there is
+real local execution with the user's own privileges. The model being
+containerised says nothing about where the *harness* runs.
+
+Note also each install is local to its user: Plexar-vLLM is a hosted MODEL, but
+the Cockpit/Plexar app runs in the user's own environment. So "we" are not
+exposed by a guest — the user is exposed by their own chat.
+
+### Rails (not built)
+
+- Chat starts with a **read-only tool set**; anything that writes or executes
+  requires explicit per-conversation opt-in, stored on the conversation.
+- `--allowedTools` is the enforcement point, and it is server-side: a UI
+  toggle alone is not a boundary.
+- `--add-dir` scopes filesystem reach to the conversation's workdir rather
+  than the whole disk.
+- **No micro-VM today**, so running model-authored code to observe it means
+  running it in the user's real environment. Until that changes, "audit, do not
+  execute" is the honest default and the UI must not imply a sandbox exists.
+
+---
+
+## F. Chat — three requirements captured 2026-08-01 (not built)
+
+1. **A collapsible Inspector inside Chat**, mirroring the session Inspector:
+   model, context %, input/output tokens, cache read/write, API-equivalent
+   cost, and per-conversation controls. The data already exists — `usage_tracker`
+   and the `total_cost_usd` the harness returns per turn. Under a subscription
+   that figure is API-EQUIVALENT, not money billed; `spend_guard`'s existing
+   real-vs-equivalent split already draws that line and Chat must not re-draw it.
+2. **Forced compaction at 85–90% of context** — a summary + highlight reel,
+   written to a folder keyed by `session_id`. Two rules worth fixing now:
+   compaction is LOSSY, so the full transcript must survive alongside the
+   summary (never replaced by it); and the threshold must key off the model's
+   real context window, not a constant, or it fires at the wrong point on every
+   model but one.
+3. **User-chosen chat storage** — local via a system picker, or object storage
+   by URL (R2 / S3 / B2). `chat_store` is SQLite-on-disk today. Remote storage
+   is a genuinely different design (latency, conflict, partial writes), so the
+   honest first step is local-path choice plus EXPORT to object storage, not
+   pretending SQLite can live on S3.

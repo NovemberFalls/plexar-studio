@@ -28,6 +28,8 @@ Stdlib only (sqlite3, json, urllib, logging, threading).
 
 from __future__ import annotations
 
+import app_paths
+
 import json
 import logging
 import os
@@ -84,7 +86,7 @@ def refresh_hours() -> float:
 
 def _default_db_path() -> Path:
     # Sibling of usage.sqlite3 (see usage_tracker._default_db_path).
-    return Path.home() / ".claude-cockpit" / "pricing.sqlite3"
+    return app_paths.data_path("pricing.sqlite3")
 
 
 def _now_iso() -> str:

@@ -37,6 +37,8 @@ where it went, and which message referenced it.
 
 from __future__ import annotations
 
+import app_paths
+
 import json
 import logging
 import sqlite3
@@ -78,7 +80,7 @@ def _new_id(prefix: str) -> str:
 
 
 def _default_db_path() -> Path:
-    return Path.home() / ".claude-cockpit" / "chat.sqlite3"
+    return app_paths.data_path("chat.sqlite3")
 
 
 class ChatStore:

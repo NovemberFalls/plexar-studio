@@ -14,6 +14,8 @@ stderr-only logging rather than preventing the server from starting.
 
 from __future__ import annotations
 
+import app_paths
+
 import logging
 import logging.handlers
 import os
@@ -51,7 +53,7 @@ def log_dir() -> Path:
     override = os.environ.get(_LOG_DIR_ENV, "").strip()
     if override:
         return Path(override)
-    return Path.home() / ".claude-cockpit" / "logs"
+    return app_paths.data_path("logs")
 
 
 def log_file_path() -> str:

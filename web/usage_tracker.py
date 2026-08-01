@@ -7,6 +7,8 @@ logging, threading).
 
 from __future__ import annotations
 
+import app_paths
+
 import json
 import logging
 import re
@@ -144,7 +146,7 @@ def _pricing_table_seed_rows() -> list[dict]:
 
 
 def _default_db_path() -> Path:
-    return Path.home() / ".claude-cockpit" / "usage.sqlite3"
+    return app_paths.data_path("usage.sqlite3")
 
 
 class UsageTracker:
