@@ -21,6 +21,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, Plus, FolderPlus, Trash2, Download } from "lucide-react";
 
 import ChatMessage from "./ChatMessage.jsx";
+import ChatModelPicker from "./ChatModelPicker.jsx";
+import ChatStreak from "./ChatStreak.jsx";
 
 const PANEL = {
   background: "var(--cc-surface)",
@@ -157,6 +159,21 @@ export default function ChatView() {
     }
   };
 
+  const changeModel = async (nextModel) => {
+    if (!activeId) return;
+    try {
+      await api(`/conversations/${activeId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ model: nextModel }),
+      });
+      const data = await api(`/conversations/${activeId}`);
+      setThread(data);
+      refreshLists();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const removeConversation = async (conversationId) => {
     // Genuinely destructive: a conversation DOES contain its messages.
     if (!window.confirm("Delete this conversation and all of its messages?")) return;
@@ -283,6 +300,11 @@ export default function ChatView() {
               <span style={{ fontSize: 12, fontWeight: 700, flex: 1, minWidth: 0 }}>
                 {thread?.conversation?.title || "…"}
               </span>
+              <ChatModelPicker
+                model={thread?.conversation?.model}
+                messages={thread?.messages}
+                onChange={changeModel}
+              />
               <a href={`/api/chat/conversations/${activeId}/export`} style={iconBtn}
                  title="Export this conversation" download>
                 <Download size={13} />
@@ -292,6 +314,11 @@ export default function ChatView() {
                 <Trash2 size={13} />
               </button>
             </header>
+
+            <ChatStreak
+              conversations={conversations}
+              activeMessageCount={thread?.messages?.length || 0}
+            />
 
             <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "12px 16px" }}>
               {(thread?.messages || []).map((m) => <ChatMessage key={m.id} message={m} />)}

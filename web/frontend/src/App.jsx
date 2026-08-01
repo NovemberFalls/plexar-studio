@@ -54,6 +54,7 @@ function normalizeWorkdir(dir) {
 /** Command-bar title per rail destination. "projects" is absent by design — it
  *  opens the drawer over Workspace rather than replacing the content area. */
 const SECTION_TITLES = {
+  chat: "Chat",
   work: "Workspace",
   fleet: "Fleet",
   engine: "Engine",
@@ -1572,7 +1573,15 @@ export default function App() {
    *  drawer rather than a full-area section — the tree overlays the panes. */
   const selectSection = useCallback((section) => {
     if (section === "projects") {
-      setSidebarOpen((v) => !v);
+      // The tree is hidden in Chat, so a bare toggle there would read as a
+      // dead button: leave Chat and OPEN it. Everywhere else it keeps the old
+      // toggle feel.
+      if (activeSection === "chat") {
+        setActiveSection("work");
+        setSidebarOpen(true);
+      } else {
+        setSidebarOpen((v) => !v);
+      }
       return;
     }
     // Close the DEFAULTS drop-down on any destination change. It is the Phase-1
@@ -1583,7 +1592,7 @@ export default function App() {
     // survive leaving Workspace.
     setDefaultsOpen(false);
     setActiveSection((prev) => (prev === section ? "work" : section));
-  }, []);
+  }, [activeSection]);
 
   // Spill trigger for the interactive class, in seconds of predicted wait.
   // `null` in the broker payload means spill is DISABLED for the class — which
@@ -1972,7 +1981,10 @@ export default function App() {
             />
 
           <div className="flex flex-1 min-h-0">
-            {sidebarOpen && (
+            {/* Chat is a focused destination: no Projects tree beside it. The
+                tree files TERMINAL sessions into folders, which Chat has no
+                notion of, and it squeezes the thread into a column. */}
+            {sidebarOpen && activeSection !== "chat" && (
               <div
                 className="flex flex-shrink-0"
                 style={{
