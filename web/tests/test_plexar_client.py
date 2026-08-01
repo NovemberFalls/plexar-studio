@@ -114,7 +114,7 @@ def test_status_preserves_the_envelope_and_live_gauges(monkeypatch):
                      "running": None, "tokens_per_sec": None},
         }],
     }
-    monkeypatch.setattr(pc, "_get", lambda base, path: payload)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: payload)
     out = pc.fetch_status("http://x")
 
     assert out["available"] is True, "we DID read Plexar successfully"
@@ -146,7 +146,7 @@ def test_an_unidentified_container_keeps_the_reason_that_explains_the_null():
     import plexar_client as _pc
     orig = _pc._get
     try:
-        _pc._get = lambda base, path: payload
+        _pc._get = lambda base, path, auth=None: payload
         inst = _pc.fetch_status("http://x")["instances"][0]
     finally:
         _pc._get = orig
@@ -158,7 +158,7 @@ def test_an_unidentified_container_keeps_the_reason_that_explains_the_null():
 def test_status_unreachable_reports_a_reason(monkeypatch):
     import urllib.error
 
-    def boom(base, path):
+    def boom(base, path, auth=None):
         raise urllib.error.URLError("refused")
 
     monkeypatch.setattr(pc, "_get", boom)
@@ -168,7 +168,7 @@ def test_status_unreachable_reports_a_reason(monkeypatch):
 
 
 def test_wrong_shaped_status_is_rejected(monkeypatch):
-    monkeypatch.setattr(pc, "_get", lambda base, path: {"hello": "world"})
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: {"hello": "world"})
     out = pc.fetch_status("http://x")
     assert out["available"] is False
     assert out["reason"] == "bad_response"
@@ -194,7 +194,7 @@ def test_report_figures_keep_their_source_and_window_labels(monkeypatch):
                ],
                "sources": {"gateway-requests": {"label": "gateway request records"}},
                "engine_unknown": {"instances": 1}}
-    monkeypatch.setattr(pc, "_get", lambda base, path: payload)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: payload)
     out = pc.fetch_reports("http://x", "lifetime")
 
     assert out["available"] is True
@@ -208,7 +208,7 @@ def test_report_figures_keep_their_source_and_window_labels(monkeypatch):
 
 def test_bad_range_is_refused_before_the_network(monkeypatch):
     called = []
-    monkeypatch.setattr(pc, "_get", lambda base, path: called.append(path))
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: called.append(path))
     out = pc.fetch_reports("http://x", "yesterday")
     assert out["available"] is False
     assert out["reason"] == "bad_range"
@@ -224,7 +224,7 @@ def test_gpus_pass_through(monkeypatch):
         {"uuid": "GPU-1", "name": "RTX 3090", "total_mb": 24576.0,
          "free_mb": 20314.0, "used_by_display": True},
     ]}
-    monkeypatch.setattr(pc, "_get", lambda base, path: payload)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: payload)
     out = pc.fetch_gpus("http://x")
     assert out["available"] is True
     assert out["gpus"][0]["name"] == "RTX 3090"
@@ -234,7 +234,7 @@ def test_gpus_honour_plexars_own_unavailable_envelope(monkeypatch):
     """Plexar answers with its own availability flag; don't override it."""
     monkeypatch.setattr(
         pc, "_get",
-        lambda base, path: {"available": False, "reason": "nvidia-smi not found", "gpus": []},
+        lambda base, path, auth=None: {"available": False, "reason": "nvidia-smi not found", "gpus": []},
     )
     out = pc.fetch_gpus("http://x")
     assert out["available"] is False

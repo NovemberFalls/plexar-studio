@@ -78,7 +78,7 @@ def _http_error(code, body):
 # ---------------------------------------------------------------------------
 
 def test_the_two_series_survive_as_separate_keys(monkeypatch):
-    monkeypatch.setattr(pc, "_get", lambda base, path: PAYLOAD)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: PAYLOAD)
     out = pc.fetch_timeseries("http://x", "24h")
 
     assert out["available"] is True
@@ -91,7 +91,7 @@ def test_the_two_series_survive_as_separate_keys(monkeypatch):
 
 
 def test_an_empty_bucket_keeps_its_measured_zero_and_its_nulls(monkeypatch):
-    monkeypatch.setattr(pc, "_get", lambda base, path: PAYLOAD)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: PAYLOAD)
     out = pc.fetch_timeseries("http://x", "24h")
     quiet = out["series"]["gateway-requests"]["buckets"][1]
 
@@ -105,13 +105,13 @@ def test_an_empty_bucket_keeps_its_measured_zero_and_its_nulls(monkeypatch):
 
 def test_truncation_flag_is_carried(monkeypatch):
     """`lifetime` is bounded by Plexar's retention and says so."""
-    monkeypatch.setattr(pc, "_get", lambda base, path: {**PAYLOAD, "truncated": True})
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: {**PAYLOAD, "truncated": True})
     assert pc.fetch_timeseries("http://x", "lifetime")["truncated"] is True
 
 
 def test_short_ranges_the_summary_route_lacks_are_accepted(monkeypatch):
     seen = []
-    monkeypatch.setattr(pc, "_get", lambda base, path: seen.append(path) or PAYLOAD)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: seen.append(path) or PAYLOAD)
     for r in ("1h", "6h"):
         assert pc.fetch_timeseries("http://x", r)["available"] is True
     assert any("range=1h" in p for p in seen)
@@ -119,7 +119,7 @@ def test_short_ranges_the_summary_route_lacks_are_accepted(monkeypatch):
 
 def test_bad_range_and_bucket_are_refused_before_the_network(monkeypatch):
     called = []
-    monkeypatch.setattr(pc, "_get", lambda base, path: called.append(path))
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: called.append(path))
 
     assert pc.fetch_timeseries("http://x", "yesterday")["reason"] == "bad_range"
     assert pc.fetch_timeseries("http://x", "24h", bucket="3s")["reason"] == "bad_bucket"
@@ -128,7 +128,7 @@ def test_bad_range_and_bucket_are_refused_before_the_network(monkeypatch):
 
 def test_bucket_and_instance_filter_reach_plexar(monkeypatch):
     seen = []
-    monkeypatch.setattr(pc, "_get", lambda base, path: seen.append(path) or PAYLOAD)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: seen.append(path) or PAYLOAD)
     pc.fetch_timeseries("http://x", "24h", bucket="1h", instance_id="gpu-main")
     assert "bucket=1h" in seen[0] and "instance_id=gpu-main" in seen[0]
 
@@ -136,7 +136,7 @@ def test_bucket_and_instance_filter_reach_plexar(monkeypatch):
 def test_omitted_bucket_is_left_to_plexar(monkeypatch):
     """Plexar derives the bucket from the range AND owns the 720-point rule."""
     seen = []
-    monkeypatch.setattr(pc, "_get", lambda base, path: seen.append(path) or PAYLOAD)
+    monkeypatch.setattr(pc, "_get", lambda base, path, auth=None: seen.append(path) or PAYLOAD)
     pc.fetch_timeseries("http://x", "7d")
     assert "bucket=" not in seen[0]
 
@@ -147,7 +147,7 @@ def test_a_refusal_is_reported_as_a_refusal_not_as_unreachable(monkeypatch):
     A bare `except URLError` swallows Plexar's 400 — the one it raises rather
     than silently truncate a series — and reports a live service as down.
     """
-    def refuse(base, path):
+    def refuse(base, path, auth=None):
         raise _http_error(400, {"detail": "bucket would produce 8760 points"})
 
     monkeypatch.setattr(pc, "_get", refuse)
@@ -159,7 +159,7 @@ def test_a_refusal_is_reported_as_a_refusal_not_as_unreachable(monkeypatch):
 
 
 def test_genuinely_unreachable_still_reads_as_unreachable(monkeypatch):
-    def boom(base, path):
+    def boom(base, path, auth=None):
         raise urllib.error.URLError("refused")
 
     monkeypatch.setattr(pc, "_get", boom)
@@ -168,7 +168,7 @@ def test_genuinely_unreachable_still_reads_as_unreachable(monkeypatch):
 
 def test_wrong_shaped_payload_is_rejected(monkeypatch):
     for bad in (None, "nope", {}, {"series": []}):
-        monkeypatch.setattr(pc, "_get", lambda base, path, b=bad: b)
+        monkeypatch.setattr(pc, "_get", lambda base, path, auth=None, b=bad: b)
         out = pc.fetch_timeseries("http://x", "24h")
         assert out["available"] is False
         assert out["reason"] == "bad_response"
@@ -176,7 +176,7 @@ def test_wrong_shaped_payload_is_rejected(monkeypatch):
 
 def test_summary_route_also_distinguishes_a_refusal(monkeypatch):
     """Same fix, applied to the sibling route that had the same bug."""
-    def refuse(base, path):
+    def refuse(base, path, auth=None):
         raise _http_error(400, {"detail": "range must be one of [...]"})
 
     monkeypatch.setattr(pc, "_get", refuse)
@@ -199,7 +199,7 @@ def test_plexar_advertises_timeseries_but_lmstudio_does_not():
 async def test_route_passes_the_series_through(monkeypatch):
     monkeypatch.setattr(
         server.plexar_client, "fetch_timeseries",
-        lambda url, rng, bucket, inst: {"available": True, "series": PAYLOAD["series"]},
+        lambda url, rng, bucket, inst, auth=None: {"available": True, "series": PAYLOAD["series"]},
     )
     resp = await server.get_provider_timeseries("plexar", range="24h")
     body = json.loads(resp.body)
@@ -246,7 +246,7 @@ async def test_unload_resolves_the_model_to_its_instance(monkeypatch):
                         lambda p, path: _catalog(("qwen", "serving", "gpu-main")))
     monkeypatch.setattr(
         server.plexar_client, "control_instance",
-        lambda url, inst, action: sent.update(inst=inst, action=action) or {"ok": True},
+        lambda url, inst, action, auth=None: sent.update(inst=inst, action=action) or {"ok": True},
     )
     resp = await server.unload_provider_model("plexar", "qwen")
     assert resp.status_code == 200
@@ -260,7 +260,7 @@ async def test_load_uses_the_load_verb(monkeypatch):
                         lambda p, path: _catalog(("qwen", "down", "gpu-main")))
     monkeypatch.setattr(
         server.plexar_client, "control_instance",
-        lambda url, inst, action: sent.update(action=action) or {"ok": True},
+        lambda url, inst, action, auth=None: sent.update(action=action) or {"ok": True},
     )
     await server.load_provider_model("plexar", "qwen")
     assert sent["action"] == "load", "an unloaded instance is loaded, not created"
@@ -317,7 +317,7 @@ async def test_a_failed_control_is_not_reported_as_success(monkeypatch):
                         lambda p, path: _catalog(("qwen", "serving", "gpu-main")))
     monkeypatch.setattr(
         server.plexar_client, "control_instance",
-        lambda url, inst, action: {"ok": False, "reason": "refused",
+        lambda url, inst, action, auth=None: {"ok": False, "reason": "refused",
                                    "detail": "instance is draining"},
     )
     resp = await server.unload_provider_model("plexar", "qwen")
@@ -356,3 +356,134 @@ def test_an_unloaded_instance_stays_in_the_catalog_as_not_loaded():
         {"id": "qwen", "plexar": {"state": "down", "instance_id": "gpu-main"}}
     )
     assert out["state"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# Auth — Plexar gates /api/* when remote, as of 2026-07-31
+# ---------------------------------------------------------------------------
+#
+# Two INDEPENDENT layers: a Cloudflare Access service token gets a request past
+# the tunnel and no further; the Plexar bearer is the actual identity. Treating
+# Access as authentication for Plexar is the documented trap.
+
+AUTH = {"type": "bearer", "bearer": "plx_secret",
+        "cf_client_id": "cf-id", "cf_client_secret": "cf-secret"}
+
+
+def test_both_credential_layers_are_sent():
+    h = pc.auth_headers(AUTH)
+    assert h["Authorization"] == "Bearer plx_secret"
+    assert h["CF-Access-Client-Id"] == "cf-id"
+    assert h["CF-Access-Client-Secret"] == "cf-secret"
+
+
+def test_loopback_with_no_credentials_sends_none():
+    """Local loopback is unchanged and needs no bearer -- do not invent one."""
+    for empty in (None, {}, {"type": "bearer", "bearer": "", "cf_client_id": ""}):
+        h = pc.auth_headers(empty)
+        assert "Authorization" not in h
+        assert not any(k.startswith("CF-") for k in h)
+
+
+def test_half_a_service_token_is_not_sent():
+    """A lone half is malformed, not partial: it yields a 302-to-login page
+    where JSON was expected, which reads as Plexar returning garbage."""
+    h = pc.auth_headers({"bearer": "k", "cf_client_id": "only-id"})
+    assert not any(k.startswith("CF-") for k in h)
+    assert h["Authorization"] == "Bearer k"
+
+
+def test_401_and_403_are_not_collapsed_into_one_auth_error():
+    """Different problems, opposite remedies.
+
+    401 = the credential is wrong or missing. 403 = the credential is FINE and
+    the route is not yours. Telling a guest to re-enter a working key is the
+    failure this distinction prevents.
+    """
+    def _raise(code, detail):
+        def boom(base, path, auth=None):
+            raise _http_error(code, {"detail": detail})
+        return boom
+
+    monkey = pc._get
+    try:
+        pc._get = _raise(401, "bad key")
+        assert pc.fetch_reports("http://x", "24h")["reason"] == "unauthorized"
+        pc._get = _raise(403, "guests cannot read source-2 figures")
+        out = pc.fetch_reports("http://x", "24h")
+        assert out["reason"] == "forbidden"
+        assert "source-2" in out["detail"], "Plexar's own words explain the refusal"
+    finally:
+        pc._get = monkey
+
+
+def test_every_read_forwards_the_credential(monkeypatch):
+    """A route that forgets the bearer 401s against a remote Plexar."""
+    seen = []
+
+    def spy(base, path, auth=None):
+        seen.append(auth)
+        raise urllib.error.URLError("stop here")
+
+    monkeypatch.setattr(pc, "_get", spy)
+    pc.fetch_status("http://x", AUTH)
+    pc.fetch_reports("http://x", "24h", AUTH)
+    pc.fetch_timeseries("http://x", "24h", None, None, AUTH)
+    pc.fetch_gpus("http://x", AUTH)
+    pc.fetch_me("http://x", AUTH)
+    assert seen == [AUTH] * 5
+
+
+# ---------------------------------------------------------------------------
+# /api/me
+# ---------------------------------------------------------------------------
+
+def test_unauthenticated_is_an_answer_not_an_error(monkeypatch):
+    """THE reason to build against /api/me rather than infer from a 401.
+
+    `authenticated: false` distinguishes "wrong credential" from "server down".
+    A 401 here would merge two states whose remedies are opposite.
+    """
+    monkeypatch.setattr(pc, "_get", lambda b, p, a=None: {
+        "available": True, "authenticated": False, "identity": None,
+        "scopes": {"owner": "full control", "guest": "inference only"}})
+    out = pc.fetch_me("http://x")
+
+    assert out["available"] is True, "we DID read Plexar"
+    assert out["authenticated"] is False, "which is a fact, not a failure"
+    assert out["identity"] is None, "no fabricated anonymous identity"
+
+
+def test_scope_prose_comes_from_the_server(monkeypatch):
+    """Hard-coding what a guest may do goes stale -- it already changed once."""
+    monkeypatch.setattr(pc, "_get", lambda b, p, a=None: {
+        "available": True, "authenticated": True,
+        "identity": {"label": "len", "scope": "owner", "is_owner": True,
+                     "scope_description": "full control - everything"},
+        "scopes": {"owner": "full control", "guest": "inference only"}})
+    out = pc.fetch_me("http://x")
+
+    assert out["identity"]["scope_description"] == "full control - everything"
+    assert out["scopes"]["guest"] == "inference only"
+
+
+def test_identity_route_is_capability_gated():
+    assert "identity" in server._PROVIDERS["plexar"]["capabilities"]
+
+
+@pytest.mark.asyncio
+async def test_identity_route_answers_200_even_unauthenticated(monkeypatch):
+    monkeypatch.setattr(server.plexar_client, "fetch_me",
+                        lambda url, auth: {"available": True, "authenticated": False})
+    resp = await server.get_provider_identity("plexar")
+    assert resp.status_code == 200
+    assert json.loads(resp.body)["authenticated"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_credential_ever_reaches_the_browser():
+    """Same SSRF/secrets stance as every other provider url and key."""
+    resp = await server.get_local_providers()
+    dumped = str(json.loads(resp.body) if hasattr(resp, "body") else resp)
+    for leak in ("bearer", "cf_client", "Authorization", "auth"):
+        assert leak not in dumped, f"{leak!r} must never be serialised to the client"

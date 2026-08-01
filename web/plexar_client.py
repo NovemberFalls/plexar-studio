@@ -68,10 +68,41 @@ TIMESERIES_BUCKETS = ("1m", "5m", "1h", "6h", "1d")
 _ENVELOPE_KEYS = ("state", "available", "reason", "action", "eta_seconds", "since")
 
 
-def _get(base_url: str, path: str) -> Any:
+def auth_headers(auth: Optional[dict]) -> dict:
+    """Build the request headers for *auth*, which may be None.
+
+    TWO INDEPENDENT LAYERS, and conflating them is the documented trap:
+
+      * **Cloudflare Access** (`CF-Access-Client-Id` / `-Secret`) gets a request
+        past the tunnel and NO FURTHER. It is not authentication for Plexar.
+      * **Plexar** (`Authorization: Bearer plx_…`) is the actual identity.
+
+    A service token alone returns 401 from Plexar — Access passed, Plexar
+    refused — so both are sent, and neither substitutes for the other.
+
+    None of these values ever reach the browser (same SSRF/secrets stance as
+    every other provider URL and key in the registry).
+    """
+    headers = {"Accept": "application/json"}
+    if not isinstance(auth, dict):
+        return headers
+    token = auth.get("bearer")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    cf_id, cf_secret = auth.get("cf_client_id"), auth.get("cf_client_secret")
+    # Both or neither: a lone half is not a partial credential, it is a
+    # malformed one, and sending it produces a confusing 302-to-login instead
+    # of a clean refusal.
+    if cf_id and cf_secret:
+        headers["CF-Access-Client-Id"] = cf_id
+        headers["CF-Access-Client-Secret"] = cf_secret
+    return headers
+
+
+def _get(base_url: str, path: str, auth: Optional[dict] = None) -> Any:
     """GET {base_url}{path} and parse JSON. Raises on any failure."""
     url = f"{base_url}{path}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    req = urllib.request.Request(url, headers=auth_headers(auth))
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -106,20 +137,37 @@ def _refused(exc: "urllib.error.HTTPError") -> dict:
             detail = body.get("detail") or body.get("error")
     except Exception:
         detail = None
+
+    # 401 and 403 are DIFFERENT problems with different remedies, and merging
+    # them into "auth error" tells a guest to re-enter a key that was never
+    # wrong. 401 = the credential is missing or bad. 403 = the credential is
+    # fine and this route is not theirs.
+    if exc.code == 401:
+        return unavailable(
+            "unauthorized",
+            detail or "Plexar did not accept the credential. Check COCKPIT_PLEXAR_KEY.",
+        )
+    if exc.code == 403:
+        return unavailable(
+            "forbidden",
+            detail or "This key is valid but not permitted to read this.",
+        )
     return unavailable(
         "refused",
         detail or f"Plexar refused the request (HTTP {exc.code}).",
     )
 
 
-def fetch_status(base_url: str) -> dict:
+def fetch_status(base_url: str, auth: Optional[dict] = None) -> dict:
     """Plexar's ``/api/status`` — bind, instances (with state + live), runtime.
 
     Returns ``{available: True, ...}`` on success, or ``unavailable(...)``.
     Never raises: a down Plexar is an expected state, not an error.
     """
     try:
-        data = _get(base_url, "/api/status")
+        data = _get(base_url, "/api/status", auth)
+    except urllib.error.HTTPError as exc:
+        return _refused(exc)
     except urllib.error.URLError as exc:
         logger.debug("Plexar status unreachable: %s", exc)
         return unavailable("unreachable", "Plexar is not answering on its address.")
@@ -236,7 +284,8 @@ def engine_summary(models_payload: Any) -> dict:
     }
 
 
-def fetch_reports(base_url: str, report_range: str = "lifetime") -> dict:
+def fetch_reports(base_url: str, report_range: str = "lifetime",
+                  auth: Optional[dict] = None) -> dict:
     """Plexar's ``/api/reports/summary`` — both sources, each figure labelled.
 
     Figures are passed through with their ``source`` and ``window_exact`` flags
@@ -248,7 +297,7 @@ def fetch_reports(base_url: str, report_range: str = "lifetime") -> dict:
         return unavailable("bad_range", f"range must be one of {list(REPORT_RANGES)}")
 
     try:
-        data = _get(base_url, f"/api/reports/summary?range={report_range}")
+        data = _get(base_url, f"/api/reports/summary?range={report_range}", auth)
     except urllib.error.HTTPError as exc:
         return _refused(exc)
     except urllib.error.URLError:
@@ -279,6 +328,7 @@ def fetch_timeseries(
     report_range: str = "24h",
     bucket: Optional[str] = None,
     instance_id: Optional[str] = None,
+    auth: Optional[dict] = None,
 ) -> dict:
     """Plexar's ``/api/reports/timeseries`` — bucketed history, two series.
 
@@ -314,7 +364,7 @@ def fetch_timeseries(
         query += f"&instance_id={urllib.parse.quote(instance_id)}"
 
     try:
-        data = _get(base_url, f"/api/reports/timeseries{query}")
+        data = _get(base_url, f"/api/reports/timeseries{query}", auth)
     except urllib.error.HTTPError as exc:
         # A 400 here is Plexar refusing a series it would have to truncate.
         # That is a real answer and must not read as "Plexar is down".
@@ -343,6 +393,47 @@ def fetch_timeseries(
     }
 
 
+def fetch_me(base_url: str, auth: Optional[dict] = None) -> dict:
+    """Plexar's ``/api/me`` — who Cockpit is authenticating as.
+
+    **Contracted to answer 200 even when nobody is authenticated**, and that is
+    the reason to build against it rather than inferring identity from another
+    route's 401: ``authenticated: false`` is an ANSWER, where a 401 would leave
+    a consumer unable to tell "wrong credential" from "server down" — opposite
+    remedies.
+
+    ``scope_description`` and the ``scopes`` map are served BY PLEXAR and
+    rendered verbatim. Cockpit must not hard-code what a guest may do: that
+    prose goes stale the first time the allow-list changes, and it has already
+    changed once. Same rule as ``capacity_caveat``.
+    """
+    try:
+        data = _get(base_url, "/api/me", auth)
+    except urllib.error.HTTPError as exc:
+        # /api/me is exempt from the gate, so a refusal here is a real
+        # surprise rather than an expected unauthenticated read.
+        return _refused(exc)
+    except urllib.error.URLError:
+        return unavailable("unreachable", "Plexar is not answering on its address.")
+    except Exception:
+        logger.warning("Plexar identity read failed", exc_info=True)
+        return unavailable("bad_response", "Plexar returned something unreadable.")
+
+    if not isinstance(data, dict) or "authenticated" not in data:
+        return unavailable("bad_response", "Plexar identity was not identity-shaped.")
+
+    return {
+        "available": True,
+        "reason": None,
+        "detail": None,
+        "authenticated": bool(data.get("authenticated")),
+        # Null when unauthenticated — NOT a fabricated anonymous identity.
+        "identity": data.get("identity"),
+        # The server's own scope prose. Never replaced with ours.
+        "scopes": data.get("scopes") or {},
+    }
+
+
 #: The only lifecycle verbs Cockpit is allowed to send. `unload` frees the GPU
 #: but KEEPS the declaration; `load` starts it again with no config re-supply.
 #: `DELETE /api/instances/{id}` is deliberately NOT here — it forgets the
@@ -352,7 +443,8 @@ def fetch_timeseries(
 CONTROL_ACTIONS = ("load", "unload")
 
 
-def control_instance(base_url: str, instance_id: str, action: str) -> dict:
+def control_instance(base_url: str, instance_id: str, action: str,
+                     auth: Optional[dict] = None) -> dict:
     """POST ``/api/instances/{id}/{load|unload}``.
 
     Unlike the read paths this is a WRITE, so it does not return a soft
@@ -365,7 +457,7 @@ def control_instance(base_url: str, instance_id: str, action: str) -> dict:
     url = f"{base_url}/api/instances/{urllib.parse.quote(instance_id)}/{action}"
     req = urllib.request.Request(
         url, data=b"", method="POST",
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        headers={**auth_headers(auth), "Content-Type": "application/json"},
     )
     try:
         # Loading pulls a model onto the GPU and unloading drains in-flight
@@ -388,10 +480,12 @@ def control_instance(base_url: str, instance_id: str, action: str) -> dict:
             "result": body if isinstance(body, dict) else None}
 
 
-def fetch_gpus(base_url: str) -> dict:
+def fetch_gpus(base_url: str, auth: Optional[dict] = None) -> dict:
     """Plexar's ``/api/planner/gpus`` — physical cards, VRAM, display usage."""
     try:
-        data = _get(base_url, "/api/planner/gpus")
+        data = _get(base_url, "/api/planner/gpus", auth)
+    except urllib.error.HTTPError as exc:
+        return _refused(exc)
     except urllib.error.URLError:
         return unavailable("unreachable", "Plexar is not answering on its address.")
     except Exception:

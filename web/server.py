@@ -2978,7 +2978,23 @@ _PROVIDERS = {
         # what omitting the "queue" capability means.
         "broker_url": os.getenv("COCKPIT_PLEXAR_URL", "http://127.0.0.1:8760").rstrip("/"),
         "management_url": os.getenv("COCKPIT_PLEXAR_URL", "http://127.0.0.1:8760").rstrip("/"),
-        "auth": {"type": "none"},
+        # TWO INDEPENDENT credential layers, and neither substitutes for the
+        # other (see plexar_client.auth_headers):
+        #   * Cloudflare Access service token — gets past the tunnel, and no
+        #     further. NOT authentication for Plexar.
+        #   * Plexar bearer — the actual identity.
+        # Both are empty for the local-loopback case, which needs no credential
+        # at all and is the default. As of 2026-07-31 a REMOTE Plexar gates
+        # /api/* too, not just /v1/*: leaving the control plane open meant every
+        # tunnel guest could delete instances. So a remote target without
+        # COCKPIT_PLEXAR_KEY now 401s, and that is the breaking change.
+        # Like every other provider secret, these never reach the browser.
+        "auth": {
+            "type": "bearer",
+            "bearer": os.getenv("COCKPIT_PLEXAR_KEY", ""),
+            "cf_client_id": os.getenv("COCKPIT_PLEXAR_CF_CLIENT_ID", ""),
+            "cf_client_secret": os.getenv("COCKPIT_PLEXAR_CF_CLIENT_SECRET", ""),
+        },
         # "model-control" was correctly ABSENT while Plexar owned lifecycle and
         # exposed no way to drive it -- offering a button Cockpit could not
         # honour is the false-advertising bug the vLLM entry documents. Plexar
@@ -2994,7 +3010,7 @@ _PROVIDERS = {
         # structurally cannot provide -- so it is a separate promise, not an
         # implied part of the reporting one.
         "capabilities": ["models", "health", "instances", "reports", "gpus",
-                         "timeseries", "model-control"],
+                         "timeseries", "model-control", "identity"],
     },
 }
 _DEFAULT_PROVIDER = "lmstudio-local"
@@ -5288,7 +5304,7 @@ async def get_provider_instances(provider_id: str):
     if "instances" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
     return JSONResponse(
-        await asyncio.to_thread(plexar_client.fetch_status, provider["management_url"])
+        await asyncio.to_thread(plexar_client.fetch_status, provider["management_url"], provider.get("auth"))
     )
 
 
@@ -5308,7 +5324,32 @@ async def get_provider_reports(provider_id: str, range: str = "lifetime"):
         )
     return JSONResponse(
         await asyncio.to_thread(
-            plexar_client.fetch_reports, provider["management_url"], range
+            plexar_client.fetch_reports, provider["management_url"], range,
+            provider.get("auth"),
+        )
+    )
+
+
+@app.get("/api/local/{provider_id}/identity")
+async def get_provider_identity(provider_id: str):
+    """Who Cockpit authenticates to the provider AS. Always 200.
+
+    Plexar contracts `/api/me` to answer 200 even unauthenticated, precisely so
+    a consumer can tell "wrong credential" from "server down" — a 401 here
+    would collapse two states with opposite remedies. Cockpit preserves that:
+    this route reports the answer, it does not become one.
+
+    The scope prose is Plexar's and is passed through verbatim. Hard-coding
+    what a guest may do goes stale the first time the allow-list changes.
+    """
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "identity" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    return JSONResponse(
+        await asyncio.to_thread(
+            plexar_client.fetch_me, provider["management_url"], provider.get("auth")
         )
     )
 
@@ -5346,6 +5387,7 @@ async def get_provider_timeseries(
         await asyncio.to_thread(
             plexar_client.fetch_timeseries,
             provider["management_url"], range, bucket, instance_id,
+            provider.get("auth"),
         )
     )
 
@@ -5359,7 +5401,7 @@ async def get_provider_gpus(provider_id: str):
     if "gpus" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
     return JSONResponse(
-        await asyncio.to_thread(plexar_client.fetch_gpus, provider["management_url"])
+        await asyncio.to_thread(plexar_client.fetch_gpus, provider["management_url"], provider.get("auth"))
     )
 
 
@@ -5443,7 +5485,8 @@ async def _plexar_control(provider: dict, model_id: str, action: str):
     if err is not None:
         return err
     result = await asyncio.to_thread(
-        plexar_client.control_instance, provider["management_url"], instance_id, action
+        plexar_client.control_instance, provider["management_url"], instance_id, action,
+        provider.get("auth"),
     )
     if not result.get("ok"):
         # A write that did not take must not answer 200 — the UI would show a
