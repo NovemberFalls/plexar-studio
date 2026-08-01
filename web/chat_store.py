@@ -113,6 +113,7 @@ class ChatStore:
         except sqlite3.Error:
             logger.warning("Failed to set PRAGMAs on %s", self.db_path, exc_info=True)
         self._init_schema()
+        self._migrate()
 
     # -- schema ---------------------------------------------------------------
 
@@ -142,6 +143,10 @@ class ChatStore:
                     -- open every conversation to show a preview.
                     message_count INTEGER NOT NULL DEFAULT 0,
                     last_message_at TEXT,
+                    -- The harness session this conversation maps onto, so a
+                    -- reply can --resume rather than re-sending the whole
+                    -- transcript every turn. NULL until the first reply.
+                    harness_session_id TEXT,
                     FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE SET NULL
                 );
 
@@ -181,6 +186,28 @@ class ChatStore:
                 CREATE INDEX IF NOT EXISTS ix_attach_conv
                     ON attachments(conversation_id);
                 """
+            )
+
+    def _migrate(self) -> None:
+        """Additively add columns to a store created by an older build.
+
+        Never DROP and recreate: this database holds the user's conversations,
+        and there is no upstream to re-ingest them from.
+        """
+        with self._lock, self._conn:
+            cols = {r["name"] for r in
+                    self._conn.execute("PRAGMA table_info(conversations)").fetchall()}
+            if "harness_session_id" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE conversations ADD COLUMN harness_session_id TEXT")
+                logger.info("chat store: added conversations.harness_session_id")
+
+    def set_harness_session(self, conversation_id: str, session_id: str) -> None:
+        """Record the harness session so the next turn can --resume it."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE conversations SET harness_session_id = ? WHERE id = ?",
+                (session_id, conversation_id),
             )
 
     # -- groups ---------------------------------------------------------------
