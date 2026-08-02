@@ -41,6 +41,8 @@ import os
 import shutil
 from typing import AsyncIterator, Optional
 
+import app_paths
+
 logger = logging.getLogger("cockpit.chatrunner")
 
 #: Tools a chat may use with no further consent. Every one is a READ: they can
@@ -56,6 +58,29 @@ NET_TOOLS = ("WebFetch", "WebSearch")
 #: A reply that has produced nothing for this long is treated as hung. Generous,
 #: because a real turn with tool calls legitimately takes minutes.
 DEFAULT_TIMEOUT_S = 600.0
+
+
+def chat_workspace() -> str:
+    """A NEUTRAL working directory for chat turns.
+
+    THE COST THIS AVOIDS, measured rather than assumed: the CLI injects the
+    CLAUDE.md of whatever directory it starts in, every turn. Cockpit's server
+    runs inside its own repo, whose CLAUDE.md is ~16 500 tokens — so every
+    chat message, however short, arrived carrying this project's engineering
+    conventions as context.
+
+    That is wrong twice over. It is a large per-turn cost, and it is the wrong
+    context: a Chat conversation is not necessarily about this repository, and
+    silently prepending one project's instructions to every question shapes
+    answers in a way the user never asked for and cannot see.
+
+    Created on demand under the data dir so it is stable across restarts and a
+    user can drop their own CLAUDE.md there deliberately, which is the honest
+    way to get project context into Chat.
+    """
+    path = app_paths.data_dir() / "chat-workspace"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 class ChatRunnerError(RuntimeError):
@@ -100,6 +125,15 @@ def build_argv(
 
     argv = [
         cli, "-p",
+        # MEASURED 2026-08-01 against a live capture of the CLI's own request
+        # body. Loading this machine's MCP servers added 58 tool schemas —
+        # ~12k tokens of definitions for tools a chat turn cannot use anyway,
+        # paid on EVERY turn. `--allowedTools` does NOT help: it gates
+        # permission, while every schema is still sent to the model.
+        #
+        # 58 400 -> 46 500 tokens from this flag alone; the rest of the saving
+        # comes from the neutral working directory (see CHAT_WORKSPACE).
+        "--strict-mcp-config",
         "--output-format", "stream-json",
         # Token-by-token deltas, so the transcript can stream rather than
         # appearing in one block after a minute of silence.
@@ -254,6 +288,8 @@ async def stream_reply(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
+            # Never the server's own directory — see chat_workspace().
+            cwd=chat_workspace(),
         )
     except Exception as exc:
         logger.error("Could not start the claude CLI", exc_info=True)
@@ -327,11 +363,22 @@ async def stream_reply(
     await proc.wait()
     stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
 
-    if proc.returncode != 0:
-        # A non-zero exit with no text is a failure, and must not be persisted
-        # as an empty assistant turn.
-        yield {"type": "error",
-               "detail": stderr or f"The harness exited with code {proc.returncode}."}
+    if proc.returncode != 0 or result.get("is_error"):
+        # THE RESULT EVENT WINS OVER STDERR. The CLI writes advisory notices to
+        # stderr -- a connectors warning, a version notice -- while the actual
+        # failure arrives in the result event's `result` field. Preferring
+        # stderr showed "claude.ai connectors are disabled" to a user whose
+        # real problem was the engine refusing an oversized prompt: a true
+        # sentence about something else, which is worse than no message,
+        # because it sends them off to fix the wrong thing.
+        detail = None
+        if result.get("is_error") and isinstance(result.get("result"), str):
+            detail = result["result"].strip() or None
+        yield {
+            "type": "error",
+            "detail": detail or stderr
+                      or f"The harness exited with code {proc.returncode}.",
+        }
         return
 
     # Deltas first, then the whole-message fallback, then the result summary.

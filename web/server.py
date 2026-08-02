@@ -5678,17 +5678,38 @@ async def add_chat_message(conversation_id: str, body: dict):
 #: The model id may itself contain ":", so only the first two segments split.
 _PICKER_LOCAL_RE = re.compile(r"^local:([A-Za-z0-9_\-]+):(.+)$")
 
-#: MEASURED against the real CLI on 2026-08-01, not estimated: a single
-#: `claude -p` turn carrying a nine-word prompt reported "at least 9289 input
-#: tokens". That is the harness's own preamble — system prompt, tool schemas,
-#: environment — and it is paid on EVERY turn regardless of conversation
-#: length. Re-measure before trusting this if the CLI's tool set changes.
-_HARNESS_PREAMBLE_TOKENS = 9289
+#: The harness's own preamble, paid on EVERY turn regardless of how short the
+#: message is. TOKENIZER-EXACT, reported by the engine itself (vLLM's
+#: "parameter=input_tokens, value=11265") for a two-character prompt sent with
+#: the flags chat_runner passes today.
+#:
+#: TWO MEASUREMENT TRAPS, both of which produced a wrong number here first:
+#:   1. "prompt contains at least N tokens" is a LOWER BOUND in prose but the
+#:      accompanying `value=` is exact. Reading the prose figure as the total
+#:      set this constant to 9289 initially.
+#:   2. Counting characters and dividing by four OVERSTATES this badly — tool
+#:      schemas are repetitive JSON and tokenize near 10 chars/token, so a
+#:      119 KB body measured 29 900 by that heuristic and 11 265 by the engine.
+#:      Never calibrate a refusal threshold on chars/4; ask the engine.
+#:
+#: Composition (from a captured request body, so the PROPORTIONS are sound even
+#: though its absolute figures were not): built-in tool schemas dominate, then
+#: the agent-type roster, then the system prompt. `--allowedTools` does NOT
+#: shrink it — that flag gates permission and still sends every schema.
+#: chat_runner halves the payload with --strict-mcp-config (89 tool schemas ->
+#: 31) and a neutral workspace (this repo's CLAUDE.md was being injected every
+#: turn). Re-measure against the engine if the built-in tool set moves.
+_HARNESS_PREAMBLE_TOKENS = 11265
 
-#: The smallest local context window Chat will route a turn to. Preamble +
-#: room for a real exchange. Below this the engine 500s on turn one, so the
-#: model is not "slow" or "small" — it is unusable through this harness, and
-#: saying so up front beats a timeout followed by a server error.
+#: The smallest local context window Chat will route a turn to: the preamble
+#: plus room for an actual exchange. A model below this is not "slow" or
+#: "small" — it cannot complete turn one, so saying so up front beats a minute
+#: of waiting followed by a 500 from inside the engine.
+#:
+#: Deliberately NOT set from the chars/4 estimate: that would have refused a
+#: 32k model which in fact has ~21k of usable room. A threshold calibrated on
+#: an overstated measurement rejects working configurations, which is the same
+#: class of error as accepting broken ones.
 _MIN_LOCAL_WINDOW = 16384
 
 
@@ -5817,6 +5838,13 @@ async def respond_in_chat(conversation_id: str, body: dict):
                 # Not yet settable from the UI, which is the honest state: the
                 # capability exists and nothing grants it by accident.
                 allow_write=False, allow_exec=False, allow_net=False,
+                # Turns run in a NEUTRAL workspace (chat_runner.chat_workspace)
+                # so this repo's CLAUDE.md is not prepended to every message.
+                # Uploaded attachments live outside it, so the upload dir is
+                # added explicitly — otherwise the paths folded into the prompt
+                # name files the Read tool is not permitted to open, and the
+                # attachment silently becomes decoration.
+                cwd_scope=str(UPLOAD_DIR),
             ):
                 if ev["type"] == "session" and ev.get("session_id"):
                     session_id = ev["session_id"]

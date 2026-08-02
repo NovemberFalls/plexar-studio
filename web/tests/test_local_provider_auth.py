@@ -8,7 +8,8 @@ provider: unauthenticated, with a roomy context window. Plexar is neither.
     so that dummy is a 401 and every turn of a session launched on it fails.
   * ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` was a flat 8000, sized for a 49152-token
     card. Against the 12288-token window Plexar is currently serving, that
-    leaves roughly 4k of usable input.
+    leaves roughly 4k of usable input -- and the harness preamble alone
+    measures ~29 900, so that window cannot carry a turn at all.
 
 The distinction these pin hardest: ``None`` from the token resolver means "this
 provider needs no credential", NOT "we could not find one". Collapsing the two
@@ -131,9 +132,10 @@ def test_a_local_pick_is_unwrapped_and_routed(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_a_window_too_small_for_the_harness_is_refused_with_the_number():
-    """MEASURED live: a nine-word prompt through `claude -p` reported "at least
-    9289 input tokens" before the user's message counted. Against the 12288
-    window Plexar was serving, the engine 500s on turn one.
+    """MEASURED by capturing the CLI's request body: a two-character prompt
+    carries ~29 900 tokens of harness preamble, most of it built-in tool
+    schemas. Against the 12288-token window Plexar was serving, the engine
+    500s on turn one and no output reservation can change that.
 
     Refusing names the number and the fix. Letting it through produces a
     server error a minute later that reads as the model being broken."""
@@ -147,7 +149,7 @@ def test_a_window_too_small_for_the_harness_is_refused_with_the_number():
 
 def test_a_window_large_enough_is_not_refused():
     context_window.set_local_model_windows(
-        "plexar-vllm", [{"id": "roomy", "loaded_context_length": 49152}],
+        "plexar-vllm", [{"id": "roomy", "loaded_context_length": 131072}],
     )
     model, _overlay, err = server_module.resolve_chat_model_env("local:plexar-vllm:roomy")
     assert err is None and model == "roomy"
