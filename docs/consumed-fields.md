@@ -70,7 +70,13 @@ Studio keeps `gateway-requests` and `vllm-prometheus` visibly apart. If either
 vanishes we cannot label a figure, and an unlabelled figure is one we must not
 render at all — Studio will drop it rather than show it unsourced.
 
-## 5. `GET /api/timeseries` → `fetch_timeseries()`
+## 5. `GET /api/reports/timeseries` → `fetch_timeseries()`
+
+> **Route name corrected 2026-08-02.** This heading previously read
+> `GET /api/timeseries`. The call is `plexar_client.py:367`
+> `f"/api/reports/timeseries{query}"`. A contract test written against the old
+> heading would have pinned a route that does not exist and left the real one
+> unpinned — the failure this document exists to prevent, in the document itself.
 
 `range`, `bucket`, `bucket_seconds`, `generated`, `truncated`, `series{}`.
 
@@ -79,7 +85,10 @@ We never send `bucket` — Plexar derives it and owns the >720-point rule.
 `requests: 0` alongside a null latency must keep both: the chart breaks the
 line at a null and draws a baseline tick at a measured zero.
 
-## 6. `GET /api/gpus`, `/api/me`, `/api/reports/requests`
+## 6. `GET /api/planner/gpus`, `/api/me`, `/api/reports/requests`
+
+> **Route name corrected 2026-08-02**, same defect as §5: this read
+> `GET /api/gpus`; the call is `plexar_client.py:486` `"/api/planner/gpus"`.
 
 - gpus: `devices[].{uuid,name,total_mb,free_mb,used_mb,instances[]}` plus
   `note` and `preallocation_source`, both rendered verbatim as caveats.
