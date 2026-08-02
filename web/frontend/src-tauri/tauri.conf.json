@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "Plexar Studio",
+  "productName": "Plexar-Studio",
   "version": "../package.json",
   "identifier": "com.claude-cockpit.app",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Plexar",
+        "title": "Plexar Studio",
         "width": 1600,
         "height": 1000,
         "minWidth": 900,

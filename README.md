@@ -107,7 +107,7 @@ Pre-built executables are available on the [GitHub Releases](https://github.com/
 
 ### Desktop App (Windows)
 
-1. Download **`Plexar Studio_x64-setup.exe`** from the latest release
+1. Download **`Plexar-Studio_x64-setup.exe`** from the latest release
 2. Run the installer (no admin required — installs to your user folder)
 3. Launch "Plexar Studio" from Start Menu or Desktop
 4. The app opens in its own native window — no browser needed
@@ -139,7 +139,7 @@ cd frontend
 npx tauri build
 ```
 
-Output: `web/frontend/src-tauri/target/release/bundle/nsis/Plexar Studio_<version>_x64-setup.exe`
+Output: `web/frontend/src-tauri/target/release/bundle/nsis/Plexar-Studio_<version>_x64-setup.exe`
 
 ---
 

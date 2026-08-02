@@ -5738,38 +5738,46 @@ async def add_chat_message(conversation_id: str, body: dict):
 _PICKER_LOCAL_RE = re.compile(r"^local:([A-Za-z0-9_\-]+):(.+)$")
 
 #: The harness's own preamble, paid on EVERY turn regardless of how short the
-#: message is. TOKENIZER-EXACT, reported by the engine itself (vLLM's
-#: "parameter=input_tokens, value=11265") for a two-character prompt sent with
-#: the flags chat_runner passes today.
+#: message is. Measured on a SUCCESSFUL turn against a live local model
+#: (qwen3-30b-instruct at max_model_len 57344, 2026-08-02): a seven-word prompt
+#: reported context_tokens 29273.
 #:
-#: TWO MEASUREMENT TRAPS, both of which produced a wrong number here first:
-#:   1. "prompt contains at least N tokens" is a LOWER BOUND in prose but the
-#:      accompanying `value=` is exact. Reading the prose figure as the total
-#:      set this constant to 9289 initially.
-#:   2. Counting characters and dividing by four OVERSTATES this badly — tool
-#:      schemas are repetitive JSON and tokenize near 10 chars/token, so a
-#:      119 KB body measured 29 900 by that heuristic and 11 265 by the engine.
-#:      Never calibrate a refusal threshold on chars/4; ask the engine.
+#: THIS CONSTANT HAS BEEN WRONG TWICE, IN BOTH DIRECTIONS, AND THE METHOD IS
+#: THE LESSON:
+#:   1. 9289 — read off the prose of a vLLM error, "prompt contains at least
+#:      9289 input tokens". A lower bound reported as a total.
+#:   2. 11265 — read off the `value=` in a later error and believed to be
+#:      exact BECAUSE it was a machine field. It was not. Note the arithmetic:
+#:      11265 + 1024 requested output = 12289, exactly one over that model's
+#:      12288 limit. The engine reported the SMALLEST prompt that would have
+#:      tripped the limit, not the size of the prompt it received. "At least"
+#:      meant what it said, and the machine-readable field inherited it.
+#:   3. 29273 — measured on a turn that COMPLETED, so nothing about it is
+#:      derived from a failure threshold. This is the only sound method: a
+#:      failing request tells you about the limit, not about your payload.
 #:
-#: Composition (from a captured request body, so the PROPORTIONS are sound even
-#: though its absolute figures were not): built-in tool schemas dominate, then
-#: the agent-type roster, then the system prompt. `--allowedTools` does NOT
-#: shrink it — that flag gates permission and still sends every schema.
-#: chat_runner halves the payload with --strict-mcp-config (89 tool schemas ->
-#: 31) and a neutral workspace (this repo's CLAUDE.md was being injected every
-#: turn). Re-measure against the engine if the built-in tool set moves.
-_HARNESS_PREAMBLE_TOKENS = 11265
+#: A chars/4 estimate of the captured request body gave ~29 900, within 3% of
+#: the truth. The earlier comment here claimed that heuristic "overstated by
+#: 2.6x" and used the failure-derived number to say so — the correction was
+#: itself the error.
+#:
+#: Composition: built-in tool schemas dominate, then the agent-type roster,
+#: then the system prompt. `--allowedTools` does NOT shrink it — that flag
+#: gates permission and still sends every schema. chat_runner roughly halves
+#: the payload with --strict-mcp-config (89 tool schemas -> 31) and a neutral
+#: workspace (this repo's CLAUDE.md was otherwise injected every turn).
+_HARNESS_PREAMBLE_TOKENS = 29273
 
 #: The smallest local context window Chat will route a turn to: the preamble
 #: plus room for an actual exchange. A model below this is not "slow" or
 #: "small" — it cannot complete turn one, so saying so up front beats a minute
 #: of waiting followed by a 500 from inside the engine.
 #:
-#: Deliberately NOT set from the chars/4 estimate: that would have refused a
-#: 32k model which in fact has ~21k of usable room. A threshold calibrated on
-#: an overstated measurement rejects working configurations, which is the same
-#: class of error as accepting broken ones.
-_MIN_LOCAL_WINDOW = 16384
+#: Set to preamble + ~11k of headroom. It was briefly 16384, lowered on the
+#: 11265 figure above — which would have ADMITTED a 16k-32k model that cannot
+#: hold a single turn, i.e. exactly the quiet overflow this refusal exists to
+#: prevent. A threshold is only as good as the measurement under it.
+_MIN_LOCAL_WINDOW = 40960
 
 
 def resolve_chat_model_env(model: str | None) -> tuple[str | None, dict | None, str | None]:
