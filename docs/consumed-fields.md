@@ -123,6 +123,8 @@ only works on guarantees somebody wrote down.
 | B7 | The address answers `503` + `Retry-After` rather than `ECONNREFUSED` while an engine is unavailable | "starting, back in ~Ns" instead of "offline" | a restarting rig reads as a dead one |
 | B8 | `GET /api/me` answers **200 even unauthenticated**, with `authenticated: false` | distinguishes "wrong credential" from "server down" | a 401 merges two states whose remedies are opposite |
 | B9 | `scope_description` and `scopes` are the server's prose, rendered verbatim | we never hard-code what a guest may do | our UI starts lying the first time scopes change |
+| B10 | **`/v1/messages` speaks the ANTHROPIC Messages shape**, not only OpenAI `/v1/chat/completions` | the `claude` CLI is pointed straight at the gateway via `ANTHROPIC_BASE_URL` — no translation shim — for **every** terminal session and every Chat turn on a local model | **total, and it fails at request time far from any config change.** Every local session and every local chat turn stops working; nothing in Studio would detect it until a user sent a message |
+| B11 | The base URL is **stable across model swaps, restarts and upgrades** | we persist ONE address (`providers.plexar.base_url`) and never re-resolve | a stored setting silently points at nothing; the failure looks like the rig being down rather than having moved |
 
 ### RESOLVED 2026-08-02 — the collision is real, and narrower than we assumed
 
