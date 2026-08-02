@@ -492,6 +492,65 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
     return JSONResponse(result)
 
 
+#: What may be served BACK over HTTP for a thumbnail. Deliberately a subset of
+#: ALLOWED_EXTENSIONS — see get_uploaded_file. No SVG: it carries script.
+_PREVIEWABLE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+@app.get("/api/upload/{name}")
+async def get_uploaded_file(name: str):
+    """Serve ONE uploaded file back, for attachment thumbnails.
+
+    A chip that says "photo.png" and a chip that shows the photo are different
+    products: the second one lets you catch "I attached the wrong screenshot"
+    before you send it. That needs the bytes back in the browser, which needs
+    this route, which is why it is written carefully rather than mounted as a
+    static directory.
+
+    THE RULE: the caller supplies a BARE FILENAME, never a path. `Path(name).name`
+    strips any directory component, so "../../../etc/passwd" degrades to
+    "passwd" and simply misses. The resolved result is then re-checked against
+    UPLOAD_DIR with `is_relative_to` — belt and braces, because a symlink inside
+    the upload dir would satisfy the first check and escape on resolve.
+
+    404 for anything not in the directory, deliberately without distinguishing
+    "no such file" from "outside the sandbox": a probe should not learn which.
+    """
+    candidate = Path(name).name
+    if not candidate:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    target = (UPLOAD_DIR / candidate).resolve()
+    upload_root = UPLOAD_DIR.resolve()
+    if not target.is_relative_to(upload_root) or not target.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    # IMAGES ONLY, and narrower than the UPLOAD allow-list on purpose. That
+    # list is sized for what the MODEL may read with its own Read tool — .env,
+    # .py, .sql, .html — and reading a file off disk in a subprocess is a
+    # different act from serving it over HTTP from the app's own origin. This
+    # route exists solely to draw a thumbnail, so it serves only what can be a
+    # thumbnail. Everything else 404s and reaches the model the way it already
+    # does.
+    #
+    # SVG is excluded despite being an image: it is a script-bearing document,
+    # and the one image format where "just render it" is not harmless.
+    if target.suffix.lower() not in _PREVIEWABLE_EXTENSIONS:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    return FileResponse(
+        target,
+        # Never inline: an SVG or HTML served inline from our own origin would
+        # run script in the app's context. A thumbnail <img> renders an
+        # attachment download just as happily.
+        headers={
+            "Content-Disposition": f'attachment; filename="{candidate}"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=300",
+        },
+    )
+
+
 @app.delete("/api/upload")
 async def clear_upload_dir(keep: int = 10):
     """Delete old uploads, keeping the *keep* most-recently-modified files."""

@@ -48,6 +48,7 @@ import {
   PanelRight, Paperclip, Image as ImageIcon, AtSign, Slash, ArrowUp,
 } from "lucide-react";
 
+import AttachmentChip from "./AttachmentChip.jsx";
 import ChatMessage from "./ChatMessage.jsx";
 import ChatModelPicker from "./ChatModelPicker.jsx";
 import ChatStreak from "./ChatStreak.jsx";
@@ -685,24 +686,11 @@ export default function ChatView() {
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6,
                                 padding: "8px 12px 0" }}>
                     {pendingAttachments.map((a, i) => (
-                      <span key={i} style={{
-                        display: "flex", alignItems: "center", gap: 5,
-                        fontSize: 10.5, fontFamily: MONO, color: "var(--cc-dim)",
-                        border: "1px solid var(--cc-border)", borderRadius: 6,
-                        padding: "3px 7px",
-                      }}>
-                        {a.filename}
-                        <button
-                          type="button"
-                          onClick={() => removePendingAttachment(i)}
-                          aria-label={`Remove ${a.filename}`}
-                          style={{ border: "none", background: "transparent",
-                                   color: "var(--cc-muted)", cursor: "pointer",
-                                   padding: 0, lineHeight: 1, fontSize: 12 }}
-                        >
-                          ×
-                        </button>
-                      </span>
+                      <AttachmentChip
+                        key={i}
+                        attachment={a}
+                        onRemove={() => removePendingAttachment(i)}
+                      />
                     ))}
                     {uploading && (
                       <span style={{ fontSize: 10.5, color: "var(--cc-muted)" }}>
@@ -844,16 +832,8 @@ export default function ChatView() {
               </p>
             ) : (
               (thread.attachments || []).map((a) => (
-                <div key={a.id} style={{ borderRadius: 9, border: "1px solid var(--cc-border)",
-                                         padding: "10px 11px", marginBottom: 8 }}>
-                  <div style={{ ...LABEL, color: "var(--cc-a-image)" }}>{a.kind || "file"}</div>
-                  <div style={{ fontFamily: MONO, fontSize: 11.5, color: "var(--cc-fg)",
-                                overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {a.filename}
-                  </div>
-                  <div style={{ fontSize: 10, color: "var(--cc-muted)" }}>
-                    {a.size_bytes ? `${a.size_bytes.toLocaleString()} bytes` : "size unknown"}
-                  </div>
+                <div key={a.id} style={{ marginBottom: 8 }}>
+                  <AttachmentChip attachment={a} />
                 </div>
               ))
             )}
