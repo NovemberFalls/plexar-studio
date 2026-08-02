@@ -1,8 +1,8 @@
 """Shared fixtures.
 
-Deliberately minimal: no autouse fixtures, no sys.path manipulation (every test
-module already inserts the parent dir itself), so adding this file cannot change
-the behaviour of any existing test.
+Near-minimal by design: no sys.path manipulation (every test module already
+inserts the parent dir itself). There is exactly ONE autouse fixture, and it
+asserts rather than changes -- see `_never_log_into_the_real_data_dir`.
 """
 from __future__ import annotations
 
@@ -23,6 +23,8 @@ os.environ.setdefault(
     "COCKPIT_LOG_DIR", os.path.join(tempfile.gettempdir(), "cockpit-test-logs"),
 )
 
+import app_paths
+import logging_config
 import server as server_module
 
 # `vllm-local` is DEREGISTERED at import unless a direct vLLM is declared
@@ -36,6 +38,50 @@ import server as server_module
 # test_vllm_local_retirement.py, which drives _retire_vllm_local_if_unused and
 # restores the registry afterwards.
 server_module._register_vllm_local()
+
+
+@pytest.fixture(autouse=True)
+def _never_log_into_the_real_data_dir():
+    """Fail the test that points file logging at the user's REAL log directory.
+
+    THE INCIDENT, 2026-08-02: the env override above was correct and was still
+    defeated. `test_unwritable_log_dir_degrades_to_stderr_only` deleted
+    COCKPIT_LOG_DIR in a `finally` and called setup() -- monkeypatch's restore
+    happens at TEARDOWN, so that setup() ran with no override, resolved to
+    app_paths.data_path("logs"), and installed a RotatingFileHandler on the
+    running app's live cockpit.log. It persisted for the rest of the session, so
+    every later test wrote its deliberately-alarming fixture tracebacks
+    ("docker not found", "connection refused") into the log a user reads to
+    diagnose real faults -- and two processes rotating one file on Windows is a
+    rename against an open handle.
+
+    Setting the env var was never the guarantee; the handler's actual
+    destination is. Same shape as every other defect this project found today:
+    the constant was pinned, the WIRE was not. So this asserts the wire, after
+    every test, and names the culprit rather than leaving a future reader to
+    diff the log.
+    """
+    yield
+    # READ THE HANDLER, NOT log_file_path(). The first version of this guard
+    # called log_file_path() and did not fire when the bug was reintroduced
+    # deliberately: that function re-resolves COCKPIT_LOG_DIR at CALL time, and
+    # monkeypatch has already restored the env by the time a teardown fixture
+    # runs -- so it reported the test directory while the installed handler was
+    # still writing to the real one. Asserting a recomputed value instead of the
+    # live object is the same defect this fixture exists to catch, committed
+    # inside the fixture itself. `baseFilename` is where bytes actually go.
+    handler = logging_config._file_handler
+    if handler is None:
+        return
+    active = os.path.abspath(handler.baseFilename)
+    real = os.path.abspath(str(app_paths.data_path("logs")))
+    assert not active.startswith(real), (
+        f"This test left file logging pointed at the REAL data directory "
+        f"({active}). Tests must never write to the user's live log -- a "
+        f"running Plexar Studio has that file open, and two processes rotating "
+        f"one file on Windows is a rename against an open handle. Re-point "
+        f"COCKPIT_LOG_DIR rather than unsetting it."
+    )
 
 
 @pytest.fixture()

@@ -99,7 +99,17 @@ def test_unwritable_log_dir_degrades_to_stderr_only(monkeypatch, tmp_path):
         assert logging_config.file_logging_active() is False
         assert any(type(h) is logging.StreamHandler for h in root.handlers)
     finally:
-        monkeypatch.delenv("COCKPIT_LOG_DIR", raising=False)
+        # RE-POINT, NEVER UNSET. `delenv` here took effect IMMEDIATELY while
+        # monkeypatch's restore only runs at teardown, so the setup() below ran
+        # with no override at all -- log_dir() then fell back to
+        # app_paths.data_path("logs"), the USER'S REAL LOG DIRECTORY, and
+        # installed a RotatingFileHandler on it that survived for the rest of
+        # the pytest session. Every test after this one wrote its (deliberately
+        # alarming) fixture tracebacks into the log of the running app, and two
+        # processes rotating one file on Windows is a rename against an open
+        # handle. Found 2026-08-02 by reading the live log and seeing
+        # tests/test_managed_vllm.py in it.
+        monkeypatch.setenv("COCKPIT_LOG_DIR", str(tmp_path / "restored-logs"))
         logging_config.setup("WARNING")
 
 
