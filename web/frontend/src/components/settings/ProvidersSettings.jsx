@@ -525,16 +525,28 @@ function TestButton({ name, staleUrl, testing, onTest }) {
  * the server (those paths are still env-var driven). A slider that saves cleanly
  * and changes nothing is a trap, so we say so rather than implying it is live.
  */
-function NotEnforcedNote({ name, what }) {
+/** A control that persists cleanly and changes nothing.
+ *
+ *  `why` exists because the default sentence ("the running services still read
+ *  this from their environment variables") is TRUE for most of these and FALSE
+ *  for at least one: lane concurrency is read by no environment variable and no
+ *  code path -- nothing consumes it anywhere. Telling a user to go look at an
+ *  env var that does not exist is a second wrong turn on top of the first, so
+ *  callers whose reason differs pass their own. */
+function NotEnforcedNote({ name, what, why }) {
   return (
     <div
       data-testid={`not-enforced-${name}`}
       role="note"
       style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
     >
-      {what} is saved, but Cockpit does not apply it yet — the running services still read
-      this from their environment variables. It takes effect when engine lifecycle control
-      lands.
+      {what} is saved, but Cockpit does not apply it yet —{" "}
+      {why || (
+        <>
+          the running services still read this from their environment variables. It takes
+          effect when engine lifecycle control lands.
+        </>
+      )}
     </div>
   );
 }
@@ -1243,6 +1255,30 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           }
         />
         {brokerStale && <StaleUrlNote name="lane-broker" />}
+        {/* THE ADDRESS THE BROKER ACTUALLY BINDS. `GET /api/local/status`
+            already returns it as `url` and this card already has the payload --
+            it was on the wire and unread, which is the same defect as the
+            field's wrong default. Shown next to the control it contradicts, so
+            a user who edits the box can see what is really in use. */}
+        {status?.url && (
+          <div
+            data-testid="broker-effective-url"
+            role="note"
+            style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
+          >
+            In use right now: <code>{status.url}</code>
+            {status.managed === true
+              ? " — started by Cockpit."
+              : status.reachable
+                ? " — an external process holds this address."
+                : ""}
+          </div>
+        )}
+        <NotEnforcedNote
+          name="lane-broker-base-url"
+          what="Base URL"
+          why="Cockpit reads the broker address from the COCKPIT_BROKER_URL environment variable, not from this field. The address actually in use is shown above."
+        />
         <SettingToggle
           label="Autostart with Cockpit"
           path="providers.lane_broker.autostart"
@@ -1250,6 +1286,11 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           setField={setField}
           isDirty={isDirty}
           hint="Cockpit runs the broker unless one is already listening"
+        />
+        <NotEnforcedNote
+          name="lane-broker-autostart"
+          what="Autostart with Cockpit"
+          why="whether Cockpit starts the broker is governed by the COCKPIT_MANAGED_BROKER environment variable (default on), not by this toggle."
         />
         <SettingSlider
           label="Lane concurrency"
@@ -1263,7 +1304,11 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           fallback={1}
           hint="1 keeps decode fastest"
         />
-        <NotEnforcedNote name="lane-broker" what="Lane concurrency" />
+        <NotEnforcedNote
+          name="lane-broker-concurrency"
+          what="Lane concurrency"
+          why="no code path reads it — not the server, and not an environment variable either. It is validated on save and then ignored."
+        />
       </div>
 
       {/* ── Spill policy + its translation panel ──────── */}

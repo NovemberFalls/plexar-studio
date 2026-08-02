@@ -504,7 +504,11 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
 
     // Lane concurrency and GPU utilisation persist but are still env-driven —
     // a slider that saves cleanly and changes nothing is a trap.
-    expect(screen.getByTestId("not-enforced-lane-broker")).toHaveTextContent(
+    // testid gained a per-control suffix in S8: the lane-broker card now marks
+    // ALL THREE of its controls, not just concurrency, so one shared id could
+    // no longer address them. See ProvidersSettings.laneBrokerHonesty.test.jsx
+    // for the structural guard that fails when a fourth control is added.
+    expect(screen.getByTestId("not-enforced-lane-broker-concurrency")).toHaveTextContent(
       /Lane concurrency is saved, but Cockpit does not apply it yet/i
     );
     expect(screen.getByTestId("not-enforced-vllm")).toHaveTextContent(

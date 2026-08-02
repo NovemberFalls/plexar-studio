@@ -241,7 +241,19 @@ def mask_key(key: str) -> str:
 DEFAULT_SETTINGS = {
     "general": {"autostart_broker": True, "minimize_to_tray": False, "check_updates": True},
     "providers": {
-        "lane_broker": {"base_url": "http://127.0.0.1:8431", "autostart": True, "concurrency": 1},
+        # base_url default was ":8431" until 2026-08-02 -- an address nothing in
+        # this program has ever listened on. The broker binds :1235
+        # (COCKPIT_BROKER_URL / _LOCAL_BROKER_URL), which the UI already carried
+        # in the field's PLACEHOLDER: the correct value was on screen the whole
+        # time, greyed out behind a wrong default.
+        #
+        # NOTE (S8): none of these three keys is read by the server. The truth
+        # for base_url is `GET /api/local/status` -> `url`; autostart is
+        # governed by COCKPIT_MANAGED_BROKER; concurrency by nothing at all.
+        # The card marks all three as not-enforced rather than implying they
+        # take effect. Wiring base_url to the EXISTING, working endpoint setter
+        # (POST /api/local/{id}/endpoint) is board row S11, not this default.
+        "lane_broker": {"base_url": "http://127.0.0.1:1235", "autostart": True, "concurrency": 1},
         "lmstudio": {"base_url": "http://127.0.0.1:1234", "cli_path": "", "models_dir": "", "default": True},
         "vllm": {"base_url": "http://127.0.0.1:8001", "managed": False, "launch_command": "", "gpu_util": 0.90},
         "ollama": {"base_url": "http://127.0.0.1:11434", "enabled": False},
