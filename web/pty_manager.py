@@ -870,12 +870,19 @@ class PtyManager:
             # Reroute this session's `claude` CLI onto a local inference
             # server (LM Studio via the broker, or vLLM via cockpit's own
             # /shim/vllm route) — base URL resolved server-side above.
-            # ANTHROPIC_AUTH_TOKEN is a dummy value: local servers don't
-            # authenticate, but the CLI requires the var to be non-empty.
             # ANTHROPIC_API_KEY is explicitly cleared for the same reason as
             # the openrouter branch — no fallback to a real Anthropic key.
+            #
+            # ANTHROPIC_AUTH_TOKEN was a hard-coded "local" dummy, which was
+            # right while every local provider was unauthenticated. Plexar
+            # gates /v1/*, so the dummy 401s and the session fails on its
+            # first turn. The real credential is resolved server-side (the
+            # browser never sees it) and the dummy remains for providers that
+            # need no credential — the CLI refuses an empty value.
             env["ANTHROPIC_BASE_URL"] = local_base_url
-            env["ANTHROPIC_AUTH_TOKEN"] = "local"
+            env["ANTHROPIC_AUTH_TOKEN"] = (
+                _server.resolve_local_auth_token(local_provider_id) or "local"
+            )
             env["ANTHROPIC_API_KEY"] = ""
             env["ANTHROPIC_MODEL"] = local_model_id
             # Without this, the CLI's default small/fast model (a
@@ -884,11 +891,16 @@ class PtyManager:
             # the local server doesn't know that model id. Point it at the
             # same local model, mirroring the openrouter branch.
             env["ANTHROPIC_SMALL_FAST_MODEL"] = local_model_id
-            # Local-lane fix: the 49152-token vLLM context window minus the
-            # CLI's default ~32k output-token reservation otherwise 500s past
-            # ~17k input tokens. Caps the CLI's own output reservation so it
-            # fits comfortably inside a local server's smaller context.
-            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "8000"
+            # Local-lane fix: the CLI's default ~32k output reservation counts
+            # against the window, so a local server 500s partway through a
+            # conversation. Derived from the window this provider actually
+            # published where that is known — a flat 8000 against a 12288-token
+            # window would leave ~4k of usable input. Falls back to the old
+            # constant when the window is unknown rather than inventing one.
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(
+                _server.resolve_local_output_reservation(local_provider_id, local_model_id)
+                or 8000
+            )
             # NEVER log the URL here to avoid noise; var names only.
             logger.info(
                 "Local provider: set env vars %s",

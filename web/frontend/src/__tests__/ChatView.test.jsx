@@ -124,6 +124,64 @@ describe("ChatView", () => {
     expect(box).toHaveValue("enormous");
   });
 
+  it("uploads an attached file and records it against the sent message", async () => {
+    const calls = mockApi({
+      "/api/upload": ok({ paths: ["/tmp/uploads/abc123_notes.txt"] }),
+      "/attachments": ok({ id: "att_1" }),
+    });
+    render(<ChatView />);
+    fireEvent.click(await screen.findByText("First chat"));
+
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    // The <input type=file> is hidden and unlabelled; the paperclip picker
+    // is the one WITHOUT an `accept` filter (the image picker has one).
+    const fileInput = document.querySelector('input[type="file"]:not([accept])');
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "see attached" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() => {
+      const uploadCall = calls.find((c) => c.url === "/api/upload");
+      expect(uploadCall).toBeTruthy();
+      const respondCall = calls.find((c) => c.url.includes("/respond"));
+      expect(JSON.parse(respondCall.body).content).toContain("/tmp/uploads/abc123_notes.txt");
+      const attachCall = calls.find((c) => c.url.includes("/attachments"));
+      expect(attachCall).toBeTruthy();
+      expect(JSON.parse(attachCall.body).path).toBe("/tmp/uploads/abc123_notes.txt");
+    });
+  });
+
+  it("names the file and the reason when the server rejects an upload, without touching the composer", async () => {
+    mockApi({
+      "/api/upload": ok({ paths: [], errors: ['Rejected \'evil.exe\': unsupported file type \'.exe\''] }),
+    });
+    render(<ChatView />);
+    fireEvent.click(await screen.findByText("First chat"));
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "keep me" } });
+
+    const file = new File(["x"], "evil.exe", { type: "application/octet-stream" });
+    const fileInput = document.querySelector('input[type="file"]:not([accept])');
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    expect(await screen.findByText(/evil\.exe.*unsupported file type/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Message")).toHaveValue("keep me");
+    expect(screen.queryByText("evil.exe")).not.toBeInTheDocument();
+  });
+
+  it("keeps @-mention and slash commands disabled", async () => {
+    mockApi();
+    render(<ChatView />);
+    fireEvent.click(await screen.findByText("First chat"));
+    expect(await screen.findByLabelText("Mention a file — not wired yet")).toBeInTheDocument();
+    expect(screen.getByLabelText("Commands — not wired yet")).toBeInTheDocument();
+    expect(screen.getByLabelText("Attach a file")).toBeEnabled();
+    expect(screen.getByLabelText("Attach an image")).toBeEnabled();
+  });
+
   it("sends group_id explicitly when moving a chat to the root", async () => {
     // `null` is a real value meaning "the root"; omitting it would read as
     // "leave the group alone" and the move would silently not happen.

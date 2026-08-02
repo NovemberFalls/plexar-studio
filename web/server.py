@@ -4984,6 +4984,53 @@ def resolve_local_base_url(provider_id: str, terminal_id: str | None = None) -> 
     return provider.get("broker_url")
 
 
+def resolve_local_auth_token(provider_id: str) -> str | None:
+    """The credential a session's `claude` CLI must send to a local provider.
+
+    THE BUG THIS CLOSES. Every local provider used to be unauthenticated, so
+    pty_manager hard-coded ``ANTHROPIC_AUTH_TOKEN = "local"`` — a dummy that
+    exists only because the CLI refuses an empty one. Plexar now gates
+    ``/v1/*``, so that dummy is a 401: the picker offered the model, the
+    session launched, and every turn failed with a credential error that named
+    nothing the user had configured.
+
+    Returns None when the provider genuinely has no credential (LM Studio, the
+    lane broker). The caller keeps the dummy in that case — None here means
+    "none needed", NOT "we could not find one", and the two must not be
+    collapsed or an unauthenticated provider starts sending an empty header.
+    """
+    provider = _PROVIDERS.get(provider_id)
+    if provider is None or provider.get("scope") != "local":
+        return None
+    # Resolved at call time, not import: a key entered in Settings must work
+    # on the next session without restarting the app.
+    if provider.get("kind") == "plexar":
+        _url, auth = _plexar_config()
+        return auth.get("bearer") or None
+    return (provider.get("auth") or {}).get("bearer") or None
+
+
+def resolve_local_output_reservation(provider_id: str, model_id: str) -> int | None:
+    """How many tokens the CLI may reserve for OUTPUT on a local model.
+
+    The CLI reserves ~32k for output by default and counts it against the
+    window, so a small local window leaves almost nothing for input and the
+    server 500s partway through a conversation. A flat 8000 was fine for the
+    49152-token vLLM card it was written for; against Plexar's currently
+    served window of 12288 it would leave ~4k of usable input.
+
+    So it is DERIVED from the window the provider actually published (via
+    context_window, which is fed by GET /api/local/{id}/models) rather than
+    assumed: a quarter of the window, floored at 1024 so a tiny window still
+    permits a reply. An unknown window returns None and the caller falls back
+    to the old constant — we do not invent a window in order to divide it.
+    """
+    window = context_window.resolve_context_window(model_id, provider="local")
+    if not isinstance(window, int) or window <= 0:
+        return None
+    return max(1024, min(8000, window // 4))
+
+
 @app.get("/api/local/{provider_id}/queue")
 async def get_provider_queue(provider_id: str):
     provider = _require_provider(provider_id)
@@ -5627,6 +5674,91 @@ async def add_chat_message(conversation_id: str, body: dict):
     return JSONResponse(msg)
 
 
+#: The picker's namespaced id for a local model, "local:<providerId>:<modelId>".
+#: The model id may itself contain ":", so only the first two segments split.
+_PICKER_LOCAL_RE = re.compile(r"^local:([A-Za-z0-9_\-]+):(.+)$")
+
+#: MEASURED against the real CLI on 2026-08-01, not estimated: a single
+#: `claude -p` turn carrying a nine-word prompt reported "at least 9289 input
+#: tokens". That is the harness's own preamble — system prompt, tool schemas,
+#: environment — and it is paid on EVERY turn regardless of conversation
+#: length. Re-measure before trusting this if the CLI's tool set changes.
+_HARNESS_PREAMBLE_TOKENS = 9289
+
+#: The smallest local context window Chat will route a turn to. Preamble +
+#: room for a real exchange. Below this the engine 500s on turn one, so the
+#: model is not "slow" or "small" — it is unusable through this harness, and
+#: saying so up front beats a timeout followed by a server error.
+_MIN_LOCAL_WINDOW = 16384
+
+
+def resolve_chat_model_env(model: str | None) -> tuple[str | None, dict | None, str | None]:
+    """Turn a picker model id into ``(cli_model, env_overlay, error)``.
+
+    Chat's picker lists local models because they are genuinely runnable — the
+    `claude` CLI drives any Anthropic-compatible endpoint via
+    ANTHROPIC_BASE_URL, which is exactly how a terminal session on a local
+    provider already works. Without this, a local pick reached the CLI as the
+    literal string "local:plexar-vllm:qwen3-coder-30b-awq", which is not a
+    model any endpoint knows.
+
+    An unresolvable local id returns an ERROR rather than silently falling back
+    to Anthropic. Quietly answering from a different model than the one the
+    user selected is the worst outcome here: the reply looks fine, and the
+    conversation is attributed to an engine that never saw it.
+    """
+    if not model:
+        return None, None, None
+    match = _PICKER_LOCAL_RE.match(model)
+    if match is None:
+        return model, None, None
+
+    provider_id, model_id = match.group(1), match.group(2)
+    base_url = resolve_local_base_url(provider_id)
+    if not base_url:
+        return None, None, (
+            f"{provider_id!r} is not a local provider this build can route to."
+        )
+
+    window = context_window.resolve_context_window(model_id, provider="local")
+    if isinstance(window, int) and 0 < window < _MIN_LOCAL_WINDOW:
+        # MEASURED, not assumed: a bare `claude -p` turn against this model
+        # reported "at least 9289 input tokens" before the user's own message
+        # was counted. The harness preamble is most of a small window, so a
+        # 12288-token engine 500s on turn one no matter how the output
+        # reservation is tuned.
+        #
+        # Refusing here converts that into one sentence naming the number and
+        # the fix. The alternative is a 500 from deep inside the engine,
+        # arriving after a minute, that reads as the model being broken.
+        return None, None, (
+            f"{model_id} is served with a {window:,}-token context window. The "
+            f"`claude` harness sends about {_HARNESS_PREAMBLE_TOKENS:,} tokens of "
+            f"its own before your message, so a turn cannot fit. Restart this "
+            f"model with a larger --max-model-len (at least "
+            f"{_MIN_LOCAL_WINDOW:,}) to use it from Chat."
+        )
+
+    overlay = {
+        "ANTHROPIC_BASE_URL": base_url,
+        # None means "no credential needed" (LM Studio, the broker), not "not
+        # found" — the CLI refuses an empty value, hence the dummy.
+        "ANTHROPIC_AUTH_TOKEN": resolve_local_auth_token(provider_id) or "local",
+        # REMOVED, not blanked (None deletes — see stream_reply): the CLI reads
+        # a present-but-empty value as "an auth source is set". This also means
+        # no fallback to a real Anthropic key inherited from this process.
+        "ANTHROPIC_API_KEY": None,
+        "ANTHROPIC_MODEL": model_id,
+        # The CLI's small/fast model is used for background work (titles) and
+        # would 404 against a local server that has never heard of it.
+        "ANTHROPIC_SMALL_FAST_MODEL": model_id,
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(
+            resolve_local_output_reservation(provider_id, model_id) or 8000
+        ),
+    }
+    return model_id, overlay, None
+
+
 @app.post("/api/chat/conversations/{conversation_id}/respond")
 async def respond_in_chat(conversation_id: str, body: dict):
     """Persist the user's message and STREAM a reply back as SSE.
@@ -5650,6 +5782,14 @@ async def respond_in_chat(conversation_id: str, body: dict):
     if not content.strip():
         return JSONResponse({"error": "content must not be empty"}, status_code=400)
 
+    # Resolved BEFORE the user's message is stored. A model we cannot route to
+    # is a refusal, not a turn: persisting the message first would leave it
+    # saved with nothing able to answer it, which is the exact failure the
+    # one-route-sends-and-replies design exists to prevent.
+    cli_model, env_overlay, model_error = resolve_chat_model_env(conv.get("model"))
+    if model_error:
+        return JSONResponse({"error": model_error}, status_code=400)
+
     try:
         await asyncio.to_thread(store.add_message, conversation_id, "user", content)
     except ValueError as exc:
@@ -5670,7 +5810,8 @@ async def respond_in_chat(conversation_id: str, body: dict):
         try:
             async for ev in chat_runner.stream_reply(
                 content,
-                model=conv.get("model") or None,
+                model=cli_model,
+                env_overlay=env_overlay,
                 session_id=session_id,
                 # Read-only unless this conversation was explicitly opted in.
                 # Not yet settable from the UI, which is the honest state: the

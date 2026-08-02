@@ -26,9 +26,17 @@
  * The streamed text is held OUTSIDE `thread` because it is not yet persisted;
  * the turn that survives a reload is the one the store returns.
  *
- * HONEST GAPS. No tool strip, no permission gate, no artifacts, no message
- * actions and no voice — build-order steps 6–12 in CHAT.md. The surfaces say
- * so rather than rendering convincing empty furniture.
+ * HONEST GAPS. No permission gate, no message actions and no voice. @-mention
+ * and slash commands are also unbuilt (see the two disabled icons in the
+ * composer) — build-order steps 9 and 12 in CHAT.md. The surfaces say so
+ * rather than rendering convincing empty furniture.
+ *
+ * Attachments (paperclip / image, drag-and-drop onto the composer, and image
+ * paste) upload via the existing /api/upload and record against the
+ * conversation via /api/chat/conversations/{id}/attachments — bytes stay on
+ * disk, only the path is stored. The path is also folded into the prompt
+ * text sent to /respond, clearly marked, because the harness's own
+ * read-only Read tool can only open a path it was actually told about.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -42,6 +50,7 @@ import ChatModelPicker from "./ChatModelPicker.jsx";
 import ChatStreak from "./ChatStreak.jsx";
 import ToolStrip from "./ToolStrip.jsx";
 import { meter } from "./contextMeter.js";
+import useLocalModels from "../../hooks/useLocalModels.js";
 
 const LIST_W = 272;      // §3
 const ARTIFACTS_W = 288; // §3
@@ -93,7 +102,18 @@ export default function ChatView() {
   // persist them yet.
   const [liveTools, setLiveTools] = useState([]);
   const [artifactsOpen, setArtifactsOpen] = useState(true);
+  // Read-only subscriber to the ONE app-wide /models store — never a fetch of
+  // its own — so a local model's published context window is knowable here.
+  const { byProvider: localModelsByProvider } = useLocalModels();
+  // Uploaded-but-not-yet-sent attachments. Only recorded against the
+  // conversation (and folded into the prompt) once the message they ride
+  // with is actually sent — an attachment picked and never sent should not
+  // appear in the Artifacts rail.
+  const [pendingAttachments, setPendingAttachments] = useState([]);
+  const [uploading, setUploading] = useState(false);
   const endRef = useRef(null);
+  const paperclipInputRef = useRef(null);
+  const imageInputRef = useRef(null);
 
   const refreshLists = useCallback(async () => {
     try {
@@ -195,6 +215,80 @@ export default function ChatView() {
     } catch (e) { setError(e.message); }
   };
 
+  // Uploads ONE file to the existing /api/upload (one at a time, not a
+  // batch) so the returned path maps unambiguously back to the file that
+  // produced it — /api/upload skips rejected files inline rather than
+  // padding the paths array, so a batch of N files can return M < N paths
+  // with no positional way to tell which file each path belongs to.
+  const uploadOne = async (file) => {
+    const fd = new FormData();
+    fd.append("files", file);
+    const res = await fetch("/api/upload", { method: "POST", body: fd });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const err = new Error(body?.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    // The route answers 200 even for a rejected file (too big / wrong
+    // extension) with the reason in `errors` — surface that reason, naming
+    // the file, rather than a generic failure.
+    if (body?.errors?.length) throw new Error(body.errors[0]);
+    const path = body?.paths?.[0];
+    if (!path) throw new Error(`Upload of "${file.name}" did not return a path.`);
+    return path;
+  };
+
+  const attachFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUploading(true);
+    setError(null);
+    for (const file of files) {
+      try {
+        const path = await uploadOne(file);
+        setPendingAttachments((prev) => [...prev, {
+          filename: file.name, path,
+          kind: file.type.startsWith("image/") ? "image" : "file",
+          mime: file.type || null, size_bytes: file.size,
+        }]);
+      } catch (e) {
+        setError(e.message);
+      }
+    }
+    setUploading(false);
+  };
+
+  const removePendingAttachment = (idx) => {
+    setPendingAttachments((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  // Two independent DnD systems can share a drop target elsewhere in the app
+  // (see CLAUDE.md "Drag-and-Drop Architecture") — Chat has no pane-swap
+  // handler competing for this one, but the same defensive check belongs
+  // here anyway: only intercept a drag that actually carries files.
+  const onComposerDragOver = (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+  };
+  const onComposerDrop = (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.files?.length) attachFiles(e.dataTransfer.files);
+  };
+  // Capture image paste before the browser inserts it as anything else.
+  // Plain-text paste is left completely alone.
+  const onComposerPaste = (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageItems = Array.from(items).filter((it) => it.type?.startsWith("image/"));
+    if (!imageItems.length) return;
+    e.preventDefault();
+    const files = imageItems.map((it) => it.getAsFile()).filter(Boolean);
+    if (files.length) attachFiles(files);
+  };
+
   const send = async () => {
     const content = draft;
     if (!content.trim() || !activeId || busy) return;
@@ -202,6 +296,15 @@ export default function ChatView() {
     setError(null);
     setStreaming("");
     setLiveTools([]);
+    // Attachment paths ride IN the prompt, clearly marked, because the
+    // harness's own read-only Read tool can only open a path it was
+    // actually told about — an uploaded file the model is never told the
+    // path of is decoration, not an attachment.
+    const attachmentsToSend = pendingAttachments;
+    const promptContent = attachmentsToSend.length
+      ? `${content}${NL}${NL}[Attached files — read these with your Read tool]${NL}`
+        + attachmentsToSend.map((a) => `- ${a.path} (${a.filename})`).join(NL)
+      : content;
     try {
       // ONE call sends and replies. Two calls would let a failure between them
       // leave the user's message saved with nothing answering it, which the UI
@@ -209,7 +312,7 @@ export default function ChatView() {
       const res = await fetch(`/api/chat/conversations/${activeId}/respond`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content: promptContent }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -220,7 +323,32 @@ export default function ChatView() {
       // The message was accepted, so the composer can clear. Re-read now so
       // the user's own turn appears immediately rather than after the reply.
       setDraft("");
-      setThread(await api(`/conversations/${activeId}`));
+      const afterUser = await api(`/conversations/${activeId}`);
+      setThread(afterUser);
+
+      if (attachmentsToSend.length) {
+        // Record against the message that actually carried them, so the
+        // Artifacts rail and the transcript agree on which turn they rode
+        // with.
+        const lastUser = [...(afterUser.messages || [])].reverse()
+          .find((m) => m.role === "user");
+        for (const a of attachmentsToSend) {
+          try {
+            await api(`/conversations/${activeId}/attachments`, {
+              method: "POST",
+              body: JSON.stringify({
+                filename: a.filename, path: a.path, kind: a.kind,
+                mime: a.mime, size_bytes: a.size_bytes,
+                message_id: lastUser?.id,
+              }),
+            });
+          } catch (e) {
+            setError(`Could not record attachment "${a.filename}": ${e.message}`);
+          }
+        }
+        setPendingAttachments([]);
+        setThread(await api(`/conversations/${activeId}`));
+      }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -423,7 +551,7 @@ export default function ChatView() {
                 <span>{busy ? "generating" : "not generating"}</span>
                 <span style={{ flex: 1 }} />
                 {(() => {
-                  const m = meter(thread?.messages, conv?.model);
+                  const m = meter(thread?.messages, conv?.model, localModelsByProvider);
                   return (
                     <>
                       {/* No bar when the limit is unknown: a bar implies a
@@ -453,8 +581,10 @@ export default function ChatView() {
                             lineHeight: 1.5, color: "var(--cc-dim)",
                             border: "1px solid var(--cc-border)", borderRadius: 8 }}>
                 Replies run through your local `claude` CLI with a READ-ONLY
-                tool set. Tool calls, permission gates and artifacts follow in
-                build order.
+                tool set. Attach a file with the paperclip or image icon, or
+                drag one onto the box, and the model reads it with its own
+                Read tool. Permission gates, @-mentions and slash commands
+                follow in build order.
               </div>
 
               {error && (
@@ -466,12 +596,47 @@ export default function ChatView() {
                 </div>
               )}
 
-              <div style={{ borderRadius: 12, background: "var(--cc-surface)",
-                            border: "1px solid var(--cc-border)" }}>
+              <div
+                onDragOver={onComposerDragOver}
+                onDrop={onComposerDrop}
+                style={{ borderRadius: 12, background: "var(--cc-surface)",
+                         border: "1px solid var(--cc-border)" }}
+              >
+                {pendingAttachments.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6,
+                                padding: "8px 12px 0" }}>
+                    {pendingAttachments.map((a, i) => (
+                      <span key={i} style={{
+                        display: "flex", alignItems: "center", gap: 5,
+                        fontSize: 10.5, fontFamily: MONO, color: "var(--cc-dim)",
+                        border: "1px solid var(--cc-border)", borderRadius: 6,
+                        padding: "3px 7px",
+                      }}>
+                        {a.filename}
+                        <button
+                          type="button"
+                          onClick={() => removePendingAttachment(i)}
+                          aria-label={`Remove ${a.filename}`}
+                          style={{ border: "none", background: "transparent",
+                                   color: "var(--cc-muted)", cursor: "pointer",
+                                   padding: 0, lineHeight: 1, fontSize: 12 }}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                    {uploading && (
+                      <span style={{ fontSize: 10.5, color: "var(--cc-muted)" }}>
+                        uploading…
+                      </span>
+                    )}
+                  </div>
+                )}
                 <textarea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={onKeyDown}
+                  onPaste={onComposerPaste}
                   placeholder="Send a message…  (Enter to send, Shift+Enter for a newline)"
                   aria-label="Message"
                   rows={2}
@@ -488,16 +653,46 @@ export default function ChatView() {
                     you change per-message. */}
                 <div style={{ height: 44, display: "flex", alignItems: "center", gap: 10,
                               padding: "0 12px", borderTop: "1px solid var(--cc-line)" }}>
+                  <input
+                    ref={paperclipInputRef}
+                    type="file"
+                    multiple
+                    style={{ display: "none" }}
+                    onChange={(e) => { attachFiles(e.target.files); e.target.value = ""; }}
+                  />
+                  <input
+                    ref={imageInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    style={{ display: "none" }}
+                    onChange={(e) => { attachFiles(e.target.files); e.target.value = ""; }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => paperclipInputRef.current?.click()}
+                    aria-label="Attach a file"
+                    title="Attach a file"
+                    style={{ ...bareBtn, color: "var(--cc-dim)" }}
+                  >
+                    <Paperclip size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => imageInputRef.current?.click()}
+                    aria-label="Attach an image"
+                    title="Attach an image"
+                    style={{ ...bareBtn, color: "var(--cc-dim)" }}
+                  >
+                    <ImageIcon size={13} />
+                  </button>
                   {/* NOT WIRED YET. Rendered dimmed and disabled rather than
                       looking clickable: a control that does nothing when
                       pressed is worse than an absent one, because the user
                       spends time deciding whether they did it wrong. Build
-                      order 10 wires @ and /; the attach pair rides with
-                      artifacts. */}
+                      order 9 wires @; order 12 wires /. */}
                   {[
                     [AtSign, "Mention a file — not wired yet"],
-                    [Paperclip, "Attach a file — not wired yet"],
-                    [ImageIcon, "Attach an image — not wired yet"],
                     [Slash, "Commands — not wired yet"],
                   ].map(([Icon, label], i) => (
                     <Icon

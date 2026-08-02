@@ -28,6 +28,55 @@ describe("contextLimitFor", () => {
     expect(contextLimitFor("some-local-model")).toBeNull();
     expect(contextLimitFor(null)).toBeNull();
   });
+
+  it("resolves a local model's published window from the shared /models catalog", () => {
+    const catalog = {
+      "lmstudio-local": {
+        reachable: true,
+        models: [
+          { id: "qwen3-coder-30b-awq", max_context_length: 12_288, loaded_context_length: null },
+        ],
+      },
+    };
+    expect(contextLimitFor("local:lmstudio-local:qwen3-coder-30b-awq", catalog)).toBe(12_288);
+  });
+
+  it("prefers loaded_context_length over max_context_length when both are present", () => {
+    const catalog = {
+      "lmstudio-local": {
+        reachable: true,
+        models: [
+          { id: "qwen3-coder-30b-awq", max_context_length: 32_768, loaded_context_length: 12_288 },
+        ],
+      },
+    };
+    expect(contextLimitFor("local:lmstudio-local:qwen3-coder-30b-awq", catalog)).toBe(12_288);
+  });
+
+  it("falls back to max_context_length when loaded_context_length is null, not shadowed by it", () => {
+    const catalog = {
+      "lmstudio-local": {
+        reachable: true,
+        models: [
+          { id: "qwen3-coder-30b-awq", max_context_length: 32_768, loaded_context_length: null },
+        ],
+      },
+    };
+    expect(contextLimitFor("local:lmstudio-local:qwen3-coder-30b-awq", catalog)).toBe(32_768);
+  });
+
+  it("returns null for a local model with no published window rather than a guess", () => {
+    const catalog = {
+      "lmstudio-local": {
+        reachable: true,
+        models: [{ id: "qwen3-coder-30b-awq", max_context_length: null, loaded_context_length: null }],
+      },
+    };
+    expect(contextLimitFor("local:lmstudio-local:qwen3-coder-30b-awq", catalog)).toBeNull();
+    // Not in the catalog at all, or no catalog supplied — same honest null.
+    expect(contextLimitFor("local:lmstudio-local:other-model", catalog)).toBeNull();
+    expect(contextLimitFor("local:lmstudio-local:qwen3-coder-30b-awq")).toBeNull();
+  });
 });
 
 describe("usedTokens", () => {
@@ -75,6 +124,30 @@ describe("meter", () => {
   it("scales a 1M window without pretending it is full", () => {
     const m = meter([turn(20_000)], "claude-opus-5[1m]");
     expect(m.pct).toBeCloseTo(2);
+  });
+
+  it("draws a bar for a local model with a published window", () => {
+    const catalog = {
+      "lmstudio-local": {
+        reachable: true,
+        models: [{ id: "qwen3-coder-30b-awq", max_context_length: 12_288, loaded_context_length: null }],
+      },
+    };
+    const m = meter([turn(6_144)], "local:lmstudio-local:qwen3-coder-30b-awq", catalog);
+    expect(m.pct).toBeCloseTo(50);
+    expect(m.label).toBe("context 6.1k / 12.3k");
+  });
+
+  it("still draws no bar for a local model without a published window", () => {
+    const catalog = {
+      "lmstudio-local": {
+        reachable: true,
+        models: [{ id: "qwen3-coder-30b-awq", max_context_length: null, loaded_context_length: null }],
+      },
+    };
+    const m = meter([turn(6_144)], "local:lmstudio-local:qwen3-coder-30b-awq", catalog);
+    expect(m.pct).toBeNull();
+    expect(m.label).toBe("context 6.1k");
   });
 });
 

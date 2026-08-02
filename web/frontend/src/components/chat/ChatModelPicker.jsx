@@ -21,13 +21,13 @@
 import { useState } from "react";
 import { ChevronDown, AlertTriangle } from "lucide-react";
 
-import { FALLBACK_MODEL_GROUPS } from "../../modelCatalog.js";
+import { useModelCatalog, UNSERVED_ROW_TAG } from "../../modelCatalog.js";
 
 /** Roughly 4 chars per token — good enough to warn, never shown as a fact. */
 const CHARS_PER_TOKEN = 4;
 
-function labelFor(modelId) {
-  for (const g of FALLBACK_MODEL_GROUPS) {
+function labelFor(groups, modelId) {
+  for (const g of groups) {
     const m = (g.models || []).find((x) => x.id === modelId);
     if (m) return m.label;
   }
@@ -36,6 +36,7 @@ function labelFor(modelId) {
 
 export default function ChatModelPicker({ model, messages, onChange, disabled }) {
   const [pending, setPending] = useState(null);
+  const { groups } = useModelCatalog();
 
   // Approximate, and labelled as such where it is shown. A precise count would
   // need the model's own tokenizer; the point here is order of magnitude.
@@ -73,13 +74,34 @@ export default function ChatModelPicker({ model, messages, onChange, disabled })
           }}
         >
           <option value="">Default model</option>
-          {FALLBACK_MODEL_GROUPS.map((g) => (
-            <optgroup key={g.label} label={g.label}>
-              {(g.models || []).map((m) => (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              ))}
-            </optgroup>
-          ))}
+          {groups.map((g) => {
+            // A group with no models but a note (e.g. a local provider that
+            // does not publish a model list) is a HEALTHY state, not an
+            // omission — it still renders, as a disabled, note-carrying
+            // optgroup, so the provider's existence is visible.
+            if ((!g.models || g.models.length === 0) && g.note) {
+              return (
+                <optgroup key={g.label} label={`${g.label} — ${g.note}`} disabled />
+              );
+            }
+            if (!g.models || g.models.length === 0) return null;
+            return (
+              <optgroup key={g.label} label={g.note ? `${g.label} — ${g.note}` : g.label}>
+                {g.models.map((m) => {
+                  // A local model the engine is not currently serving is
+                  // visible (it doubles as "what is on disk") but never
+                  // selectable — picking it would point the session at
+                  // something that fails at request time, far from the click.
+                  const unselectable = m.selectable === false;
+                  return (
+                    <option key={m.id} value={m.id} disabled={unselectable}>
+                      {unselectable ? `${m.label} · ${UNSERVED_ROW_TAG}` : m.label}
+                    </option>
+                  );
+                })}
+              </optgroup>
+            );
+          })}
         </select>
         <ChevronDown
           size={11}
@@ -108,13 +130,13 @@ export default function ChatModelPicker({ model, messages, onChange, disabled })
             <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
               <AlertTriangle size={15} style={{ color: "var(--cc-waiting)" }} />
               <strong style={{ fontSize: 13 }}>
-                Switch to {labelFor(pending)}?
+                Switch to {labelFor(groups, pending)}?
               </strong>
             </div>
             <p style={{ fontSize: 11, lineHeight: 1.65, color: "var(--cc-dim)", margin: 0 }}>
               The <strong>entire conversation is re-sent</strong> to the new model on
               your next message — nothing carries over from
-              {" "}{labelFor(model)}. That means:
+              {" "}{labelFor(groups, model)}. That means:
             </p>
             <ul style={{ fontSize: 11, lineHeight: 1.7, color: "var(--cc-dim)", margin: "8px 0 0", paddingLeft: 18 }}>
               <li>

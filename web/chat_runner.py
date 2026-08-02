@@ -210,6 +210,7 @@ async def stream_reply(
     allow_exec: bool = False,
     allow_net: bool = False,
     cwd_scope: Optional[str] = None,
+    env_overlay: Optional[dict] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> AsyncIterator[dict]:
     """Run one turn, yielding normalised events.
@@ -217,11 +218,34 @@ async def stream_reply(
     Yields ``{"type": "delta"|"session"|"done"|"error", ...}``. The caller
     persists; this function owns no storage, so a failed turn cannot leave a
     half-written assistant message behind.
+
+    ``env_overlay`` reroutes this turn onto a non-Anthropic endpoint — the
+    ANTHROPIC_BASE_URL/AUTH_TOKEN set that pty_manager already uses for a
+    terminal session on a local provider. It is supplied by the CALLER, which
+    owns the provider registry, because a URL must never come from the
+    browser (the SSRF stance the rest of the registry takes).
     """
     argv = build_argv(
         model=model, session_id=session_id, allow_write=allow_write,
         allow_exec=allow_exec, allow_net=allow_net, cwd_scope=cwd_scope,
     )
+
+    # Inherit, then overlay. A bare overlay as the child's whole environment
+    # would strip PATH and the CLI's own credential store, so a local-model
+    # turn would fail for reasons having nothing to do with the local model.
+    #
+    # A None value REMOVES the variable rather than blanking it. The CLI treats
+    # a present-but-empty ANTHROPIC_API_KEY as "an auth source is set" and says
+    # so on stderr; deleting it is what the CLI actually asks for, and it also
+    # guarantees no fallback to a real key inherited from this process.
+    child_env = None
+    if env_overlay:
+        child_env = dict(os.environ)
+        for key, value in env_overlay.items():
+            if value is None:
+                child_env.pop(key, None)
+            else:
+                child_env[key] = str(value)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -229,6 +253,7 @@ async def stream_reply(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=child_env,
         )
     except Exception as exc:
         logger.error("Could not start the claude CLI", exc_info=True)
