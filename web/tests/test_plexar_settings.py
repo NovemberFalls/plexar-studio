@@ -113,10 +113,10 @@ async def test_an_env_key_cannot_be_deleted_from_here(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_the_public_url_can_be_stored(client):
     await client.post("/api/settings/plexar",
-                      json={"base_url": "https://plexar-vllm.boord-its.com/"})
+                      json={"base_url": "https://engine.example.test/"})
     body = (await client.get("/api/settings/plexar")).json()
     # Trailing slash normalised — otherwise every path join doubles it.
-    assert body["base_url"] == "https://plexar-vllm.boord-its.com"
+    assert body["base_url"] == "https://engine.example.test"
 
 
 @pytest.mark.asyncio
@@ -132,7 +132,7 @@ async def test_clearing_the_url_falls_back_rather_than_being_refused(client, mon
 @pytest.mark.asyncio
 async def test_a_url_without_a_scheme_is_refused(client):
     res = await client.post("/api/settings/plexar",
-                            json={"base_url": "plexar-vllm.boord-its.com"})
+                            json={"base_url": "engine.example.test"})
     assert res.status_code == 400
 
 
