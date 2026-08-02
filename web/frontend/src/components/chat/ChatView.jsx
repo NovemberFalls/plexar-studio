@@ -544,7 +544,7 @@ export default function ChatView() {
         <div style={{ ...LABEL, height: 34, display: "flex", alignItems: "center",
                       justifyContent: "space-between", padding: "0 14px",
                       borderTop: "1px solid var(--cc-line)" }}
-             title="Conversations are stored locally in a SQLite database under your Plexar data folder. Nothing is uploaded.">
+             title="Conversations are stored locally in a SQLite database under your Plexar Studio data folder. Nothing is uploaded.">
           <span>Stored locally</span>
           <span>on this machine</span>
         </div>

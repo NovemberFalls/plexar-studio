@@ -9,7 +9,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Claude Cockpit, please report it responsibly.
+If you discover a security vulnerability in Plexar Studio, please report it responsibly.
 
 ### Preferred: GitHub Security Advisories
 
@@ -41,4 +41,4 @@ The following types of vulnerabilities are in scope:
 
 ## Thank You
 
-We appreciate the efforts of security researchers and contributors who help keep Claude Cockpit safe.
+We appreciate the efforts of security researchers and contributors who help keep Plexar Studio safe.

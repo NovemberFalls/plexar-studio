@@ -1,5 +1,5 @@
 /**
- * Plexar — Theme Data
+ * Plexar Studio — Theme Data
  * Two palettes: Visual Assist Night (default) and Cockpit Blue.
  * Drives the `--cc-*` design-token custom properties consumed by index.css.
  */

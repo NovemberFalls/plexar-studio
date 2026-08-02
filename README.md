@@ -1,8 +1,10 @@
-# Claude Cockpit
+# Plexar Studio
+
+*(formerly Claude Cockpit)*
 
 A clean, focused multi-session [Claude Code](https://docs.anthropic.com/en/docs/claude-code) manager. Run up to 8 Claude Code terminals side by side in a single window, organized by project, with a native desktop app and 20 themes.
 
-[![Claude Cockpit — click to watch demo](screenshot.svg)](https://github.com/NovemberFalls/claude-cockpit/releases/download/v1.3.3/demo.mp4)
+[![Plexar Studio — click to watch demo](screenshot.svg)](https://github.com/NovemberFalls/claude-cockpit/releases/download/v1.3.3/demo.mp4)
 
 > ▶ [Watch the demo video](https://github.com/NovemberFalls/claude-cockpit/releases/download/v1.3.3/demo.mp4)
 
@@ -10,7 +12,7 @@ A clean, focused multi-session [Claude Code](https://docs.anthropic.com/en/docs/
 
 ## A Note on Orchestrator Mode
 
-Previous versions of Claude Cockpit included an **Orchestrator Mode** — one Claude session controlling others via MCP, with a file-based workspace system for agent-to-agent communication.
+Previous versions (then Claude Cockpit) included an **Orchestrator Mode** — one Claude session controlling others via MCP, with a file-based workspace system for agent-to-agent communication.
 
 **That feature has been removed in v1.1.0.**
 
@@ -22,7 +24,7 @@ I'm re-evaluating the orchestrator approach before committing to a new implement
 
 ## What Is This?
 
-Claude Cockpit lets you:
+Plexar Studio lets you:
 
 - Run **up to 8 Claude Code sessions** simultaneously, view 1, 2, or 4 at a time in split panes
 - Organize sessions by **project folder** with live git branch and dirty status
@@ -105,9 +107,9 @@ Pre-built executables are available on the [GitHub Releases](https://github.com/
 
 ### Desktop App (Windows)
 
-1. Download **`Claude Cockpit_x64-setup.exe`** from the latest release
+1. Download **`Plexar Studio_x64-setup.exe`** from the latest release
 2. Run the installer (no admin required — installs to your user folder)
-3. Launch "Claude Cockpit" from Start Menu or Desktop
+3. Launch "Plexar Studio" from Start Menu or Desktop
 4. The app opens in its own native window — no browser needed
 
 The desktop app bundles the server internally and starts it automatically.
@@ -137,7 +139,7 @@ cd frontend
 npx tauri build
 ```
 
-Output: `web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_<version>_x64-setup.exe`
+Output: `web/frontend/src-tauri/target/release/bundle/nsis/Plexar Studio_<version>_x64-setup.exe`
 
 ---
 
@@ -310,7 +312,7 @@ The error message itself lists every directory that was searched — read it bef
 
 **"[Session ended]" immediately** — Claude CLI isn't authenticated. Run `claude` manually in that directory first.
 
-**Antivirus blocks the exe** — PyInstaller executables are sometimes flagged. Add an exception for `claude-cockpit.exe` or `Claude Cockpit`.
+**Antivirus blocks the exe** — PyInstaller executables are sometimes flagged. Add an exception for `claude-cockpit.exe` or `Plexar Studio`.
 
 ---
 
@@ -339,12 +341,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Privacy
 
-Claude Cockpit runs entirely on your machine. No data is collected, transmitted, or stored externally. Your sessions, code, and conversations never leave your computer.
+Plexar Studio runs entirely on your machine. No data is collected, transmitted, or stored externally. Your sessions, code, and conversations never leave your computer.
 
 ---
 
 ## License
 
-Claude Cockpit is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Plexar Studio is licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
 Copyright (c) 2026 NovemberFalls

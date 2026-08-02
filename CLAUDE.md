@@ -1,4 +1,4 @@
-# Claude Cockpit
+# Plexar Studio
 
 Multi-session Claude Code manager with a FastAPI backend and React/Vite frontend, packaged via Tauri for desktop distribution. Licensed under AGPL-3.0.
 
@@ -242,7 +242,11 @@ Tool calls ARE available in Claude Code's JSONL — `jsonl_watcher.py` parses `t
 
 ## Plexar-vLLM (the model side) — `plexar_client.py`
 
-**Naming, settled 2026-07-31:** **Plexar is the PLATFORM** — this application, formerly Claude Cockpit. **Plexar-vLLM is the MODEL side**, the provider. The registry id is therefore `plexar-vllm`, not `plexar`; the app does not name a provider after itself. Note two things that deliberately did NOT change: `kind: "plexar"` (the backend family) and the `plexar` key in `/v1/models` entries (Plexar-vLLM's own **wire format** — renaming that would break parsing). A stored `localProviderId` of `plexar` self-heals because `ProviderPicker` falls back to a real provider when the id is unknown; pinned by `ProviderPicker.staleId.test.jsx`, so no migration was needed.
+**Naming, settled 2026-07-31, refined 2026-08-02:** **Plexar is the PLATFORM.** This
+application is **Plexar Studio**, the dev tool (formerly Claude Cockpit). **Plexar-vLLM
+is the MODEL side**, the provider — renaming to **Plexar-LLM**, sequenced behind the
+Google auth cutover (see `backlog/11`). A future **Plexar Chat** is a separate product
+with a separate trust model; it is NOT this app with tools disabled. The registry id is therefore `plexar-vllm`, not `plexar`; the app does not name a provider after itself. Note two things that deliberately did NOT change: `kind: "plexar"` (the backend family) and the `plexar` key in `/v1/models` entries (Plexar-vLLM's own **wire format** — renaming that would break parsing). A stored `localProviderId` of `plexar` self-heals because `ProviderPicker` falls back to a real provider when the id is unknown; pinned by `ProviderPicker.staleId.test.jsx`, so no migration was needed.
 
 Plexar (`C:/Code/Personal/plexar-vllm`) owns vLLM container lifecycle and publishes a **fixed-bind** OpenAI-compatible gateway (default `127.0.0.1:8760`, override `COCKPIT_PLEXAR_URL`). Cockpit points at one address forever; model swaps and restarts happen behind it.
 

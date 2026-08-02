@@ -309,7 +309,7 @@ export default function UpdatesSettings() {
           >
             {appVersion ? `v${appVersion}` : "version unknown"}
           </span>
-          <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>Plexar</span>
+          <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>Plexar Studio</span>
         </div>
 
         <FactRow

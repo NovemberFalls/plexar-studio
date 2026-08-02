@@ -1,6 +1,6 @@
-# Contributing to Claude Cockpit
+# Contributing to Plexar Studio
 
-Thank you for your interest in contributing to Claude Cockpit! This guide will help you get started.
+Thank you for your interest in contributing to Plexar Studio! This guide will help you get started.
 
 ## Development Setup
 
@@ -73,10 +73,10 @@ cd web/frontend && npm run lint
 
 ## Platform
 
-Claude Cockpit uses ConPTY/pywinpty on Windows and ptyprocess on Linux/macOS. The pre-built desktop app targets **Windows 10/11**. Running from source works on **Linux and macOS** via the `unix_pty.py` backend.
+Plexar Studio uses ConPTY/pywinpty on Windows and ptyprocess on Linux/macOS. The pre-built desktop app targets **Windows 10/11**. Running from source works on **Linux and macOS** via the `unix_pty.py` backend.
 
 Please test changes on Windows before submitting a PR. If your change touches `pty_manager.py` or `pty_backend.py`, verify it doesn't break the platform-routing logic in `get_backend()`.
 
 ## License
 
-By contributing to Claude Cockpit, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0.
+By contributing to Plexar Studio, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0.

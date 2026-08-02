@@ -72,20 +72,40 @@ RTX 3090  24576 MB  →  gpu-main  gpu_memory_utilization 0.93  = 22856 MB preal
 GTX 1070   8192 MB  →  no instances, 5286 MB free
 ```
 
-**The 1070 is NOT to be planned around** (owner, 2026-08-02): it is not
-installed in the target machine, whatever nvidia-smi enumerated at query time.
-So near-term voice planning assumes **the 3090 alone**, which means Whisper
-costs LLM VRAM — dropping `gpu_memory_utilization` from 0.93 to ~0.85 — or runs
-on CPU. There is no free card.
+**CORRECTED 2026-08-02 (owner directive):** an earlier revision of this
+paragraph said the 1070 was not to be planned around. That was wrong. The
+standing instruction is:
 
-New hardware is pending an infra conversation (an EPYC-class board vs a
-consumer gaming board). The decision-relevant point for THIS workload: Plexar
-runs **one model per card**, not tensor-parallel across cards, so inter-GPU
-bandwidth barely matters and PCIe lane count is far less critical than it would
-be for a sharded model. Physical slot spacing, power, and total VRAM are the
-real constraints. Do not pay an EPYC premium for lanes this workload will not
-use — but re-open that if tensor parallelism (a single model too large for one
-card) ever enters the plan.
+> Do not put Whisper on the 3090, use what you need from the 1070 that's local.
+
+So the **1070 is the voice card** and the 3090 stays whole for the LLM. This
+makes §B's third bullet the operative constraint rather than a footnote: vLLM
+cannot address a compute-6.1 card at all, so *the 1070 running Whisper IS the
+engine-agnostic decision*, not a preview of it. There is no arrangement in
+which Plexar governs that card through vLLM.
+
+Target rig, per the owner: a second 1070 joins a 3090 and an **RTX 6000**.
+Mixed-generation cards in one box may need driver work — unverified, flag for
+infra.
+
+### B3. Tensor parallelism — the flip condition, and why it probably does not fire
+
+Plexar runs **one model per card**, not tensor-parallel, so inter-GPU bandwidth
+barely matters and PCIe lanes are far less critical than spec sheets imply.
+Slot spacing, power and total VRAM are the real constraints.
+
+The Plexar side sharpened this to "a 70B at 4-bit needs ~40 GiB, no single
+consumer card holds it, so the moment 70B enters the plan tensor-parallel
+enters with it, and lanes go from irrelevant to dominant — decide before the
+order." The arithmetic is right; **the conclusion does not follow for this
+hardware.** An RTX 6000 is 48 GB at minimum, so a 4-bit 70B fits on one card
+and one-model-per-card survives it.
+
+Lanes become dominant only if: a model exceeds what a single RTX 6000 holds, or
+a 70B must be co-resident with something else on the same card. Worth
+confirming the exact RTX 6000 variant before it drives a board decision — this
+is the one thing that cannot be retrofitted, so it deserves a real answer
+rather than either party's default.
 
 ### B1. VAD does not belong on a card at all
 
