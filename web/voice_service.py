@@ -8,7 +8,7 @@ Why this module looks the way it does
 -------------------------------------
 1. **Nothing heavy is bundled.** The PyInstaller sidecar is ~48MB. torch is
    never imported here — inference is onnxruntime only — and model WEIGHTS are
-   downloaded on first use into ``~/.claude-cockpit/voice/``, never shipped in
+   downloaded on first use into ``<data dir>/voice/``, never shipped in
    the installer. This module does not download them; see "does NOT" below.
 
 2. **Every ML import is lazy.** They live inside the function that needs them,
@@ -75,6 +75,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, Sequence
 
+import app_paths
+
 logger = logging.getLogger("cockpit.voice")
 
 __all__ = [
@@ -132,7 +134,13 @@ BARGE_IN_MIN_SPEECH_SECONDS = 0.20
 # --------------------------------------------------------------------------
 
 _VOICE_DIR_ENV = "COCKPIT_VOICE_DIR"
-_DEFAULT_VOICE_DIR = Path.home() / ".claude-cockpit" / "voice"
+#: Resolved through app_paths, NOT hard-coded: this module was written before
+#: the .claude-cockpit -> .plexar rename and kept its own literal, so it would
+#: have downloaded several hundred MB of weights into the OLD data directory —
+#: one the migration deliberately leaves alone. The user would then see voice
+#: report "model_missing" forever while the files sat on disk under a name
+#: nothing reads any more.
+_DEFAULT_VOICE_DIR = app_paths.data_dir() / "voice"
 
 # Env-overridable model identities. Whisper model size is the single biggest
 # quality/latency lever, so it is a knob rather than a constant.

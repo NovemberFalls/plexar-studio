@@ -26,10 +26,13 @@
  * The streamed text is held OUTSIDE `thread` because it is not yet persisted;
  * the turn that survives a reload is the one the store returns.
  *
- * HONEST GAPS. No permission gate, no message actions and no voice. @-mention
- * and slash commands are also unbuilt (see the two disabled icons in the
- * composer) — build-order steps 9 and 12 in CHAT.md. The surfaces say so
- * rather than rendering convincing empty furniture.
+ * HONEST GAPS. No permission gate, no message actions. Voice, @-mention and
+ * slash commands are now wired to the extent that is honest: @ and / open
+ * real menus over real handlers (VoiceButton.jsx / MentionPopover.jsx /
+ * CommandsPopover.jsx); the mic stays disabled-with-reason always, because
+ * `/api/voice/status` being `available:true` on some future machine still
+ * would not mean Chat has a capture pipeline — see VoiceButton.jsx's own
+ * comment before "fixing" that.
  *
  * Attachments (paperclip / image, drag-and-drop onto the composer, and image
  * paste) upload via the existing /api/upload and record against the
@@ -49,6 +52,9 @@ import ChatMessage from "./ChatMessage.jsx";
 import ChatModelPicker from "./ChatModelPicker.jsx";
 import ChatStreak from "./ChatStreak.jsx";
 import ToolStrip from "./ToolStrip.jsx";
+import VoiceButton from "./VoiceButton.jsx";
+import MentionPopover from "./MentionPopover.jsx";
+import CommandsPopover from "./CommandsPopover.jsx";
 import { meter } from "./contextMeter.js";
 import useLocalModels from "../../hooks/useLocalModels.js";
 
@@ -111,9 +117,15 @@ export default function ChatView() {
   // appear in the Artifacts rail.
   const [pendingAttachments, setPendingAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  // @-mention and /-command popovers. Both are small, self-contained menus
+  // over things ChatView already has (attachments already fetched for the
+  // Artifacts rail; command handlers that already exist below).
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [commandsOpen, setCommandsOpen] = useState(false);
   const endRef = useRef(null);
   const paperclipInputRef = useRef(null);
   const imageInputRef = useRef(null);
+  const draftRef = useRef(null);
 
   const refreshLists = useCallback(async () => {
     try {
@@ -405,7 +417,74 @@ export default function ChatView() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
+  // Typing "@" opens the mention popover; typing "/" as the FIRST character
+  // of an otherwise-empty draft opens the commands popover. Both are cheap
+  // checks on the value React already handed us in onChange — no keystroke
+  // interception, so nothing here can eat a character the user typed.
+  const onDraftChange = (e) => {
+    const val = e.target.value;
+    setDraft(val);
+    if (val.endsWith("@")) setMentionOpen(true);
+    if (val === "/") setCommandsOpen(true);
+  };
+
+  // Inserts *path* at the textarea's cursor, consuming a trailing "@" if
+  // that is what triggered the popover — so picking a file replaces the
+  // trigger character rather than leaving a stray "@" behind it.
+  const insertMention = (path) => {
+    const el = draftRef.current;
+    if (!el) {
+      setDraft((d) => (d.endsWith("@") ? d.slice(0, -1) : d) + path + " ");
+      setMentionOpen(false);
+      return;
+    }
+    const start = el.selectionStart ?? draft.length;
+    const end = el.selectionEnd ?? draft.length;
+    let before = draft.slice(0, start);
+    const after = draft.slice(end);
+    if (before.endsWith("@")) before = before.slice(0, -1);
+    const next = `${before}${path} ${after}`;
+    setDraft(next);
+    setMentionOpen(false);
+    const pos = before.length + path.length + 1;
+    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(pos, pos); });
+  };
+
   const conv = thread?.conversation;
+
+  // Only handlers that ALREADY EXIST and already work — no new backend calls
+  // invented for this menu (see CommandsPopover.jsx). Guarded so an entry
+  // with no live conversation cannot fire and error.
+  const runCommand = (fn) => () => {
+    setCommandsOpen(false);
+    setDraft("");
+    fn();
+  };
+  const exportConversation = () => {
+    if (!activeId) return;
+    const a = document.createElement("a");
+    a.href = `/api/chat/conversations/${activeId}/export`;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  const commands = [
+    { label: "new-chat", run: runCommand(() => newConversation(conv?.group_id || ROOT.id)) },
+    { label: "new-group", run: runCommand(newGroup) },
+    {
+      label: "export", disabled: !activeId,
+      run: runCommand(exportConversation),
+    },
+    {
+      label: "toggle-artifacts",
+      run: runCommand(() => setArtifactsOpen((v) => !v)),
+    },
+    {
+      label: "delete-chat", disabled: !activeId,
+      run: runCommand(() => removeConversation(activeId)),
+    },
+  ];
 
   return (
     <div style={{ display: "flex", height: "100%", minHeight: 0, width: "100%" }}>
@@ -583,8 +662,8 @@ export default function ChatView() {
                 Replies run through your local `claude` CLI with a READ-ONLY
                 tool set. Attach a file with the paperclip or image icon, or
                 drag one onto the box, and the model reads it with its own
-                Read tool. Permission gates, @-mentions and slash commands
-                follow in build order.
+                Read tool. There is no permission gate yet. Voice input stays
+                disabled on this machine — click the mic icon for why.
               </div>
 
               {error && (
@@ -633,8 +712,9 @@ export default function ChatView() {
                   </div>
                 )}
                 <textarea
+                  ref={draftRef}
                   value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={onDraftChange}
                   onKeyDown={onKeyDown}
                   onPaste={onComposerPaste}
                   placeholder="Send a message…  (Enter to send, Shift+Enter for a newline)"
@@ -686,23 +766,40 @@ export default function ChatView() {
                   >
                     <ImageIcon size={13} />
                   </button>
-                  {/* NOT WIRED YET. Rendered dimmed and disabled rather than
-                      looking clickable: a control that does nothing when
-                      pressed is worse than an absent one, because the user
-                      spends time deciding whether they did it wrong. Build
-                      order 9 wires @; order 12 wires /. */}
-                  {[
-                    [AtSign, "Mention a file — not wired yet"],
-                    [Slash, "Commands — not wired yet"],
-                  ].map(([Icon, label], i) => (
-                    <Icon
-                      key={i}
-                      size={13}
-                      aria-label={label}
-                      role="img"
-                      style={{ color: "var(--cc-muted)", opacity: 0.4, cursor: "default" }}
+                  <VoiceButton />
+                  <div style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      onClick={() => setMentionOpen((v) => !v)}
+                      aria-label="Mention a file"
+                      title="Mention a file from this conversation"
+                      style={{ ...bareBtn, color: mentionOpen ? "var(--cc-fg)" : "var(--cc-dim)" }}
+                    >
+                      <AtSign size={13} />
+                    </button>
+                    <MentionPopover
+                      open={mentionOpen}
+                      onClose={() => setMentionOpen(false)}
+                      attachments={thread?.attachments || []}
+                      onInsert={insertMention}
                     />
-                  ))}
+                  </div>
+                  <div style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      onClick={() => setCommandsOpen((v) => !v)}
+                      aria-label="Commands"
+                      title="Commands"
+                      style={{ ...bareBtn, color: commandsOpen ? "var(--cc-fg)" : "var(--cc-dim)" }}
+                    >
+                      <Slash size={13} />
+                    </button>
+                    <CommandsPopover
+                      open={commandsOpen}
+                      onClose={() => setCommandsOpen(false)}
+                      commands={commands}
+                    />
+                  </div>
                   <span style={{ flex: 1 }} />
                   <ChatModelPicker
                     model={conv?.model}

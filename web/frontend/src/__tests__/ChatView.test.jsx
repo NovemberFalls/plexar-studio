@@ -8,7 +8,7 @@
 
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 import ChatView from "../components/chat/ChatView.jsx";
@@ -172,14 +172,61 @@ describe("ChatView", () => {
     expect(screen.queryByText("evil.exe")).not.toBeInTheDocument();
   });
 
-  it("keeps @-mention and slash commands disabled", async () => {
+  it("opens the mention popover and says plainly there are no attachments yet", async () => {
     mockApi();
     render(<ChatView />);
     fireEvent.click(await screen.findByText("First chat"));
-    expect(await screen.findByLabelText("Mention a file — not wired yet")).toBeInTheDocument();
-    expect(screen.getByLabelText("Commands — not wired yet")).toBeInTheDocument();
-    expect(screen.getByLabelText("Attach a file")).toBeEnabled();
-    expect(screen.getByLabelText("Attach an image")).toBeEnabled();
+    fireEvent.click(screen.getByLabelText("Mention a file"));
+    expect(await screen.findByText(/No attachments in this conversation yet/i)).toBeInTheDocument();
+  });
+
+  it("inserts an attachment's path into the draft when picked from the mention popover", async () => {
+    const threadWithAttachment = {
+      ...THREAD,
+      attachments: [{ id: "att_1", filename: "notes.txt", path: "/tmp/uploads/notes.txt" }],
+    };
+    mockApi({ "/conversations/cnv_1": ok(threadWithAttachment) });
+    render(<ChatView />);
+    fireEvent.click(await screen.findByText("First chat"));
+    fireEvent.click(screen.getByLabelText("Mention a file"));
+    const popover = await screen.findByRole("dialog", { name: "Mention a file" });
+    fireEvent.click(within(popover).getByText("notes.txt"));
+    expect(screen.getByLabelText("Message")).toHaveValue("/tmp/uploads/notes.txt ");
+  });
+
+  it("runs an existing handler from the commands popover — delete conversation", async () => {
+    const calls = mockApi();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ChatView />);
+    fireEvent.click(await screen.findByText("First chat"));
+    fireEvent.click(screen.getByLabelText("Commands"));
+    fireEvent.click(await screen.findByText("/delete-chat"));
+    await waitFor(() => {
+      expect(calls.some((c) => c.method === "DELETE" && c.url.includes("/conversations/cnv_1"))).toBe(true);
+    });
+    confirmSpy.mockRestore();
+  });
+
+  it("mic stays disabled with the not_installed reason surfaced on hover and on click", async () => {
+    mockApi({
+      "/api/voice/status": ok({
+        available: false, reason: "not_installed",
+        detail: "Not ready: stt, vad, tts. Python package(s) not installed: faster_whisper.",
+        components: {
+          stt: { component: "stt", available: false, reason: "not_installed",
+                 detail: "Python package(s) not installed: faster_whisper.",
+                 packages: { faster_whisper: false } },
+        },
+      }),
+    });
+    render(<ChatView />);
+    fireEvent.click(await screen.findByText("First chat"));
+    const mic = await screen.findByLabelText("Voice input");
+    expect(mic).toHaveAttribute("aria-disabled", "true");
+    await waitFor(() => expect(mic).toHaveAttribute("title", expect.stringContaining("Not installed")));
+    fireEvent.click(mic);
+    expect((await screen.findAllByText(/faster_whisper/)).length).toBeGreaterThan(0);
+    expect(screen.getByText(/large ML dependencies/i)).toBeInTheDocument();
   });
 
   it("sends group_id explicitly when moving a chat to the root", async () => {
