@@ -1,0 +1,167 @@
+"""S9 / R26 — GENERATE the `/models` payloads the picker's suite consumes.
+
+WHY. S9 closed a three-link chain and tested all three links, which is why it
+is NOT being downgraded. But it has the same STRUCTURAL exposure the R26
+re-audit found in S10, and this closes it:
+
+  * `test_models_auth_states.py` drives the REAL server handler through ASGI
+    and proves it emits four distinguishable bodies;
+  * `modelCatalog.authStates.test.jsx` proves `buildLocalGroups` renders four
+    distinguishable groups -- but it HAND-BUILDS the response objects;
+  * the exact JSON shape crossing between them is joined by nothing.
+
+Both halves real, the seam unexercised. The failure it admits is quiet: rename
+`authorized` to `is_authorized`, or emit `reason: "unauth"` instead of
+`"unauthorized"`, and the provider silently falls back to the healthy branch --
+a rig that is up and refusing the credential renders as a normal empty
+provider, which is the exact collapse S9 exists to refuse, restored without a
+single test going red.
+
+So the payloads are GENERATED HERE, from the real handler, and the JS suite
+consumes them. Provenance of the SHAPE is the provider; the expectation about
+what the picker DOES with it stays the consumer's. Neither half works alone --
+expectations authored by the provider would agree with whatever it emits, and
+payloads authored by the consumer agree with the consumer by construction.
+
+No `--update` flag and no hand-edit path, deliberately.
+"""
+import io
+import json
+import os
+import sys
+import urllib.error
+from pathlib import Path
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import server as server_module  # noqa: E402
+from server import app  # noqa: E402
+
+PROVIDER = "plexar-vllm"
+
+FIXTURE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "frontend", "src", "__tests__", "fixtures",
+    "models-auth-states.generated.json",
+)
+
+
+def _http_error(code):
+    return urllib.error.HTTPError(
+        url="http://127.0.0.1:8760/v1/models",
+        code=code,
+        msg="Unauthorized" if code == 401 else "Forbidden",
+        hdrs=None,
+        fp=io.BytesIO(b'{"error":{"code":"unauthorized"}}'),
+    )
+
+
+# The four ways `_mgmt_get` can behave. Everything downstream is the real
+# handler's own doing -- this file fakes the UPSTREAM, never the response.
+CASES = {
+    "authorized": lambda provider, path: {"data": [{"id": "qwen3-30b-instruct"}]},
+    "unauthorized": lambda provider, path: (_ for _ in ()).throw(_http_error(401)),
+    "forbidden": lambda provider, path: (_ for _ in ()).throw(_http_error(403)),
+    "down": lambda provider, path: (_ for _ in ()).throw(OSError("connection refused")),
+}
+
+
+@pytest.fixture(autouse=True)
+def _no_disk_scan(monkeypatch):
+    monkeypatch.setattr(server_module, "_scan_vllm_models_dir", lambda: [])
+    yield
+
+
+@pytest.mark.asyncio
+async def test_generate_models_auth_fixture(monkeypatch):
+    transport = ASGITransport(app=app)
+    client = AsyncClient(transport=transport, base_url="http://test")
+
+    captured = {}
+    for name, fn in CASES.items():
+        monkeypatch.setattr(server_module, "_mgmt_get", fn)
+        res = await client.get(f"/api/local/{PROVIDER}/models")
+        captured[name] = {"status": res.status_code, "body": res.json()}
+
+    # R19 / NOTE-17 -- this is a RESULT-SET-shaped assertion, so it gets a
+    # declared expected total, not a floor. Four states, named. A state that
+    # stops being generated must be removed here on purpose.
+    assert set(captured) == {"authorized", "unauthorized", "forbidden", "down"}
+
+    # R10, and it is the whole defect: the failure mode is two of these becoming
+    # EQUAL. Compare the discriminating tuple pairwise across all four, not each
+    # against its own expected value.
+    def disc(entry):
+        b = entry["body"]
+        return (entry["status"], b.get("reachable"), b.get("authorized"), b.get("reason"))
+
+    names = sorted(captured)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            assert disc(captured[a]) != disc(captured[b]), (
+                f"states {a!r} and {b!r} are indistinguishable: {disc(captured[a])}"
+            )
+
+    # The consumer keys on the ABSENCE of `authorized` for the healthy branch
+    # (`authorized is not False`). Pin that absence explicitly -- it is a
+    # property of the payload the JS side depends on and no assertion covered.
+    assert "authorized" not in captured["authorized"]["body"]
+    assert "authorized" not in captured["down"]["body"]
+    assert captured["unauthorized"]["body"]["authorized"] is False
+    assert captured["forbidden"]["body"]["authorized"] is False
+
+    os.makedirs(os.path.dirname(FIXTURE), exist_ok=True)
+    with open(FIXTURE, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "_README": (
+                    "GENERATED by tests/test_models_auth_fixture.py from the real "
+                    "/api/local/{provider}/models handler. Do not hand-edit -- a "
+                    "payload the consumer wrote agrees with the consumer by "
+                    "construction, which is the seam this artefact closes."
+                ),
+                **captured,
+            },
+            f,
+            indent=2,
+            sort_keys=True,
+        )
+        f.write("\n")
+
+
+@pytest.mark.asyncio
+async def test_fixture_on_disk_matches_the_live_handler(monkeypatch):
+    """The committed artefact may not drift from what the handler emits.
+
+    Without this the generator could stop running and the JS suite would keep
+    passing against a stale snapshot of a shape the server no longer produces --
+    a fixture that WAS real, which reads exactly like one that still is.
+    """
+    if not os.path.exists(FIXTURE):
+        pytest.skip("fixture not generated yet")
+    with open(FIXTURE, encoding="utf-8") as f:
+        on_disk = json.load(f)
+
+    transport = ASGITransport(app=app)
+    client = AsyncClient(transport=transport, base_url="http://test")
+    for name, fn in CASES.items():
+        monkeypatch.setattr(server_module, "_mgmt_get", fn)
+        res = await client.get(f"/api/local/{PROVIDER}/models")
+        body = res.json()
+        assert res.status_code == on_disk[name]["status"], f"{name}: status drifted"
+        assert set(body) == set(on_disk[name]["body"]), f"{name}: key set drifted"
+        # VALUES, not just keys. Caught while writing the watch-to-fail for this
+        # very file: a key-set comparison passes straight through a RENAMED
+        # VALUE -- `reason: "forbidden"` becoming `"forbidden_scope"` keeps the
+        # same keys and is exactly the drift the consumer takes silently, on its
+        # fallback branch. A drift test blind to the drift it exists to catch is
+        # the vacuity shape one layer out.
+        assert body.get("reason") == on_disk[name]["body"].get("reason"), (
+            f"{name}: `reason` value drifted from the committed artefact"
+        )
+        assert body.get("authorized") == on_disk[name]["body"].get("authorized"), (
+            f"{name}: `authorized` value drifted from the committed artefact"
+        )
