@@ -1,5 +1,38 @@
 # S7 — MERGE PLAN WITH ROLLBACK (DEC-24)
 
+> ## ATTEMPTED AND ABANDONED — 2026-08-02 19:18, inside the R-E window
+>
+> **The archive is the deliverable and the data was NEVER MERGED.**
+> `C:\Code\Personal\backup\s7-ARCHIVE-NEVER-MERGED_2026-08-02_191840\` —
+> 18,591,744 B, `integrity_check` ok, sha256 matches source, row counts equal
+> source, `README.txt` beside it.
+>
+> **NOTHING ABOUT THE DATA BLOCKED IT.** Every precondition held: both copies
+> `integrity_check` ok, totals re-derived cleanly, and **0 cost/price_source
+> disagreements across all 1,581 overlapping rows.**
+>
+> **TWO CONSECUTIVE HARNESS ERRORS BURNED THE ATTEMPT — both mine, neither a
+> merge fault, and the gate never ran once.** Written down so a retry does not
+> rediscover them:
+>
+> 1. **`ATTACH` with a `file:…?mode=ro` URI fails on a connection opened without
+>    `uri=True`.** The URI is treated as a literal filename. Use
+>    `ATTACH DATABASE ? AS old` with a plain path.
+> 2. **`PRAGMA <schema>.query_only=1` is NOT per-schema — it applies to the whole
+>    connection**, so it made the merge target read-only and refused the first
+>    INSERT. Do not use it to protect an attached source; attach the source
+>    read-only via a URI on a `uri=True` connection, or simply never write to it.
+>
+> **WHY I STOPPED RATHER THAN FIX AND RERUN:** at two failed harness runs I was
+> debugging inside a window with both processes stopped and Len waiting, which is
+> the exact situation DEC-24's one-attempt time-box exists to prevent. *"No data
+> was touched, it is only a PRAGMA, one more run"* is precisely the reasoning the
+> time-box was written to defeat.
+>
+> **RETRY NEEDS NO WINDOW.** Both writers merely have to be down. The design,
+> declared totals and gate below are unchanged and were never the problem.
+
+
 **STATUS: PRESENTED, NOT EXECUTED.** §6 requires this be read before it runs.
 Authorised by Len: *"you can merge it in, though if it is painful, we ditch it
 and start fresh. I am not married to it."* Time-boxed by DEC-24 to **ONE
