@@ -59,6 +59,13 @@ NET_TOOLS = ("WebFetch", "WebSearch")
 #: because a real turn with tool calls legitimately takes minutes.
 DEFAULT_TIMEOUT_S = 600.0
 
+#: Max bytes in ONE stream-json line. asyncio defaults this to 64 KiB, which a
+#: tool result carrying a file blows through instantly — see the comment at the
+#: create_subprocess_exec call. 16 MiB is chosen to sit above any plausible
+#: single event while still being a bound: without one, a runaway process could
+#: buffer without limit, and "no ceiling" is not a fix for "ceiling too low".
+_STREAM_LINE_LIMIT = 16 * 1024 * 1024
+
 
 def chat_workspace() -> str:
     """A NEUTRAL working directory for chat turns.
@@ -290,6 +297,15 @@ async def stream_reply(
             env=child_env,
             # Never the server's own directory — see chat_workspace().
             cwd=chat_workspace(),
+            # THE 64KB CLIFF. asyncio's StreamReader defaults to a 64 KiB line
+            # limit, and stream-json puts ONE EVENT PER LINE. A tool result
+            # carrying a file — which is the entire point of a read-only tool
+            # set — routinely exceeds that, and readline() then raises
+            # "Separator is found, but chunk is longer than limit", killing the
+            # whole reply. Observed live: asking Chat to read a ~60KB markdown
+            # file failed every time, and the failure looked like the model
+            # breaking rather than a buffer limit.
+            limit=_STREAM_LINE_LIMIT,
         )
     except Exception as exc:
         logger.error("Could not start the claude CLI", exc_info=True)
@@ -353,6 +369,23 @@ async def stream_reply(
     except asyncio.TimeoutError:
         proc.kill()
         yield {"type": "error", "detail": "The harness produced nothing for too long."}
+        return
+    except ValueError:
+        # readline() raises a bare ValueError when a single line exceeds the
+        # limit above. Its message ("Separator is found, but chunk is longer
+        # than limit") describes a buffer, not anything the user did, so it is
+        # translated. Raising the ceiling made this rare; it did not make it
+        # impossible, and an unexplained failure on a big file is exactly the
+        # case where a real explanation matters.
+        proc.kill()
+        logger.error("chat: a stream-json line exceeded the read limit", exc_info=True)
+        yield {
+            "type": "error",
+            "detail": (
+                "A single result from the harness was too large to read "
+                "(over 16 MB). Try a smaller file, or ask for part of it."
+            ),
+        }
         return
     except Exception as exc:
         proc.kill()
