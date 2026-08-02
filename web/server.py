@@ -4668,8 +4668,21 @@ async def start_managed_broker() -> bool:
     args = SimpleNamespace(
         port=_broker_port(),
         upstream=os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234"),
-        # Shadow (observe+log, no queueing) is the safe default — same posture
-        # the broker team runs; flip with COCKPIT_BROKER_SHADOW=0.
+        # Shadow (observe+log, no queueing) is the safe default here; flip with
+        # COCKPIT_BROKER_SHADOW=0.
+        #
+        # THIS DEFAULT IS COCKPIT'S, NOT THE BROKER'S. `broker.py`'s own CLI
+        # declares `--shadow` as store_true, i.e. upstream defaults to QUEUEING
+        # ON. This line previously claimed shadow was "the same posture the
+        # broker team runs" -- an assertion about another project's operating
+        # posture that cannot be checked from inside this tree, and that its
+        # argparse default contradicts. Corrected to state only what is ours.
+        #
+        # MEASURED CONSEQUENCE (S3, lane_broker/tests/test_shadow_default_is_inert.py):
+        # under this default the broker forwards and logs but NEVER queues and
+        # NEVER spills -- so the queue and spill surfaces render a feature that
+        # cannot fire as shipped, while traces/metrics and the transport are
+        # real and load-bearing.
         shadow=os.getenv("COCKPIT_BROKER_SHADOW", "1") == "1",
         log_file=os.path.join(state_dir, "jobs.jsonl"),
         spill_interactive=30.0,
