@@ -664,7 +664,13 @@ export default function SpillPolicy({ provider, loading }) {
     return best;
   }, [nowWaitFor, effective]);
 
-  const controlsDisabled = busy || isRemote || !hasSpill || spill == null;
+  // The broker publishes `shadow` on /queue; read it rather than inferring it
+  // from an empty queue, which is also what a healthy idle lane looks like.
+  // In shadow, `_queued_forward` never runs, so `record_spill` never runs, so
+  // no threshold on this card can ever fire -- offering editable, live-looking
+  // controls for it is the same false claim as an empty queue with no note.
+  const isShadow = queue?.shadow === true;
+  const controlsDisabled = busy || isRemote || !hasSpill || spill == null || isShadow;
 
   const setDraft = useCallback((key, value) => {
     if (value != null) lastEnabled.current[key] = value;
@@ -865,6 +871,17 @@ export default function SpillPolicy({ provider, loading }) {
             <strong>{provider.label || provider.id}</strong> is a remote backend. Cockpit refuses
             spill writes to anything it does not own (the endpoint answers 403), so these controls
             are read-only here. Change the thresholds where that broker runs.
+          </Callout>
+        )}
+
+        {isShadow && (
+          <Callout testId="spill-shadow">
+            <strong>These thresholds cannot fire on this build.</strong> The lane broker is
+            running in <strong>shadow mode</strong>: it forwards and logs every request but never
+            queues one, and spill is only evaluated on the queued path. The values below are the
+            broker's real stored configuration — they are shown, not guessed — but nothing will
+            act on them until queueing is on. Set <code>COCKPIT_BROKER_SHADOW=0</code> and restart
+            to enable queueing.
           </Callout>
         )}
 

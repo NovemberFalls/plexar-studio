@@ -1666,6 +1666,13 @@ export default function App() {
       predictedWaitSeconds: predictedWaitSeconds(live.running, live.queued, live.p50WallSeconds),
       thresholdSeconds: spillThresholdSeconds,
       estimatedClearSeconds: live.etaSec,
+      // The broker PUBLISHES this (`broker.py` puts `shadow` in the /queue
+      // payload and server.py passes the body through untouched). It was on
+      // the wire the whole time and nothing read it, so the strip rendered an
+      // eternally-empty queue as though queueing were live. Read the field --
+      // do not restate the condition as prose, and do not infer it from a
+      // depth of zero, which is also what a genuinely idle queue looks like.
+      shadow: localQueue?.shadow === true,
     };
   }, [localQueue, localMetrics, spillThresholdSeconds]);
 
