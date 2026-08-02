@@ -6142,8 +6142,19 @@ def _plexar_instance_for_model(provider: dict, model_id: str):
     """Resolve a served model name to the instance that serves it.
 
     Cockpit's control routes are keyed by MODEL (that is what a picker row
-    is); Plexar's are keyed by INSTANCE. Its catalog can legitimately list the
-    same served name more than once, so this is a lookup, not a rename.
+    is); Plexar's are keyed by INSTANCE. So this is a lookup, not a rename.
+
+    THE COLLISION IS REAL AND NARROWER THAN THIS COMMENT USED TO CLAIM. Plexar
+    ruled on it 2026-08-02 (Plexar-Plan.txt §3.22, after Studio asked in §2.15
+    whether the branch below was reachable at all): served_model_name
+    uniqueness IS enforced across DECLARED instances, but it is NOT absolute
+    across the catalog, because the adopt-external path never runs that check
+    while adopted externals ARE published in /v1/models. So exactly two things
+    can share a served name: a declared instance and an adopted stranger.
+
+    That is why the branch stays. It is not defensive padding against a state
+    Plexar forbids — it is the one shape Plexar's own guarantee does not cover,
+    and the two candidates are different engines on different GPUs.
 
     Returns ``(instance_id, None)`` or ``(None, JSONResponse)``. **Ambiguity is
     refused, never resolved by picking the first match** — the two candidates

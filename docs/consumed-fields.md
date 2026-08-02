@@ -124,20 +124,25 @@ only works on guarantees somebody wrote down.
 | B8 | `GET /api/me` answers **200 even unauthenticated**, with `authenticated: false` | distinguishes "wrong credential" from "server down" | a 401 merges two states whose remedies are opposite |
 | B9 | `scope_description` and `scopes` are the server's prose, rendered verbatim | we never hard-code what a guest may do | our UI starts lying the first time scopes change |
 
-### One place two documents may disagree — worth a ruling, not an assumption
+### RESOLVED 2026-08-02 — the collision is real, and narrower than we assumed
 
-Plexar-LLM §3.1 says *"served_model_name must be unique across live instances
-and a duplicate is a 409."* Studio's `_plexar_instance_for_model` is written
-against *"its catalog can legitimately list the same served name more than
-once"* and **refuses ambiguity with a 409 rather than taking the first match.**
+Studio asked (Plexar-Plan.txt §2.15) whether `served_model_name` uniqueness
+made our ambiguity refusal unreachable. Plexar-LLM ruled in §3.22, and the
+answer was neither of the two readings we offered:
 
-Both can be true — unique across *live* instances, while the catalog also
-carries non-live (`down`) entries that may share a name. If that is the rule,
-our defensive path is correct and simply never fires for a live model. **If
-uniqueness is absolute across the whole catalog**, our ambiguity branch is
-dead code and should say so rather than implying a case that cannot occur.
+Uniqueness **is** enforced across DECLARED instances. It is **not** absolute
+across the catalog, because the adopt-external path never runs that check while
+adopted externals **are** published in `/v1/models`. So exactly two things can
+share a served name: **a declared instance and an adopted stranger.**
 
-ASSUMPTION, flagged rather than resolved: we believe the first reading. We are
-not changing the refusal either way — refusing to guess between two engines on
-two GPUs is right regardless — but the comment should not describe an
-impossible state as a live risk.
+**Our ambiguity branch is live code and stays.** It is not padding against a
+state Plexar forbids — it covers the one shape Plexar's own guarantee does not,
+and the two candidates are different engines on different GPUs. The comment in
+`_plexar_instance_for_model` now names that collision specifically rather than
+implying the catalog duplicates names freely.
+
+Plexar-LLM recorded the gap as theirs (a hole in their own §3.1 guarantee, now
+[NEXT] on their backlog, plus a message defect where the 409 says "already
+live" about a `down` instance). Worth noting how it surfaced: a consumer asking
+whether a defensive branch was reachable found a real gap in the provider's
+stated guarantee. Neither of us was looking for it.
