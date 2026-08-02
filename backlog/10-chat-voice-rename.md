@@ -344,3 +344,56 @@ piece. The surfaces say so rather than rendering convincing empty furniture.
 - **Edit & re-run must show its consequence before committing** ("discards 6
   later messages and 2 artifacts") with a Fork-instead escape. Never destroy
   history silently — the same rule the group-delete behaviour already follows.
+
+---
+
+## H. Secrets hygiene — audit + history rewrite, 2026-08-01
+
+Raised when it became clear this repo is public and will be pushed.
+
+### What was actually leaked
+
+**No key material, ever.** Verified with `git log --all -S` rather than by
+reading diffs: every `plx_` token in history is a test placeholder
+(`plx_whatever`, `plx_secret_value`). `web/.env` is gitignored and untracked,
+and the live key lives in `config.json` in the user data dir — outside the repo
+entirely.
+
+**The private rig hostname WAS leaked**, in three places, all from this session:
+one commit message and one test file (added in one commit, removed in another).
+On a public repo a diff publishes as surely as a message does, so both had to go.
+
+### The fix
+
+`git filter-branch` over the last three commits with a `--msg-filter` and a
+`--tree-filter`, `--prune-empty`. The scrub commit became empty and was pruned,
+which is correct — it existed only to undo a change that no longer happened.
+
+Two properties that made this cheap, and both were checked BEFORE touching
+anything:
+
+- the affected commits were **local only** — `git branch -r --contains` was
+  empty, so the leak never reached origin;
+- the remote tip is still an **ancestor** of the rewritten HEAD, so the push is
+  an ordinary fast-forward. **No force push, and no rewriting of anything
+  anyone else has.**
+
+### Rules going forward
+
+- **Never put a real hostname, port mapping or serial in a test fixture.** RFC
+  2606 reserves `.test` / `.example` for this. The assertions were about scheme
+  handling and trailing-slash normalisation; the host was never the point.
+- **Loopback defaults stay in source.** `127.0.0.1:8760` is localhost, is
+  overridable, and a default pointing nowhere makes a fresh install fail with
+  no explanation. That is not a leak.
+- **Commit messages are published too.** Diagnostic output pasted into a
+  message is as public as code.
+
+### Still open
+
+`config.json` holds the Plexar key in **plaintext on disk**. That is a real
+weakness, just a different one from git. The right home is the OS keychain
+(DPAPI on Windows), not AWS Secrets Manager: this is a desktop app talking to a
+service on the user's own machine, so there is no server-side identity to
+authenticate to AWS *with* — you would need a credential to fetch the
+credential. Secrets Manager is right for the rig side, not the client.
