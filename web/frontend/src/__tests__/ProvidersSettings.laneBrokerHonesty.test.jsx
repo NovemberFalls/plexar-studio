@@ -88,9 +88,29 @@ describe("lane-broker card: no control may claim an effect it does not have", ()
     const src = fs.readFileSync(SOURCE, "utf8");
     const bound = [...src.matchAll(/path="providers\.lane_broker\.([a-z_]+)"/g)].map((m) => m[1]);
 
-    // Sanity: if this ever reads zero, the regex has drifted and the test would
-    // pass vacuously -- the failure mode this whole suite exists to refuse.
-    expect(bound.length).toBeGreaterThan(0);
+    // R19 / NOTE-17, applied retroactively by the R26 re-audit (2026-08-02).
+    //
+    // This used to read `expect(bound.length).toBeGreaterThan(0)`, with a
+    // comment saying a zero would mean the regex had drifted and the test would
+    // pass vacuously. The instinct was right and THE GUARD WAS THE WEAKER FORM
+    // OF IT: a floor catches the total collapse to zero and is blind to the
+    // partial drop from three to two, which is the same failure arriving slowly
+    // (L7 hardening #2, and R19's absence-shape -- a control that stops matching
+    // the regex is not caught, it VANISHES FROM THE SET the guard iterates, and
+    // a smaller set is trivially all-noted).
+    //
+    // The discovery regex is the ONLY thing defining the set, so anything that
+    // changes a control's textual form silently shrinks it: a dynamically built
+    // path, a capital or a digit in the key (`[a-z_]+`), different quoting, or
+    // the control moving to a sub-component in another file. The row's gate
+    // claims "a test that fails if a control is added without a note"; that is
+    // only true for a control written in the shape the regex already knows.
+    //
+    // So the SET is declared, not counted. A new control must be added here
+    // deliberately -- which is the point, because that is the moment someone
+    // decides whether it is enforced or needs a note.
+    const EXPECTED_BOUND = ["base_url", "autostart", "concurrency"];
+    expect(new Set(bound)).toEqual(new Set(EXPECTED_BOUND));
 
     render(<ProvidersSettings {...makeShell()} />);
     await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
