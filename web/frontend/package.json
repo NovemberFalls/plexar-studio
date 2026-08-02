@@ -2,7 +2,7 @@
   "name": "frontend",
   "private": true,
   "license": "AGPL-3.0-or-later",
-  "version": "1.23.0",
+  "version": "1.24.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
