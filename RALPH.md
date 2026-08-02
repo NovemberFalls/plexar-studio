@@ -16,12 +16,20 @@ respawn. Whatever stops Studio must also keep it stopped for the window.
 
 ## Read first, in this order
 
-1. `C:\Code\Personal\Plexar-Ralph.md` — the execution board. Your lane is
-   **PLEXAR-STUDIO** (rows S0-S5). This is STATE, not history.
-2. `C:\Code\Personal\Plexar-Plan.txt` §2 (your section), §5.27 (Len's four
-   decisions), §5.24-B (the R-E execution spec — this is your runbook).
-3. This repo: `backlog/11` (the split), `backlog/12` (chat extraction),
+1. `C:\Code\Personal\plexar-coord\Plexar-Ralph.md` — the execution board. Your
+   lane is **PLEXAR-STUDIO** (rows **S0-S13**). This is STATE, not history.
+2. `C:\Code\Personal\plexar-coord\Plexar-Watch.md` — the decision record. Read
+   every DEC, every R-rule and every NOTE. These are binding rulings.
+3. `C:\Code\Personal\plexar-coord\Plexar-Plan.txt` §2 (your section), §5.27
+   (Len's four decisions), §5.24-B (the R-E execution spec — this is your
+   runbook). ~7,900 lines; do NOT read it whole.
+4. This repo: `backlog/11` (the split), `backlog/12` (chat extraction),
    `CLAUDE.md`.
+
+**PATHS CORRECTED 2026-08-02.** The three shared files MOVED from
+`C:\Code\Personal\` into `C:\Code\Personal\plexar-coord\`. `MOVED-*` stubs may
+still sit at the old paths — they are pointers, not files, so **a write to an
+old path is lost.** This brief cited the pre-move paths until now.
 
 ## Hard rules
 
@@ -33,8 +41,9 @@ respawn. Whatever stops Studio must also keep it stopped for the window.
   you watched the gate pass. Set `⏳` when you start, with the date.
 - Your section of `Plexar-Plan.txt` is §2. Do not write in §3, §4, §5, or §7.
   Genuine disagreement goes in §6, one entry, append-only.
-- Stay in your own tree. You may READ the board and the plan at
-  `C:\Code\Personal\`.
+- Stay in your own tree. You may READ the board, the watch file and the plan at
+  `C:\Code\Personal\plexar-coord\`. You never COMMIT the three shared files —
+  they live outside every repo and a lane branch never contains them.
 - R-E is a **destructive-class change** — it touches a credential path on a rig
   published through a live Cloudflare tunnel. It runs as a PLAN WITH ROLLBACK,
   under the coordinator, with Len reachable. Not unilaterally.
@@ -75,15 +84,19 @@ container-ownership are two different questions; Len decided only the first.
 LEN-1 is authorized (§5.27) but preconditions are NOT met. Do not start it
 unprompted. Two amendments to §5.24-B found 2026-08-02, before you run GATE 5:
 
-- **GATE 5(c) will FAIL as written.** `~/.plexar/lane-broker/` exists on disk
-  (mtime 14:06, 2026-08-02), written by `team/tools/lane-broker/broker.py
-  --shadow` — a process rooted in NEITHER your tree nor Plexar-LLM's. The
-  "unowned three" is really the unowned five: `lane-policy.json`,
-  `plexar-app.key`, `plexar-app.value`, `lane-broker/`, and `logs/`.
-- **CLAIM OR DISCLAIM `logs/`** (contains `cockpit.log`). It is in neither
-  inventory. The name says cockpit and you are Cockpit, so it is probably yours
-  — but §3.14's assertion is exact and will trip on it. Cheap now, a failed
-  gate later. Answer it in §2.
+- **GATE 5(c): THE "FIFTH UNOWNED PARTY" CLAIM IS WITHDRAWN. It was WRONG, and
+  it was the COORDINATOR'S, not yours.** An earlier version of this brief said
+  `~/.plexar/lane-broker/` was written by a process rooted in neither your tree
+  nor Plexar-LLM's, making the unowned set five. **You disproved that from
+  source in §2.23-A: `server.py:4665` calls `app_paths.data_path("lane-broker")`
+  unconditionally on every start, so the directory is STUDIO'S.** Recorded here
+  so the withdrawn claim is not rediscovered as live.
+- **`logs/` is CLAIMED by Studio**, and so is `lane-broker/`. Both are yours,
+  both MOVE, and **5(c) must drop BOTH from its remainder.** If either survives
+  in `~/.plexar` after the window, the migration was incomplete and 5(c) FAILS.
+- **The unowned set is back to TWO: `plexar-app.key` and `plexar-app.value`** —
+  which is the same full-owner credential as S4. Moving those files without
+  RE-MINTING the identity moves the problem, it does not solve it.
 - **The WAL is hot**: `plexar.sqlite3-wal` 4.1 MB, `usage.sqlite3-wal` 4.2 MB,
   written seconds before the listing. PRE-2's `PRAGMA wal_checkpoint(TRUNCATE)`
   is load-bearing, not ceremony. Moving a `.sqlite3` without its `-wal`
