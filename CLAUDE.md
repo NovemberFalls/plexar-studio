@@ -263,7 +263,19 @@ Plexar (`C:/Code/Personal/plexar-vllm`) owns vLLM container lifecycle and publis
 - An unloaded instance stays in `/v1/models` as `state: down` — *"a model that is loading is not a model that does not exist"*, and the same reasoning covers unloaded. So the picker shows the full catalog with which entry is live, and `down` must not be normalized to "loaded" or dropped.
 ### Plexar auth — two independent layers (BREAKING for remote, 2026-07-31)
 
-Plexar now gates **`/api/*`**, not just `/v1/*`, whenever it is proxied. Leaving the control plane ungated was defensible while one credential meant one person past the tunnel; the moment named guest keys existed, every guest held the full control plane and could delete instances. **A remote Plexar with no `COCKPIT_PLEXAR_KEY` now 401s.** Local loopback is unchanged and needs no credential — that is the default and the common case.
+Plexar now gates **`/api/*`**, not just `/v1/*`, whenever it is proxied. Leaving the control plane ungated was defensible while one credential meant one person past the tunnel; the moment named guest keys existed, every guest held the full control plane and could delete instances. **A remote Plexar with no `COCKPIT_PLEXAR_KEY` now 401s.**
+
+**LOOPBACK IS NOT AUTOMATICALLY CREDENTIAL-FREE — corrected 2026-08-02, this doc said it was.** The previous sentence here read *"Local loopback is unchanged and needs no credential — that is the default and the common case."* That is true of only ONE branch of Plexar's rule, and it is not the branch this machine is on. Measured live: `GET 127.0.0.1:8760/v1/models` with no credential → **401 `unauthorized`**.
+
+The rule is `plexar/reach/auth.py:589` — `if loopback and not config.PROXIED:` grants the free pass. Two conditions, and **`PLEXAR_PROXIED` defeats it**:
+
+- **No key configured at all** → open-local, the whole control plane works with no setup. Plexar's startup interlock guarantees this can only coexist with a loopback bind and no proxy, so nothing off-box can reach it.
+- **Loopback bind AND not proxied** → free pass.
+- **Loopback bind AND proxied** → **gated, deliberately.** Behind a tunnel the connector dials in from this very machine, so the bind is still loopback while the traffic originated on the internet. Exempting it would leave Cloudflare Access as the single layer and fail open on any misconfiguration of it.
+
+This rig is the third case: `GET /api/status` reports `proxied: true`, `auth_required: true`, `public_url: https://plexar-vllm.boord-its.com`. Plexar's own `/api/reach` prints the loopback `verify_command` **with** an `Authorization: Bearer` header — the provider documents the requirement; only this file disagreed.
+
+**Do not hard-code either answer. `GET /api/status` carries `auth_required` and `proxied`** — read them, the same rule as `capacity_caveat` and `scope_description`. A consumer that assumes "loopback means open" is one tunnel away from being wrong, and the tunnel is not a code change on this side.
 
 - **`plexar_client.auth_headers` sends BOTH, and neither substitutes for the other.** A Cloudflare Access service token (`CF-Access-Client-Id`/`-Secret`) gets a request past the tunnel **and no further** — Access is not authentication for Plexar; a service token alone returns 401. The `Authorization: Bearer plx_…` is the identity. Env: `COCKPIT_PLEXAR_KEY`, `COCKPIT_PLEXAR_CF_CLIENT_ID`, `COCKPIT_PLEXAR_CF_CLIENT_SECRET`. **None reach the browser** (same stance as every provider URL); a test asserts the providers list carries no credential key.
 - **Half a service token is not sent at all.** A lone id or secret is malformed rather than partial, and yields a 302-to-login HTML page where JSON was expected — which reads as Plexar returning garbage. Both or neither.
