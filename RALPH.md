@@ -87,13 +87,26 @@ unprompted. Two amendments to §5.24-B found 2026-08-02, before you run GATE 5:
 - **GATE 5(c): THE "FIFTH UNOWNED PARTY" CLAIM IS WITHDRAWN. It was WRONG, and
   it was the COORDINATOR'S, not yours.** An earlier version of this brief said
   `~/.plexar/lane-broker/` was written by a process rooted in neither your tree
-  nor Plexar-LLM's, making the unowned set five. **You disproved that from
-  source in §2.23-A: `server.py:4665` calls `app_paths.data_path("lane-broker")`
-  unconditionally on every start, so the directory is STUDIO'S.** Recorded here
-  so the withdrawn claim is not rediscovered as live.
-- **`logs/` is CLAIMED by Studio**, and so is `lane-broker/`. Both are yours,
-  both MOVE, and **5(c) must drop BOTH from its remainder.** If either survives
-  in `~/.plexar` after the window, the migration was incomplete and 5(c) FAILS.
+  nor Plexar-LLM's, making the unowned set five. §2.23-A refuted it by citing
+  `server.py` as creating the directory "unconditionally on every start".
+  **⚠ THAT REFUTATION IS ITSELF WRONG, AND I WROTE IT. CORRECTED 2026-08-02 BY
+  THE R26 RE-AUDIT.** The call is at line **4666**, behind TWO early returns in
+  `start_managed_broker`: a running-task check (`:4654`) and **the double-bind
+  guard (`:4656-4659`), which returns FALSE and never reaches the line whenever
+  something already answers at the broker URL.** Studio creates that directory
+  **only when Studio WINS the double-bind.** The coordinator's claim was not
+  simply wrong — it described the OTHER BRANCH of a conditional I collapsed.
+  R14 in the unusual direction: I understated their finding and overstated my
+  correction.
+- **`logs/` is CLAIMED by Studio unconditionally. `lane-broker/` IS NOT.**
+  MEASURED 2026-08-02: `:1235` is held by `cockpit-server.exe` (PID 19228, new
+  install) and no standalone `broker.py --shadow` exists, **so today the
+  directory is Studio's and it moves.** That is a fact about right now, not a
+  property of the code. **5(c) MUST DETERMINE WHO HOLDS `:1235` IN THE WINDOW
+  rather than assume it** — if an external broker holds the port, that
+  directory is another party's state and moving it moves something not ours.
+- Also measured, covered by no row: **`~/.claude-cockpit/lane-broker/` exists
+  too.** Both homes carry it; the abandoned one falls under S7 clause (iv).
 - **The unowned set is back to TWO: `plexar-app.key` and `plexar-app.value`** —
   which is the same full-owner credential as S4. Moving those files without
   RE-MINTING the identity moves the problem, it does not solve it.
