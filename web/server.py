@@ -27,6 +27,7 @@ from starlette.responses import Response, StreamingResponse
 
 load_dotenv()
 
+import app_paths  # noqa: E402 -- the ONE place the data directory is resolved; see the six literals it replaced
 import logging_config  # noqa: E402 -- deliberately imported after load_dotenv() so logging is configured before any other cockpit module is imported
 logging_config.setup()
 logger = logging.getLogger("cockpit.server")
@@ -3475,9 +3476,7 @@ if _providers_file:
 # setter route (POST /api/local/{id}/endpoint) does the validation. Here we
 # only persist/restore the *already-validated* result. Config lives beside the
 # managed-broker state at ~/.claude-cockpit/.
-_PROVIDER_ENDPOINTS_FILE = os.path.join(
-    os.path.expanduser("~"), ".claude-cockpit", "provider-endpoints.json"
-)
+_PROVIDER_ENDPOINTS_FILE = str(app_paths.data_path("provider-endpoints.json"))
 
 
 def _load_provider_endpoints() -> dict:
@@ -3523,9 +3522,7 @@ def _save_provider_endpoints(mapping: dict) -> None:
 # HTTP setter still validates every path from the browser (see
 # set_vllm_models_dir) since it drives a filesystem scan. Persisted beside the
 # provider-endpoints file above.
-_VLLM_MODELS_DIR_FILE = os.path.join(
-    os.path.expanduser("~"), ".claude-cockpit", "vllm-models-dir.json"
-)
+_VLLM_MODELS_DIR_FILE = str(app_paths.data_path("vllm-models-dir.json"))
 _VLLM_MODELS_DIR_MAX_LEN = 4096
 
 
@@ -4225,7 +4222,7 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
 # OVERLAYS the persisted baseline (read-only) and honors an un-banked reset so
 # the number never dips in the window before the next sample.
 
-_VLLM_METRICS_DIR = os.path.join(os.path.expanduser("~"), ".claude-cockpit")
+_VLLM_METRICS_DIR = str(app_paths.data_dir())
 _VLLM_METRICS_LOG = os.path.join(_VLLM_METRICS_DIR, "vllm-metrics.jsonl")
 _VLLM_METRICS_ROLLUP = os.path.join(_VLLM_METRICS_DIR, "vllm-metrics-rollup.json")
 _VLLM_SAMPLE_INTERVAL = float(os.getenv("COCKPIT_VLLM_SAMPLE_INTERVAL", "60"))
@@ -4399,7 +4396,7 @@ async def _vllm_sampler_loop() -> None:
 # time-series so the in-app History view can be derived from Cockpit alone. One
 # line per provider per tick. Age-capped so the file can't grow unbounded.
 
-_FLEET_LOG = os.path.join(os.path.expanduser("~"), ".claude-cockpit", "fleet-metrics.jsonl")
+_FLEET_LOG = str(app_paths.data_path("fleet-metrics.jsonl"))
 _FLEET_INTERVAL = float(os.getenv("COCKPIT_FLEET_SAMPLE_INTERVAL", "60"))
 _FLEET_RETENTION_S = float(os.getenv("COCKPIT_FLEET_RETENTION_S", str(45 * 86400)))  # ~45 days
 _FLEET_MAX_LINES = 200_000
@@ -4665,7 +4662,7 @@ async def start_managed_broker() -> bool:
     from types import SimpleNamespace
     from lane_broker.broker import amain as broker_amain
 
-    state_dir = os.path.join(os.path.expanduser("~"), ".claude-cockpit", "lane-broker")
+    state_dir = str(app_paths.data_path("lane-broker"))
     os.makedirs(state_dir, exist_ok=True)
     args = SimpleNamespace(
         port=_broker_port(),
