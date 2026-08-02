@@ -115,6 +115,22 @@ export const UNSERVED_MODEL_REASON =
 export const BROWSE_ONLY_NOTE =
   "Only the model this engine is serving can be used. Restart it with another model to switch.";
 
+/** Group-level note for a provider that is UP and REFUSED the credential.
+ *  Distinct from omission (which is what "down" looks like) and from
+ *  NO_MODEL_LIST_NOTE (a healthy provider that publishes no list). The rig is
+ *  reachable; the credential is the problem, and the note names the fix rather
+ *  than pointing at another screen. */
+export const UNAUTHORIZED_NOTE =
+  "This engine is running but did not accept the credential. " +
+  "Set a key in Settings ▸ Providers to list its models.";
+
+/** Same shape, different remedy: the key is valid and this is not its scope.
+ *  Telling this user to re-enter a key would send them to fix the one thing
+ *  that is not broken. */
+export const FORBIDDEN_NOTE =
+  "This engine is running and the key is valid, but it is not permitted to " +
+  "list models here. Ask the rig owner to widen its scope.";
+
 /** Builds one picker group per reachable local provider that has >=1 model,
  *  from GET /api/local/providers + per-provider GET /api/local/{id}/models
  *  responses. Ids are namespaced "local:<providerId>:<modelId>" so they can
@@ -141,6 +157,20 @@ export function buildLocalGroups(providers, modelsByProviderId) {
       continue;
     }
     const resp = modelsByProviderId?.[provider.id];
+    // REACHABLE-BUT-REFUSED IS NOT ABSENCE. Checked BEFORE the omission rule
+    // below, because that rule drops the provider from the picker entirely and
+    // a dropped provider is exactly what "down" looks like. A rig that is up
+    // and refusing a credential must stay VISIBLE and say so, or the user is
+    // left debugging a network problem they do not have.
+    if (resp && resp.authorized === false) {
+      groups.push({
+        label: provider.label || provider.id,
+        provider: "local",
+        models: [],
+        note: resp.reason === "forbidden" ? FORBIDDEN_NOTE : UNAUTHORIZED_NOTE,
+      });
+      continue;
+    }
     if (!resp || resp.reachable === false || !Array.isArray(resp.models) || resp.models.length === 0) continue;
     // Whether Cockpit can make an unserved model become the served one. Without
     // it, "pick this model for my session" and "load this model" come apart:

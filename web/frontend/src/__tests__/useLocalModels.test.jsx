@@ -580,6 +580,53 @@ describe("useLocalModels", () => {
     expect(screen.getByTestId("groups")).toHaveTextContent("");
   });
 
+  it("keeps the server's reason on a non-ok response instead of flattening it", async () => {
+    // S9: `readProvider` used to substitute a bare {reachable:false} for ANY
+    // non-2xx, discarding the reason and action the server had just stated. A
+    // rig that was up and refusing the credential therefore reached the picker
+    // as an indistinguishable "down". This is the middle link of that chain:
+    // the server can state it and the picker can render it, but only if the
+    // hook carries it across.
+    localStorage.setItem("cockpit-local-enabled", "true");
+    const fn = vi.fn((url) => {
+      const u = String(url);
+      if (u === "/api/local/providers") {
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: async () => ({ providers: [PROVIDER] }),
+        });
+      }
+      if (u.endsWith("/models")) {
+        return Promise.resolve({
+          ok: false, status: 502,
+          json: async () => ({ reachable: true, reason: "refused", detail: "HTTP 502" }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    globalThis.fetch = fn;
+
+    // Rendered into the DOM rather than captured into an outer variable:
+    // assigning during render is a side effect and the repo's lint rules
+    // (correctly) refuse it.
+    function Probe() {
+      const { byProvider } = useLocalModelsCatalog();
+      const resp = byProvider?.[PROVIDER.id];
+      return (
+        <span data-testid="probe">
+          {resp ? `${resp.reachable}:${resp.reason}` : "none"}
+        </span>
+      );
+    }
+    render(<Probe />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    // The server said "up, but it refused" -- both halves must survive.
+    expect(screen.getByTestId("probe")).toHaveTextContent("true:refused");
+  });
+
   it("read-only consumers never fetch on their own", async () => {
     const { fn } = mockFetch();
     function ReadOnly() {

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time as _time
+import urllib.error  # module scope: the /models handler distinguishes a REFUSAL from unreachable
 import uuid
 import webbrowser
 from contextlib import asynccontextmanager
@@ -5354,6 +5355,50 @@ async def get_provider_models(provider_id: str):
 
     try:
         data = await asyncio.to_thread(_mgmt_get, provider, _models_path(provider))
+    except urllib.error.HTTPError as exc:
+        # THE PROVIDER ANSWERED. Reporting that as `unreachable` is a false
+        # claim about machine state -- the same defect plexar_client._refused
+        # was written to prevent, on the path that feeds the model picker.
+        # HTTPError is a SUBCLASS of URLError and of Exception, so the bare
+        # `except Exception` below swallowed a 401 and rendered a healthy,
+        # authenticated-and-refusing rig identically to a dead one.
+        #
+        # 401 and 403 stay separate for the reason _refused already gives:
+        # telling a guest to re-enter a key that was never wrong sends them to
+        # fix the one thing that is not broken.
+        if exc.code in (401, 403):
+            logger.debug(
+                "Provider %s /models refused the credential (HTTP %s)",
+                provider_id, exc.code, exc_info=True,
+            )
+            unauthorized = exc.code == 401
+            return JSONResponse({
+                # TRUE, and the whole point: the rig is up and talking to us.
+                "reachable": True,
+                "authorized": False,
+                "models": [],
+                "reason": "unauthorized" if unauthorized else "forbidden",
+                "action": (
+                    "Plexar did not accept the credential. Set a key in "
+                    "Settings ▸ Providers, or set COCKPIT_PLEXAR_KEY."
+                    if unauthorized else
+                    "This key is valid but not permitted to list models here. "
+                    "Ask the rig owner to widen its scope."
+                ),
+            })
+        logger.debug(
+            "Provider %s /models refused (HTTP %s)", provider_id, exc.code, exc_info=True,
+        )
+        if disk_models:
+            return JSONResponse({
+                "reachable": True,
+                "models": disk_models,
+                "reason": "server_refused_disk_only",
+            })
+        return JSONResponse(
+            {"reachable": True, "reason": "refused", "detail": f"HTTP {exc.code}"},
+            status_code=502,
+        )
     except Exception:
         logger.debug("Provider %s /models unreachable", provider_id, exc_info=True)
         if disk_models:

@@ -309,7 +309,13 @@ async function readProvider(providerId) {
     const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models`, {
       signal: controller.signal,
     });
-    const body = res.ok ? await res.json() : { reachable: false };
+    // KEEP THE SERVER'S OWN ANSWER. This used to discard the body on any
+    // non-2xx and substitute a bare {reachable:false} -- so a rig that was up
+    // and refusing the credential arrived at the picker indistinguishable from
+    // a rig that was down. The server states `reason` and `action`; throwing
+    // them away here is where the distinction was actually lost.
+    const parsed = await res.json().catch(() => null);
+    const body = parsed ?? { reachable: false, reason: res.ok ? "unreadable" : "unreachable" };
     publish({ byProvider: { ...snapshot.byProvider, [providerId]: body } });
   } catch (_) {
     // swallow — best-effort background read; keep the last good list
