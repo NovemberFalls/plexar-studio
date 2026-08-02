@@ -144,6 +144,71 @@ export function pressureFraction(currentSeconds, thresholdSeconds) {
   return Math.min(1, Math.max(0, currentSeconds / thresholdSeconds));
 }
 
+/**
+ * THE SEAM: broker payload -> the object LaneStrip renders.
+ *
+ * WHY THIS IS A NAMED, EXPORTED FUNCTION AND NOT AN INLINE `useMemo` (R26).
+ * It used to be four lines inside App.jsx, and the R26 re-audit of row S10
+ * found that both SIDES of it were proven and IT was not:
+ *
+ *   * `lane_broker/tests/test_shadow_default_is_inert.py` drives a REAL broker
+ *     subprocess and proves the `shadow` flag corresponds to real queueing
+ *     behaviour;
+ *   * `LaneStrip.shadowState.test.jsx` proves the UI tells the truth about a
+ *     lane object -- but it BUILT that object by hand;
+ *   * and the one line carrying the flag from the payload into that object was
+ *     exercised by neither.
+ *
+ * That is L3's shape exactly (a record property proven directly, a store proven
+ * with hand-built dicts, and `to_row()` between them writing nothing). The
+ * failure is silent and it wears a friendly face: if `shadow` is ever renamed,
+ * dropped, or arrives as the STRING "true", `=== true` yields false and the
+ * strip renders the LIVE METER over a shadow broker -- claiming an idle lane,
+ * which is the first of the two opposite lies LaneStrip exists to refuse.
+ *
+ * Extracting it makes the seam importable, so `LaneStrip.wiring.test.jsx` can
+ * drive it with a payload GENERATED FROM THE REAL BROKER and render the result,
+ * with no hand-built lane object anywhere in the chain.
+ *
+ * FIELD NAME PINNED FROM PROVIDER SOURCE, not from an inventory (R25):
+ * `broker.py::_queue_state` line 1079 emits `{"shadow": b.shadow, ...}` as a
+ * real bool, and `server.py` passes the body through untouched.
+ *
+ * @returns {{inFlight:number, queued:number, predictedWaitSeconds:number|null,
+ *   thresholdSeconds:number|null, estimatedClearSeconds:number|null,
+ *   shadow:boolean}|null} null when nothing is live.
+ */
+export function laneStripFrom(localQueue, localMetrics, thresholdSeconds) {
+  const live = laneLive(localQueue, localMetrics);
+  if (!live) return null;
+  return {
+    inFlight: live.running,
+    queued: live.queued,
+    predictedWaitSeconds: predictedWaitSeconds(live.running, live.queued, live.p50WallSeconds),
+    thresholdSeconds,
+    estimatedClearSeconds: live.etaSec,
+    // Read the field. Do not restate the condition as prose, and do not infer
+    // it from a depth of zero -- that is also what a genuinely idle queue looks
+    // like, which is the collapse S10 closed.
+    shadow: localQueue?.shadow === true,
+  };
+}
+
+/** The exact key set `laneStripFrom` produces. Exported so the wiring test can
+ *  assert it against the keys LaneStrip actually reads, in BOTH directions --
+ *  a key the mapper stops producing is never rendered, and a key LaneStrip
+ *  starts reading that the mapper never produces is silently undefined. Kept as
+ *  a SET comparison deliberately: a subset check would let keys be added or
+ *  dropped without a word. */
+export const LANE_STRIP_KEYS = Object.freeze([
+  "inFlight",
+  "queued",
+  "predictedWaitSeconds",
+  "thresholdSeconds",
+  "estimatedClearSeconds",
+  "shadow",
+]);
+
 /** Non-negative integer count, or null. Rejects NaN/Infinity/negatives so a
  *  malformed broker payload cannot silently become a 0 in the arithmetic. */
 function toCount(n) {
