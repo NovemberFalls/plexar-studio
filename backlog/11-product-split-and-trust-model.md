@@ -22,11 +22,16 @@ follows is what the split *implies* rather than an argument against it.
 | Plexar (platform + the app, ambiguous) | **Plexar** — the platform only |
 | Claude Cockpit / Plexar the app | **Plexar Studio** — the dev tool |
 | — | **Plexar Chat** — the face |
-| Plexar-vLLM | **Plexar Engine** — the serving layer |
+| Plexar-vLLM | **Plexar-LLM** — the serving layer (owner's pick, 2026-08-02) |
 
-Two problems solved at once: the platform/app collision (which is what made an
-assistant in this very session mis-assign "Plexar" to the provider), and the
-engine name in a product that is about to stop being vLLM-only (§B).
+Solves the platform/app collision — which is what made an assistant in this
+very session mis-assign "Plexar" to the provider — and drops `vllm` from a
+product that is about to stop being vLLM-only (§B).
+
+One caveat recorded and consciously accepted: `-llm` encodes a workload class
+the same way `-vllm` encoded an engine, and §B is precisely about that layer
+growing speech. If it later serves STT and TTS, the name is narrow again.
+Owner's call is `plexar-llm`; noted here so nobody re-derives the objection.
 
 Owner's call, recorded: **renaming a Cloudflare URL is lightweight — the real
 blocker is the Google auth migration**, not the DNS or the cert. So sequence the
@@ -60,15 +65,27 @@ drain / report machinery has to stop assuming vLLM semantics.
 **This is Plexar's decision, not Studio's**, and it gates §C, the 1070, voice,
 and the whole premise. Nothing else in this doc should start first.
 
-Measured context for whoever picks it up (RTX 3090 + GTX 1070 rig, 2026-08-02):
+Measured 2026-08-02 via Plexar `/api/gpus`:
 
 ```
 RTX 3090  24576 MB  →  gpu-main  gpu_memory_utilization 0.93  = 22856 MB preallocated
-GTX 1070   8192 MB  →  no instances, 5286 MB free, headless
+GTX 1070   8192 MB  →  no instances, 5286 MB free
 ```
 
-Whisper on the 3090 means dropping the LLM to ~0.85. Whisper on the 1070 means
-a non-vLLM engine. There is no third option.
+**The 1070 is NOT to be planned around** (owner, 2026-08-02): it is not
+installed in the target machine, whatever nvidia-smi enumerated at query time.
+So near-term voice planning assumes **the 3090 alone**, which means Whisper
+costs LLM VRAM — dropping `gpu_memory_utilization` from 0.93 to ~0.85 — or runs
+on CPU. There is no free card.
+
+New hardware is pending an infra conversation (an EPYC-class board vs a
+consumer gaming board). The decision-relevant point for THIS workload: Plexar
+runs **one model per card**, not tensor-parallel across cards, so inter-GPU
+bandwidth barely matters and PCIe lane count is far less critical than it would
+be for a sharded model. Physical slot spacing, power, and total VRAM are the
+real constraints. Do not pay an EPYC premium for lanes this workload will not
+use — but re-open that if tensor parallelism (a single model too large for one
+card) ever enters the plan.
 
 ### B1. VAD does not belong on a card at all
 
@@ -143,9 +160,13 @@ destructive-interlock change (§6 discipline), not a settings toggle.
 
 ## D. What a public face needs that Plexar deliberately does not have
 
-Recorded in Plexar's own docs as "not built, do not design against": **no
-quotas, no rate limits, no per-model permission, no self-service key minting,
-`owner` is all-or-nothing.**
+Confirmed by the owner 2026-08-02: **nothing has quotas, rate limits, or
+permissions beyond what is already restricted** — and that existing restriction
+layer (named keys, scopes, guest narrowing, 403 on source-2 reports) lives on
+the Plexar side and works. So this section is additive to a real foundation,
+not a rebuild. Plexar's own docs list the gaps as "not built, do not design
+against": no quotas, no rate limits, no per-model permission, no self-service
+key minting, `owner` is all-or-nothing.
 
 Every one of those was the right call when the guest list was people the owner
 knows personally. A public chat face makes them the first thing a stranger
