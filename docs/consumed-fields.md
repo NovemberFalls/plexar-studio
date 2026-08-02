@@ -101,3 +101,43 @@ declares no `queue` capability and is never probed for one), and nothing under
 `plexar.instance_id` present on every `/v1/models` entry. Plexar-LLM confirmed
 this in §3.12 and added it to its contract test. It is the single field whose
 loss is both silent and total for us.
+
+---
+
+## 7. Behavioural guarantees Studio relies on
+
+Field names are the easy half. These are **behaviours** — true today, relied on
+in code, and none of them expressible as a field name. Offered in the same
+shape as Admin's §4 because Plexar-LLM's audit of that list found a real gap
+(a guarantee true by construction that no test asserted), and that mechanism
+only works on guarantees somebody wrote down.
+
+| # | guarantee | what we do with it | if it silently stops holding |
+|---|---|---|---|
+| B1 | `serving` and `degraded` both mean a request can be served **now** | `_normalize_plexar_raw_model` maps both to `loaded` | a degraded-but-serving model shows as unusable and the picker hides a working engine |
+| B2 | A model that is declared but not resident stays in `/v1/models` as `down` | picker shows the full catalog with which entry is live | models vanish from the picker when unloaded; the user cannot ask for one back |
+| B3 | `max_model_len` is the window the running instance **actually has**, and is **omitted** (not guessed) for an adopted external instance | drives the context meter, the output reservation, and `_MIN_LOCAL_WINDOW` | **a refusal becomes an acceptance** — the worst direction. A declared-but-not-served window admits a model that cannot hold a turn |
+| B4 | A null `container` always travels with `container_reason` | rendered together | "could not identify" becomes indistinguishable from "there is no container", the exact ambiguity the 2026-07-31 fix removed |
+| B5 | Every figure carries `source` and `window_exact`; the two sources are never merged upstream | keeps gateway-requests and vllm-prometheus visibly apart | we **drop** the figure rather than render it unsourced |
+| B6 | Empty timeseries buckets are emitted; a quiet bucket carries a measured `requests: 0` with a null latency; a percentile below its sample floor is null | the chart **breaks** at a null and draws a baseline tick at a measured zero | a gap and a zero render identically — opposite meanings |
+| B7 | The address answers `503` + `Retry-After` rather than `ECONNREFUSED` while an engine is unavailable | "starting, back in ~Ns" instead of "offline" | a restarting rig reads as a dead one |
+| B8 | `GET /api/me` answers **200 even unauthenticated**, with `authenticated: false` | distinguishes "wrong credential" from "server down" | a 401 merges two states whose remedies are opposite |
+| B9 | `scope_description` and `scopes` are the server's prose, rendered verbatim | we never hard-code what a guest may do | our UI starts lying the first time scopes change |
+
+### One place two documents may disagree — worth a ruling, not an assumption
+
+Plexar-LLM §3.1 says *"served_model_name must be unique across live instances
+and a duplicate is a 409."* Studio's `_plexar_instance_for_model` is written
+against *"its catalog can legitimately list the same served name more than
+once"* and **refuses ambiguity with a 409 rather than taking the first match.**
+
+Both can be true — unique across *live* instances, while the catalog also
+carries non-live (`down`) entries that may share a name. If that is the rule,
+our defensive path is correct and simply never fires for a live model. **If
+uniqueness is absolute across the whole catalog**, our ambiguity branch is
+dead code and should say so rather than implying a case that cannot occur.
+
+ASSUMPTION, flagged rather than resolved: we believe the first reading. We are
+not changing the refusal either way — refusing to guess between two engines on
+two GPUs is right regardless — but the comment should not describe an
+impossible state as a live risk.
