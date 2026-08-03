@@ -430,3 +430,29 @@ body {
   text-transform: uppercase;
   color: var(--cc-muted);
 }
+
+/* ── Chat conversation rows (S21) ────────────────────────────────────────
+   THE CLIP WAS NEVER THE PROBLEM; THE FIXED HEIGHT WAS. `overflow: hidden`
+   stays on EVERY state -- it is what stops a long model id
+   (`local:plexar-vllm:qwen3-30b-instruct`) painting over its neighbours, the
+   collision fixed earlier today. What changes is that the height is no longer
+   frozen: at rest the row is a fixed 64px, and on hover it grows to fit what
+   it reveals. Each state still clips its own content, so the collision cannot
+   return at any size.
+
+   CSS rather than onMouseEnter/onMouseLeave, per CLAUDE.md's convention.
+   COST, stated: rows below a hovered row shift down. Accepted over an absolute
+   overlay, which would be clipped by the scroll container at the list edge. */
+.chat-row {
+  height: 64px;
+  overflow: hidden;
+}
+.chat-row:hover {
+  height: auto;
+  min-height: 64px;
+}
+/* Revealed only while the row is hovered. `display` rather than opacity so it
+   takes no space at rest -- an invisible-but-laid-out line would push the row
+   past its own clip and reintroduce the bug. */
+.chat-row .chat-row-more { display: none; }
+.chat-row:hover .chat-row-more { display: block; }

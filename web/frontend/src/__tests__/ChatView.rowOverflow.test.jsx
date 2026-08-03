@@ -25,9 +25,13 @@
  * that determine them are.** A reader who needs the visual proof needs a real
  * browser, and that is not what this file is.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import React from "react";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 import ChatView from "../components/chat/ChatView.jsx";
@@ -53,12 +57,24 @@ function mount() {
   return render(<ChatView />);
 }
 
-/** The row element for a conversation, found from its title upward. */
+/** The row element for a conversation, found from its title upward.
+ *
+ *  UPDATED (S21): the row's height and overflow moved from an inline style into
+ *  the `.chat-row` CSS class, so it can be 64px at rest and grow on hover. The
+ *  helper now finds the row by CLASS. The guarantee under test is unchanged --
+ *  the clip is still on every state, which is what keeps a long model id off
+ *  its neighbours. */
 function rowFor(title) {
-  const label = screen.getByText(title);
-  let el = label;
-  while (el && el.style?.height !== "56px") el = el.parentElement;
+  let el = screen.getByText(title);
+  while (el && !el.classList?.contains("chat-row")) el = el.parentElement;
   return el;
+}
+
+/** The declared row rules, read from index.css -- the declaration now lives
+ *  there rather than inline, so that is where it must be asserted. */
+function chatRowCss() {
+  return fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.css"), "utf8");
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -90,9 +106,14 @@ describe("conversation row: content stays inside the row", () => {
     await waitFor(() => expect(screen.getByText("Long model row")).toBeInTheDocument());
     const row = rowFor("Long model row");
     expect(row).not.toBeNull();
-    // A fixed height with no overflow rule is the collapse-of-states shape in
-    // layout: too-tall and correct render identically until content grows.
-    expect(row.style.overflow).toBe("hidden");
+    // The clip is DECLARED IN CSS now and must apply to every state -- at rest
+    // AND while hovered, because hover is exactly when the row grows.
+    const css = chatRowCss();
+    expect(css).toMatch(/\.chat-row\s*\{[^}]*overflow:\s*hidden/);
+    expect(css).toMatch(/\.chat-row\s*\{[^}]*height:\s*64px/);
+    // And the hover state must keep a floor rather than dropping the height
+    // rule entirely, or the row collapses to its content at rest size.
+    expect(css).toMatch(/\.chat-row:hover\s*\{[^}]*min-height:\s*64px/);
   });
 
   it("PAIRWISE (R10): long and short rows are the SAME declared height", async () => {
@@ -102,17 +123,15 @@ describe("conversation row: content stays inside the row", () => {
     const longRow = rowFor("Long model row");
     const shortRow = rowFor("Short model row");
 
-    // DECLARED, not "similar" (R19). 56 is the design's number; asserting
-    // equality alone would pass if BOTH rows grew.
-    expect(longRow.style.height).toBe("56px");
-    expect(shortRow.style.height).toBe("56px");
-    expect(longRow.style.height).toBe(shortRow.style.height);
-
-    // And the containment properties must not differ by content either — a
-    // row that clips only when the text is short is not a row that clips.
-    for (const prop of ["overflow", "height"]) {
-      expect(longRow.style[prop]).toBe(shortRow.style[prop]);
-    }
+    // DECLARED (R19): 64px, the S21 size, asserted at its source in CSS.
+    // Both rows must carry the SAME class, so neither can be sized by content.
+    expect(chatRowCss()).toMatch(/\.chat-row\s*\{[^}]*height:\s*64px/);
+    expect(longRow.className).toBe(shortRow.className);
+    expect(longRow.classList.contains("chat-row")).toBe(true);
+    // Neither may carry an inline height that would override the shared class
+    // -- that is how one row silently becomes a different size from another.
+    expect(longRow.style.height).toBe("");
+    expect(shortRow.style.height).toBe("");
     // The model line's no-wrap contract holds for BOTH, not just the long one.
     for (const m of [LONG_MODEL, SHORT_MODEL]) {
       const line = screen.getByText(m);
@@ -121,21 +140,16 @@ describe("conversation row: content stays inside the row", () => {
     }
   });
 
-  it("the group select can show its own label, not a prefix of it", async () => {
+  it("the group SELECT IS GONE — and moving a chat is still reachable", async () => {
+    // S21 removed it: it was the only way to move a chat until S18 added
+    // right-click and drag, after which it was the worst of the three while
+    // costing 120px of a 272px list. This asserts BOTH halves -- the control is
+    // gone AND the capability it carried is still reachable -- because
+    // removing a control without checking its replacement is how a feature
+    // quietly disappears.
     mount();
     await waitFor(() => expect(screen.getByText("Long model row")).toBeInTheDocument());
-
-    const select = screen.getAllByLabelText(/^Move /)[0];
-    // 62px cut this control's OWN label to "Ungroupe" — a control the user
-    // cannot read. The assertion is on the regression, not on a magic number:
-    // it must be wide enough for the longest option it can display.
-    const max = parseInt(select.style.maxWidth, 10);
-    expect(max).toBeGreaterThan(62);
-
-    // The option text itself must be whole — this is the value the width
-    // exists to show.
-    const longest = [...select.options].reduce((a, o) => (o.text.length > a.length ? o.text : a), "");
-    expect(longest).toBe("Ungrouped");
-    expect(within(select).getByText("Ungrouped")).toBeInTheDocument();
+    expect(screen.queryAllByLabelText(/^Move /)).toHaveLength(0);
+    expect(rowFor("Long model row")).not.toBeNull();
   });
 });

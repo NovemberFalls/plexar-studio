@@ -648,7 +648,6 @@ export default function ChatView() {
                     groups={groups}
                     selected={c.id === activeId}
                     onSelect={() => setActiveId(c.id)}
-                    onMove={(gid) => moveConversation(c.id, gid)}
                     onContextMenu={(e) => openListMenu(e, c)}
                     onDragStart={() => setDragConvId(c.id)}
                     onDragEnd={() => { setDragConvId(null); setDropGroupId(null); }}
@@ -988,7 +987,22 @@ export default function ChatView() {
 }
 
 /** §4 — 56px row, three lines, brightness-encoded state. */
-function ConversationRow({ conversation: c, groups, selected, onSelect, onMove,
+/** Compact relative time for the list — "at a glance" information.
+ *  Returns "" for anything unparseable rather than "Invalid Date": a row is
+ *  not the place to surface a bad timestamp. */
+function fmtWhen(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return days < 7 ? `${days}d ago` : new Date(t).toLocaleDateString();
+}
+
+function ConversationRow({ conversation: c, groups, selected, onSelect,
                           onContextMenu, onDragStart, onDragEnd }) {
   const needsYou = c.attention === "needs_you";
   const unread = (c.unread_count || 0) > 0;
@@ -1011,14 +1025,17 @@ function ConversationRow({ conversation: c, groups, selected, onSelect, onMove,
       }}
       onDragEnd={onDragEnd}
       data-testid={`conv-row-${c.id}`}
-      className="hover-bg-elevated"
+      className="chat-row hover-bg-elevated"
       style={{
         // DEFENCE IN DEPTH, kept even though block 1 fixes today's case: a
         // FIXED height with no `overflow` means ANY future third line spills
         // silently into the neighbouring row. That is the collapse-of-states
         // shape in layout -- a row that is too tall and a row that is correct
         // render identically until the content grows.
-        height: 56, overflow: "hidden",
+        // Height and overflow now live in `.chat-row` (index.css). The clip
+        // stays on EVERY state -- it is what keeps a long model id off its
+        // neighbours -- while the height stops being frozen so hover can
+        // reveal more. See the CSS block for the reasoning and its cost.
         display: "flex", alignItems: "center", gap: 10,
         padding: "0 14px", cursor: "pointer",
         background: selected ? "var(--cc-elev)" : "transparent",
@@ -1032,13 +1049,19 @@ function ConversationRow({ conversation: c, groups, selected, onSelect, onMove,
         {(c.title || "?").trim().charAt(0).toUpperCase()}
       </div>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 12.5, color: nameColor, overflow: "hidden",
+        {/* +4pt across the row and WHITE, not grey. Len named the contrast he
+            wanted: "No conversation selected", which is `--cc-fg`. The title
+            was 12.5px in --cc-dim and the model line 9.5px in --cc-muted --
+            the one he said made him squint. This is a readability row, not a
+            taste row: a user who cannot read a row cannot use it. */}
+        <div style={{ fontSize: 16.5, color: nameColor, overflow: "hidden",
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {c.title}
         </div>
-        <div style={{ fontSize: 11, color: previewColor, overflow: "hidden",
+        <div style={{ fontSize: 15, color: previewColor, overflow: "hidden",
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {c.message_count} message{c.message_count === 1 ? "" : "s"}
+          {c.last_message_at ? ` · ${fmtWhen(c.last_message_at)}` : ""}
         </div>
         {/* THE FIX. LABEL carries no overflow rules, so a real model id --
             `local:plexar-vllm:qwen3-30b-instruct` -- wrapped to three lines,
@@ -1048,28 +1071,28 @@ function ConversationRow({ conversation: c, groups, selected, onSelect, onMove,
             value without making it recoverable is how a UI starts lying
             quietly. The parent already sets `minWidth: 0`, without which
             ellipsis on a flex child is inert. */}
-        <div style={{ ...LABEL, fontSize: 9.5, overflow: "hidden",
+        <div style={{ ...LABEL, fontSize: 13.5, overflow: "hidden",
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}
              title={c.model || "no model"}>{c.model || "no model"}</div>
+        {/* Revealed on hover. `display:none` at rest so it takes NO space --
+            an invisible-but-laid-out line would push the row past its own clip
+            and reintroduce the collision this row exists to keep fixed. */}
+        <div className="chat-row-more"
+             style={{ fontSize: 13, color: "var(--cc-dim)", marginTop: 2,
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {groups.find((g) => g.id === c.group_id)?.name || ROOT.name}
+          {c.archived ? " · archived" : ""}
+        </div>
       </div>
-      <select
-        value={c.group_id || ROOT.id}
-        onClick={(e) => e.stopPropagation()}
-        onChange={(e) => onMove(e.target.value)}
-        aria-label={`Move ${c.title}`}
-        style={{ fontSize: 9, background: "transparent", color: "var(--cc-muted)",
-                 border: "1px solid var(--cc-border)", borderRadius: 5,
-                 // 62 cut this control's OWN label to "Ungroupe" -- a control
-                 // the user cannot read. 120 rather than a tight fit for
-                 // "Ungrouped" (~74px at this size) because group names are
-                 // USER-SUPPLIED and any tight number is the same defect at a
-                 // different threshold; ellipsis makes a long one degrade
-                 // instead of clipping mid-word.
-                 maxWidth: 120, textOverflow: "ellipsis" }}
-      >
-        <option value={ROOT.id}>{ROOT.name}</option>
-        {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-      </select>
+      {/* THE `Ungrouped v` SELECT IS GONE (S21). It was the ONLY way to move a
+          chat, which is why it earned a place in every row; S18 replaced it
+          with right-click and drag, so it became the worst of the three while
+          still costing 120px of a 272px list. Removing it is what frees the
+          width for the information Len actually wanted to see.
+          `onMove` GOES WITH IT, and the first draft of this comment claimed it
+          was still used by the context menu -- it is not: the menu calls
+          `moveConversation` directly from ChatView. eslint caught the now-unused
+          prop and the wrong justification with it. */}
     </div>
   );
 }

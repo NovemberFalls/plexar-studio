@@ -241,10 +241,16 @@ describe("ChatView", () => {
   it("sends group_id explicitly when moving a chat to the root", async () => {
     // `null` is a real value meaning "the root"; omitting it would read as
     // "leave the group alone" and the move would silently not happen.
+    // DRIVEN VIA THE CONTEXT MENU (S21 removed the per-row select; S18 added
+    // right-click). The guarantee under test is unchanged and is the reason
+    // this test exists: `null` is a REAL value meaning "the root", and omitting
+    // it would read as "leave the group alone" -- the move would silently not
+    // happen. Only the interaction that reaches it changed.
     const calls = mockApi();
     render(<ChatView />);
     await screen.findByText("Filed chat");
-    fireEvent.change(screen.getByLabelText("Move Filed chat"), { target: { value: "root" } });
+    fireEvent.contextMenu(await screen.findByTestId("conv-row-cnv_2"));
+    fireEvent.click(await screen.findByTestId("ctx-move-to-ungrouped"));
 
     await waitFor(() => {
       const patch = calls.find((c) => c.method === "PATCH");
