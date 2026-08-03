@@ -645,7 +645,6 @@ export default function ChatView() {
                   <ConversationRow
                     key={c.id}
                     conversation={c}
-                    groups={groups}
                     selected={c.id === activeId}
                     onSelect={() => setActiveId(c.id)}
                     onContextMenu={(e) => openListMenu(e, c)}
@@ -1002,7 +1001,7 @@ function fmtWhen(iso) {
   return days < 7 ? `${days}d ago` : new Date(t).toLocaleDateString();
 }
 
-function ConversationRow({ conversation: c, groups, selected, onSelect,
+function ConversationRow({ conversation: c, selected, onSelect,
                           onContextMenu, onDragStart, onDragEnd }) {
   const needsYou = c.attention === "needs_you";
   const unread = (c.unread_count || 0) > 0;
@@ -1026,6 +1025,10 @@ function ConversationRow({ conversation: c, groups, selected, onSelect,
       onDragEnd={onDragEnd}
       data-testid={`conv-row-${c.id}`}
       className="chat-row hover-bg-elevated"
+      title={`${c.title}
+${c.model || "no model"}`}
+      // THE MODEL AS A TOOLTIP, not a line. Same mechanism that already kept a
+      // truncated value reachable -- one affordance, not two.
       style={{
         // DEFENCE IN DEPTH, kept even though block 1 fixes today's case: a
         // FIXED height with no `overflow` means ANY future third line spills
@@ -1058,31 +1061,30 @@ function ConversationRow({ conversation: c, groups, selected, onSelect,
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {c.title}
         </div>
-        <div style={{ fontSize: 15, color: previewColor, overflow: "hidden",
+        <div style={{ fontSize: 12.5, color: previewColor, overflow: "hidden",
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {c.message_count} message{c.message_count === 1 ? "" : "s"}
           {c.last_message_at ? ` · ${fmtWhen(c.last_message_at)}` : ""}
         </div>
-        {/* THE FIX. LABEL carries no overflow rules, so a real model id --
-            `local:plexar-vllm:qwen3-30b-instruct` -- wrapped to three lines,
-            overflowed the fixed 56px row and rendered ON TOP of its neighbours.
-            The two lines above always had these three properties; this one was
-            simply missed. `title` keeps the full value reachable: truncating a
-            value without making it recoverable is how a UI starts lying
-            quietly. The parent already sets `minWidth: 0`, without which
-            ellipsis on a flex child is inert. */}
-        <div style={{ ...LABEL, fontSize: 13.5, overflow: "hidden",
-                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-             title={c.model || "no model"}>{c.model || "no model"}</div>
-        {/* Revealed on hover. `display:none` at rest so it takes NO space --
-            an invisible-but-laid-out line would push the row past its own clip
-            and reintroduce the collision this row exists to keep fixed. */}
-        <div className="chat-row-more"
-             style={{ fontSize: 13, color: "var(--cc-dim)", marginTop: 2,
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {groups.find((g) => g.id === c.group_id)?.name || ROOT.name}
-          {c.archived ? " · archived" : ""}
-        </div>
+        {/* TWO LINES ONLY. Both removals are Len's, and both are the same
+            defect at different volumes -- a row saying things it does not need
+            to say, crowding the one thing it does.
+
+            THE GROUP NAME IS GONE. It rendered one line beneath a section
+            header already showing it: a row inside `UNGROUPED` said
+            `UNGROUPED`. Restating the container inside the thing it contains is
+            noise at EVERY level, not just the ungrouped one -- a row under
+            `TEST` does not need to say `TEST` either.
+
+            THE MODEL LINE IS GONE, moved to the row's `title`. It is the least
+            important value in the row and took a full line. The tooltip reuses
+            the mechanism that already kept the truncated value recoverable,
+            rather than adding a second one.
+
+            And the collision pressure drops out with them: the long model id
+            that started all of this is no longer laid out at all. The clip
+            stays anyway -- see `.chat-row` -- because the guarantee should not
+            depend on the current line count. */}
       </div>
       {/* THE `Ungrouped v` SELECT IS GONE (S21). It was the ONLY way to move a
           chat, which is why it earned a place in every row; S18 replaced it

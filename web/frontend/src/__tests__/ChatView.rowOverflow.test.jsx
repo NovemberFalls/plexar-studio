@@ -80,25 +80,25 @@ function chatRowCss() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("conversation row: content stays inside the row", () => {
-  it("the model line cannot wrap — the property that was missing", async () => {
+  it("the model is NOT LAID OUT AT ALL any more — the strongest form of the fix", async () => {
+    // The original defect was a model id wrapping to three lines and painting
+    // over its neighbours, fixed by giving that line nowrap/ellipsis. The row
+    // revision removed the line entirely: the least important value in the row
+    // was taking a full line of it. A value that is not laid out cannot
+    // overflow, which is a stronger guarantee than clipping it.
     mount();
     await waitFor(() => expect(screen.getByText("Long model row")).toBeInTheDocument());
-
-    const line = screen.getByText(LONG_MODEL);
-    // All three together, because any one alone still wraps or still clips
-    // mid-character. This is the exact set the two sibling lines already had.
-    expect(line.style.whiteSpace).toBe("nowrap");
-    expect(line.style.overflow).toBe("hidden");
-    expect(line.style.textOverflow).toBe("ellipsis");
+    expect(screen.queryByText(LONG_MODEL), "the model is rendered as a line again").toBeNull();
   });
 
   it("the truncated value stays RECOVERABLE via title", async () => {
     mount();
     await waitFor(() => expect(screen.getByText("Long model row")).toBeInTheDocument());
     // Truncating a value without making it recoverable is how a UI starts
-    // lying quietly: the user sees `local:plexar-vllm:qwen3-30…` and has no
-    // way to learn the rest.
-    expect(screen.getByText(LONG_MODEL)).toHaveAttribute("title", LONG_MODEL);
+    // lying quietly. The mechanism moved from the line to the ROW's tooltip
+    // when the line was removed -- the guarantee is unchanged and is asserted
+    // in its new place rather than dropped with the element that carried it.
+    expect(rowFor("Long model row")).toHaveAttribute("title", expect.stringContaining(LONG_MODEL));
   });
 
   it("the row clips — defence in depth against ANY future third line", async () => {
@@ -132,12 +132,12 @@ describe("conversation row: content stays inside the row", () => {
     // -- that is how one row silently becomes a different size from another.
     expect(longRow.style.height).toBe("");
     expect(shortRow.style.height).toBe("");
-    // The model line's no-wrap contract holds for BOTH, not just the long one.
-    for (const m of [LONG_MODEL, SHORT_MODEL]) {
-      const line = screen.getByText(m);
-      expect(line.style.whiteSpace).toBe("nowrap");
-      expect(line.style.overflow).toBe("hidden");
-    }
+    // Both rows expose their model via the tooltip, and neither lays it out --
+    // so row height cannot vary with model-id length, which was the original
+    // collision's mechanism.
+    expect(longRow).toHaveAttribute("title", expect.stringContaining(LONG_MODEL));
+    expect(shortRow).toHaveAttribute("title", expect.stringContaining(SHORT_MODEL));
+    expect(screen.queryByText(LONG_MODEL)).toBeNull();
   });
 
   it("the group SELECT IS GONE — and moving a chat is still reachable", async () => {
