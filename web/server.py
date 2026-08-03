@@ -5706,6 +5706,63 @@ async def create_chat_conversation(body: dict):
     return JSONResponse(conv)
 
 
+@app.post("/api/chat/root/validate")
+async def validate_chat_root(body: dict):
+    """Would a chat turn run in this folder? Answers WITHOUT creating anything.
+
+    Exists so the prompt can refuse a bad root AT THE CONTROL. A form that
+    prints its own rule and still lets the user submit the violation is worse
+    than one that never mentioned the rule -- it teaches them the rule is
+    decorative.
+    """
+    return JSONResponse(chat_runner.validate_root(body.get("root") or ""))
+
+
+@app.get("/api/chat/root/default")
+async def chat_root_default():
+    """Where a turn runs when no root is chosen -- for the prompt to DISPLAY.
+
+    A prompt dismissible into an unstated location is a silent default with a
+    dialog in front of it. Resolved through app_paths, never a literal.
+    """
+    return JSONResponse({"path": chat_runner.default_root_display()})
+
+
+@app.put("/api/chat/conversations/{conversation_id}/root")
+async def set_chat_conversation_root(conversation_id: str, body: dict):
+    """Record this conversation's working root AND that it was asked.
+
+    RETURNS THE ERROR RATHER THAN SWALLOWING IT. This write decides where a
+    person's transcripts live, and the dialog must never close on a write that
+    did not land -- the one-shot-copy defect found in the rig today was exactly
+    that shape, where the visible symptom was "it didn't turn green" and the
+    real cost was a credential lost forever.
+    """
+    store = _chat()
+    if await asyncio.to_thread(store.get_conversation, conversation_id) is None:
+        return JSONResponse({"error": "unknown conversation"}, status_code=404)
+
+    choice = (body.get("choice") or "").strip()
+    root = body.get("root")
+
+    # Validated HERE TOO, not only in the UI. The control refusing early is a
+    # courtesy to the user; the server refusing is the actual guarantee, and a
+    # client that skips the dialog must not be able to store an unusable root.
+    if choice == "custom":
+        verdict = chat_runner.validate_root(root or "")
+        if not verdict["ok"]:
+            return JSONResponse({"error": verdict["error"]}, status_code=400)
+        root = verdict["resolved"]
+
+    try:
+        await asyncio.to_thread(store.set_conversation_root, conversation_id, root, choice)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    conv = await asyncio.to_thread(store.get_conversation, conversation_id)
+    return JSONResponse(conv)
+
+
 @app.get("/api/chat/conversations/{conversation_id}")
 async def get_chat_conversation(conversation_id: str):
     """A conversation and its full history — the 'serve up their history' ask."""

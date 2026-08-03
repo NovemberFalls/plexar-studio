@@ -136,6 +136,86 @@ def chat_workspace(conversation_root: Optional[str] = None) -> str:
     return str(default)
 
 
+def validate_root(configured: str) -> dict:
+    """Can a chat turn run in *configured*? Answered WITHOUT creating anything.
+
+    Returns ``{"ok": bool, "resolved": str|None, "error": str|None}``.
+
+    WHY THIS EXISTS SEPARATELY FROM `_usable_root`: the control that asks the
+    user for a root has to refuse a bad one AT THE CONTROL, not at the write.
+    A form that prints its own rule and still lets you submit the violation is
+    worse than one that never mentioned the rule -- it teaches the user the
+    rule is decorative. So this is the check the dialog runs while the user is
+    still looking at it, and it is deliberately NON-DESTRUCTIVE: validating a
+    path the user is halfway through typing must not litter the filesystem with
+    directories they never chose.
+
+    `_usable_root` stays the authority at turn time and still creates and
+    probes. The two are not redundant: this one answers "would that work?", the
+    other answers "make it work or fall back". A single function trying to do
+    both would either create on validation or fail to create on use.
+    """
+    raw = (configured or "").strip()
+    if not raw:
+        return {"ok": False, "resolved": None, "error": "Choose a folder."}
+
+    try:
+        candidate = Path(raw).expanduser()
+    except Exception:
+        return {"ok": False, "resolved": None, "error": "That is not a valid path."}
+    if not candidate.is_absolute():
+        return {"ok": False, "resolved": None,
+                "error": "Use a full path, not a relative one."}
+
+    # STUDIO'S OWN DATA DIRECTORY IS NOT A WORKING ROOT, and neither is the
+    # rig's. A chat turn runs a coding agent with the user's privileges;
+    # pointing it at the directory holding chat.sqlite3, usage.sqlite3 and the
+    # provider key means an ordinary "tidy up this folder" turn can reach the
+    # application's own state. Refused at the control rather than survived at
+    # runtime.
+    try:
+        data_dir = app_paths.data_dir().resolve()
+    except Exception:
+        data_dir = None
+    forbidden = [p for p in (data_dir, Path.home() / app_paths.NEW_DIR_NAME) if p]
+    for bad in forbidden:
+        try:
+            resolved_candidate = candidate.resolve()
+            if resolved_candidate == bad or bad in resolved_candidate.parents \
+                    or resolved_candidate in bad.parents:
+                return {"ok": False, "resolved": None,
+                        "error": f"That folder holds application data ({bad}). "
+                                 "Pick a different one."}
+        except Exception:
+            pass
+
+    if candidate.exists():
+        if not candidate.is_dir():
+            return {"ok": False, "resolved": None, "error": "That is a file, not a folder."}
+        if not os.access(str(candidate), os.W_OK):
+            return {"ok": False, "resolved": None, "error": "That folder is not writable."}
+        return {"ok": True, "resolved": str(candidate), "error": None}
+
+    parent = candidate.parent
+    if not parent.is_dir():
+        return {"ok": False, "resolved": None,
+                "error": f"{parent} does not exist, so that folder cannot be created."}
+    if not os.access(str(parent), os.W_OK):
+        return {"ok": False, "resolved": None,
+                "error": f"{parent} is not writable, so that folder cannot be created."}
+    return {"ok": True, "resolved": str(candidate), "error": None}
+
+
+def default_root_display() -> str:
+    """Where a turn runs when no root is chosen. THE DIALOG MUST SHOW THIS.
+
+    A prompt that can be dismissed into an UNSTATED location is the same defect
+    as a silent default with a dialog in front of it. Resolved through
+    app_paths so it is never a literal and always the truth.
+    """
+    return str(app_paths.data_dir() / "chat-workspace")
+
+
 def _usable_root(configured: str, default) -> Optional[str]:
     """Return *configured* as a usable directory, or None to fall back.
 

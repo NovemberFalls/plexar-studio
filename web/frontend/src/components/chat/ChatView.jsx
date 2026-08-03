@@ -93,11 +93,19 @@ async function api(path, opts) {
   return body;
 }
 
+import ChatRootPrompt from "./ChatRootPrompt";
+
 export default function ChatView() {
   const [groups, setGroups] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [thread, setThread] = useState(null);
+  // Conversations the user postponed with "Ask me later" IN THIS SESSION.
+  // Deliberately NOT persisted: "later" is not an answer, so it must not
+  // be stored as one -- `root_choice` stays NULL and the question returns
+  // on a future launch. Persisting it would silently become a fourth
+  // answer that the user never gave.
+  const [rootAskDeferred, setRootAskDeferred] = useState(() => new Set());
   const [draft, setDraft] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -139,6 +147,24 @@ export default function ChatView() {
   }, []);
 
   useEffect(() => { refreshLists(); }, [refreshLists]);
+
+  /** Record this conversation's root. THROWS on failure so the dialog stays open.
+   *
+   *  Deliberately re-throws rather than setting an error banner here: the
+   *  prompt owns the failure message because the prompt is what must not close.
+   *  A handler that swallowed this would close a dialog over a write that never
+   *  landed -- the user believing they chose a location they did not. */
+  const saveConversationRoot = useCallback(async (choice, root) => {
+    const updated = await api(`/conversations/${activeId}/root`, {
+      method: "PUT",
+      body: JSON.stringify({ choice, root }),
+    });
+    // Merge rather than refetch: the messages are unchanged and a refetch
+    // would flicker the transcript for a metadata write.
+    setThread((t) => (t ? { ...t, conversation: updated } : t));
+    setConversations((list) =>
+      list.map((c) => (c.id === updated.id ? { ...c, ...updated } : c)));
+  }, [activeId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -557,6 +583,23 @@ export default function ChatView() {
           <Empty />
         ) : (
           <>
+            {/* ASKED ONCE PER CONVERSATION. `root_choice` NULL is "never
+                asked" -- the state the migration deliberately does not
+                backfill. Answering any way at all makes it non-null and the
+                prompt never returns for this conversation. */}
+            {thread?.conversation
+              && thread.conversation.root_choice == null
+              && !rootAskDeferred.has(thread.conversation.id) ? (
+              <ChatRootPrompt
+                conversationTitle={thread.conversation.title}
+                onChoose={saveConversationRoot}
+                onCancel={() => setRootAskDeferred((prev) => {
+                  const next = new Set(prev);
+                  next.add(thread.conversation.id);
+                  return next;
+                })}
+              />
+            ) : null}
             <header style={{ ...headerRow, height: HEADER_H,
                              borderBottom: "1px solid var(--cc-border)" }}>
               <div style={{ minWidth: 0, flex: 1 }}>
