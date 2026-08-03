@@ -307,6 +307,23 @@ The two were consequently **never two views of one engine** (which would have ar
 
 ## Retired surfaces (do not resurrect; know where the behavior went)
 
+### Chat — REMOVED ENTIRELY, 2026-08-03
+
+The embedded Chat destination is gone: `components/chat/` (14 components), `chat_runner.py`, `chat_store.py`, `chat_boundary.py`, `chat_boundary_check.py`, every `/api/chat/*` route, the `chat` rail destination, the `chat.{root, root_choice}` settings keys, and 28 test modules. **This is a removal, not a deprecation** — no flag, no stub, no dead rail entry.
+
+**The reason, in the owner's words:** *"the embedded studio chat was a feature creep... the usage is all test."* Studio is a multi-session Claude Code multiplexer. Chat ran the same `claude` CLI its terminals already run, with a read-only tool set — **a strictly weaker version of the thing beside it**, and it competed with a separate product (`backlog/12`, `plexar-chat`) that owns that interaction properly.
+
+Two things kept deliberately, and neither is an oversight:
+
+- **`app_paths.STUDIO_MARKERS` still names `chat.sqlite3` and `chat-workspace`.** They are how the resolver recognises an existing Studio data directory and declines to adopt the RIG's `~/.plexar/`. Deleting those strings would change which directory a machine with real `usage.sqlite3` and `pricing.sqlite3` history resolves to. They are load-bearing for a module that has nothing to do with chat.
+- **`~/.plexar-studio/chat.sqlite3` and `chat-workspace/` are LEFT ON DISK, untouched.** They hold the user's own words. Removing a feature must not remove the record, and a dropped table is a one-way door. Nothing reads them now; nothing deletes them either.
+
+`voice_service.py`, `/api/voice/*` and the `voice.*` settings keys also survive the teardown — they are a separate subsystem that chat merely *called*. **They now have no renderer** (`VoiceButton.jsx` was chat's), so treat voice as backend-only-and-unsurfaced, exactly like the three broker breakdowns below: do not describe it as a shipped UI feature, and decide it on its own merits rather than by inheritance from this deletion.
+
+Also note `/v1/chat/completions` in `engine/EngineApi.jsx` is **not** this Chat — it is OpenAI's wire path on the inference provider.
+
+### Facelift casualties
+
 `LocalBrokerView.jsx`, `LaneQueuePanel.jsx` and `LocalMetricsPanel.jsx` were deleted in the facelift. Their behavior was re-homed: spill thresholds → `settings/SpillPolicy.jsx` (intent), live queue → `engine/EngineRequests.jsx` + `engine/EngineLive.jsx` (now), reporting → `components/reports/` (the past), models folder → `settings/ProvidersSettings.jsx`.
 
 **Two documented behaviors lost their renderer and have NOT been re-homed** — treat these as open, not as satisfied:
@@ -356,11 +373,7 @@ Server-backed store for every tunable value, added in the facelift's Phase 4. **
 - **`useSettings` hook:** fetch-once (settings are *intent*, never polled), dotted-path `get`/`setField`/`deleteField`, `Set`-based dirty tracking, prefix-aware `isDirty` (a group reports dirty when any leaf beneath it is), `save()` PUTs only the minimal patch, `revert()`, `reveal()`. On a `400` the server message surfaces and **the draft is kept**.
 - **Persisted but not yet enforced:** the server does not read `max_sessions`, `gpu_util`, `concurrency`, or `retention_days` — those remain env-var driven. Cards carrying them say so; do not imply a stored value is live.
 
-- **`chat.root` IS ENFORCED** (2026-08-02), and is listed separately from the line above precisely so it is not read as another stored-but-inert value. `chat_runner.chat_workspace()` reads it on **every turn**. `""` means the neutral workspace under `app_paths.data_dir()`; a path means that directory. **It resolves the default through `app_paths` and never computes a home-relative literal** — S14 made `app_paths` the single owner of where data lives, and a second owner is the defect it closed. A root that cannot be created or written **falls back to the default and LOGS the refused path**: a non-event that keeps working, never a turn that fails and never one that quietly runs somewhere else.
-  **Why the root matters more than it looks:** the CLI derives its session transcript path from its cwd (`~/.claude/projects/<slug-of-cwd>/`), so this setting decides where the **transcript** lands as well as which files a turn can see. That is one question, not two.
-  **`chat.root_choice` has THREE distinguishable answered-states plus never-asked** — `None` (never asked) / `"default"` / `"custom"` / `"declined"` — because a two-state boolean collapses *declined* into *not asked* and re-prompts a user who already said no. **The on-open prompt IS built** (2026-08-03, `ChatRootPrompt.jsx`): it displays the default location rather than implying one, every button records an answer, a failed save is shown and the dialog stays open, and an invalid root is refused at the control. `root_choice` is `None` on existing conversations because the migration deliberately does not backfill — that is "never asked", not a gap.
-
-- **NO NATIVE BROWSER DIALOGS.** `window.prompt`/`confirm`/`alert` are banned app-wide and a structural test pins their absence across every source file. WebView2 prefixes native dialogs with the page ORIGIN, so `window.prompt("Group name")` put **`localhost:8420 says:`** on screen — a desktop app showing the user its own HTTP port, which made a correct feature look like it was writing to a server. Use `chat/ChatDialog.jsx`, which also does the thing a native prompt structurally cannot: it AWAITS its submit, so a failure is rendered and the dialog stays open instead of having already closed.
+- **NO NATIVE BROWSER DIALOGS.** `window.prompt`/`confirm`/`alert` are banned app-wide and a structural test pins their absence across every source file (`__tests__/NoNativeDialogs.test.jsx`). WebView2 prefixes native dialogs with the page ORIGIN, so `window.prompt("Group name")` put **`localhost:8420 says:`** on screen — a desktop app showing the user its own HTTP port, which made a correct feature look like it was writing to a server. The rule survived the surface that produced it: `ChatDialog.jsx` was the in-app replacement and is gone with Chat, so **a UI needing a prompt or a confirm must build one** — and it must do the thing a native prompt structurally cannot: AWAIT its submit, so a failure is rendered and the dialog stays open instead of having already closed.
 
 ## Quick Resume Undo
 

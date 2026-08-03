@@ -126,6 +126,13 @@ understand you but cannot answer in your language" is acceptable.
 
 ## C. Two chat products, two trust models — do NOT unify the backend
 
+> **STATUS 2026-08-03: Studio's Chat was REMOVED ENTIRELY.** This section is
+> the reasoning that made the split correct, and the finding below is what
+> settled it — so it is kept verbatim rather than deleted. Read the "Studio
+> Chat" column as *what we measured before removing it*. The confinement
+> finding itself is NOT historical: it is a property of running the `claude`
+> CLI as the host user, which every Studio TERMINAL still does.
+
 **The finding this section exists for, verified live on 2026-08-02, not
 inferred:** Studio's Chat runs the `claude` CLI headlessly on the server. A
 neutral working directory plus `--add-dir` does **not** confine it. Asked to

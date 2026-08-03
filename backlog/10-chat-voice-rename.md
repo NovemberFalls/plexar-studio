@@ -3,8 +3,22 @@
 Opened 2026-07-31. Three programs bundled in one ask; they have different
 shapes and should not share a milestone.
 
-**Landed already:** `chat_store.py` + `/api/chat/*` (38 tests). Everything else
-below is planned, not built.
+> **CHAT IS REMOVED — 2026-08-03. Sections A, D, F and G are HISTORY, not a
+> backlog.** The embedded Chat surface was torn out entirely (owner: *"feature
+> creep... the usage is all test"*). Do not pick up a chat item from this file
+> as though it were pending work — the surface it would land on does not exist.
+> Chat as a product lives in `backlog/12` (`plexar-chat`), a separate codebase
+> with a separate trust model.
+>
+> **Sections B (voice), C (the Plexar rename), E (threat model) and H (secrets
+> hygiene) are UNAFFECTED and still live.** Note that voice now has no renderer
+> in Studio: `voice_service.py`, `/api/voice/*` and the `voice.*` settings keys
+> survived the teardown because they are a separate subsystem, but their only
+> consumer was chat's `VoiceButton.jsx`. Decide voice on its own merits.
+
+**Landed and then deleted:** `chat_store.py` + `/api/chat/*` (38 tests) shipped
+on 2026-07-31 and were removed on 2026-08-03. Everything else below marked
+"planned" was never built.
 
 ---
 

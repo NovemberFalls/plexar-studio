@@ -1,5 +1,11 @@
 # Cockpit — Chat surface
 
+> **THIS SURFACE NO LONGER EXISTS IN THIS REPO.** The embedded Chat destination
+> was removed entirely on 2026-08-03. This file is retained for ONE reason: it
+> is the visual spec `backlog/12` hands to **`plexar-chat`**, the separate
+> product. Nothing below describes anything you can open in Plexar Studio, and
+> nothing below is a task in this repo.
+
 Implementation handoff. Scope is **only** the Chat destination. Everything else in the app is unchanged.
 
 Canonical design: **6a** (main screen) and **6b** (artifact full screen) in `Cockpit Redesign.dc.html`.

@@ -10,9 +10,15 @@ be read cold, by someone with no memory of 2026-08-02.
 You are the **Plexar-Studio** context. Your root is `C:\Code\Personal\claude-cockpit`.
 
 Studio is the **desktop app a developer opens** — multi-session `claude`
-terminals, panes, bridges, usage/pricing/spend, and a Chat surface. It is a
-single-operator download bound to loopback. It is **not** the platform, not the
-rig, and not the hosted chat.
+terminals, panes, bridges, and usage/pricing/spend. It is a single-operator
+download bound to loopback. It is **not** the platform, not the rig, and not the
+hosted chat.
+
+**Studio had an embedded Chat surface and it was REMOVED ENTIRELY on
+2026-08-03** — owner's call: *"feature creep... the usage is all test."* It ran
+the same `claude` CLI the terminals run, with a read-only tool set, so it was a
+weaker copy of the thing beside it. The interaction belongs to Plexar-Chat.
+See CLAUDE.md ▸ Retired surfaces before proposing anything chat-shaped here.
 
 Three sibling contexts exist. You never open their trees:
 
@@ -101,11 +107,14 @@ thing, and three came from a context auditing a claim it did not own.
 - **Cost is frozen at ingest; prices are append-only.** No `UPDATE`, no `DELETE`
   in `pricing_store.py`.
 - **Studio is loopback-only. `[NEVER]` authentication, multi-tenancy or public
-  exposure, at any invite count** — its Chat runs the `claude` CLI as the host
-  user, and a neutral cwd plus `--add-dir` does **not** confine it (verified
-  live). The fix for a shared deployment is Plexar-Chat, not a hardened Studio.
-- **`chat_runner` and `GET /api/upload/{name}` must never be lifted into Chat.**
-  See `backlog/12`.
+  exposure, at any invite count.** The reasoning survives the surface that
+  prompted it: Studio runs the `claude` CLI as the host user with full tools,
+  and a neutral cwd plus `--add-dir` does **not** confine it (verified live).
+  That was true of the deleted Chat and is still true of every TERMINAL. The fix
+  for a shared deployment is Plexar-Chat, not a hardened Studio.
+- **`chat_runner` was the worked example and is now deleted**; the rule it
+  carried is unchanged — nothing with host-user tool access, and no
+  `GET /api/upload/{name}`, may be lifted into Plexar-Chat. See `backlog/12`.
 
 ## 7. Plans of record in this repo
 
@@ -139,8 +148,12 @@ say so in `§2`.
 
 ---
 
-**Last verified state, 2026-08-02:** a local model answers through Studio's Chat
-end to end (`local:plexar-vllm:qwen3-30b-instruct` → context 29,273 tokens
-against a 57,344 window). Backend 1291 green, frontend 1170 green, lint clean.
+**Last verified state, 2026-08-03 (chat teardown):** backend 1234 green,
+frontend 1126 green, lint clean, and the app boots and serves terminals — a real
+session was created, listed and deleted against a live server. The 2026-08-02
+local-model-through-Chat proof (`local:plexar-vllm:qwen3-30b-instruct`, 29,273
+tokens against a 57,344 window) is **historical**: that path went with Chat.
+Local models still back TERMINAL sessions via `pty_manager`, which is a
+different code path and was never chat's.
 `productName` is `Plexar-Studio` — **hyphen, never a space**: GitHub rewrites a
 space in an asset filename to a dot and silently 404s every updater URL.
