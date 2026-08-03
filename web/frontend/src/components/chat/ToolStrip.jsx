@@ -29,7 +29,7 @@ export default function ToolStrip({ calls }) {
   return (
     <div style={{ borderRadius: 8, border: "1px solid var(--cc-line)",
                   overflow: "hidden", maxWidth: 620 }}>
-      <button
+      <button className="hover-bg-elevated"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-label={`${calls.length} tool call${calls.length === 1 ? "" : "s"}`}

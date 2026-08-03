@@ -99,7 +99,7 @@ export default function ChatDialog({
 
         <div style={S.row}>
           <div style={{ flex: 1 }} />
-          <button
+          <button className="hover-bg-elevated"
             style={S.secondary}
             onClick={() => onCancel?.()}
             disabled={busy}
@@ -107,7 +107,7 @@ export default function ChatDialog({
           >
             Cancel
           </button>
-          <button
+          <button className="hover-bg-elevated"
             style={{
               ...S.primary,
               background: danger ? "var(--cc-error)" : "var(--cc-accent)",

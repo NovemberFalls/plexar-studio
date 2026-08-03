@@ -115,7 +115,7 @@ function Block({ seg }) {
         <Icon size={11} />
         <span style={{ flex: 1 }}>{seg.lang || "text"}</span>
         {isCsv && (
-          <button onClick={() => setAsTable((v) => !v)} style={toggle}>
+          <button className="hover-bg-elevated" onClick={() => setAsTable((v) => !v)} style={toggle}>
             {asTable ? "source" : "table"}
           </button>
         )}

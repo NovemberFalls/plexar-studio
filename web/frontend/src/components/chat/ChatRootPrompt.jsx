@@ -137,7 +137,7 @@ export default function ChatRootPrompt({ conversationTitle, onChoose, onCancel }
         ) : null}
 
         <div style={S.row}>
-          <button
+          <button className="hover-bg-elevated"
             style={S.secondary}
             disabled={saving}
             onClick={() => choose("declined", null)}
@@ -148,7 +148,7 @@ export default function ChatRootPrompt({ conversationTitle, onChoose, onCancel }
             Don&apos;t ask again — use the default
           </button>
           <div style={{ flex: 1 }} />
-          <button
+          <button className="hover-bg-elevated"
             style={S.secondary}
             disabled={saving}
             onClick={() => choose("default", null)}
@@ -156,7 +156,7 @@ export default function ChatRootPrompt({ conversationTitle, onChoose, onCancel }
           >
             Use the default
           </button>
-          <button
+          <button className="hover-bg-elevated"
             style={{ ...S.primary, opacity: customUsable ? 1 : 0.45 }}
             disabled={!customUsable}
             onClick={() => choose("custom", fresh.resolved)}
@@ -166,7 +166,7 @@ export default function ChatRootPrompt({ conversationTitle, onChoose, onCancel }
           </button>
         </div>
         {onCancel ? (
-          <button style={S.later} onClick={onCancel} data-testid="chat-root-later">
+          <button className="hover-bg-elevated" style={S.later} onClick={onCancel} data-testid="chat-root-later">
             Ask me later
           </button>
         ) : null}

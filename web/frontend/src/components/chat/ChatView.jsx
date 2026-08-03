@@ -544,11 +544,11 @@ export default function ChatView() {
             Chats
           </span>
           <Search size={13} style={{ color: "var(--cc-dim)" }} />
-          <button onClick={() => newConversation(ROOT.id)} style={bareBtn} title="New chat"
+          <button className="hover-bg-elevated" onClick={() => newConversation(ROOT.id)} style={bareBtn} title="New chat"
                   aria-label="New chat">
             <Plus size={14} style={{ color: "var(--cc-fg)" }} />
           </button>
-          <button onClick={newGroup} style={bareBtn} title="New group" aria-label="New group">
+          <button className="hover-bg-elevated" onClick={newGroup} style={bareBtn} title="New group" aria-label="New group">
             <FolderPlus size={13} style={{ color: "var(--cc-dim)" }} />
           </button>
         </div>
@@ -635,7 +635,7 @@ export default function ChatView() {
                   {conv?.model || "no model set"} · talks only
                 </div>
               </div>
-              <button
+              <button className="hover-bg-elevated"
                 onClick={() => setArtifactsOpen((v) => !v)}
                 title="Toggle artifacts panel"
                 aria-label="Toggle artifacts panel"
@@ -653,7 +653,7 @@ export default function ChatView() {
                  title="Export this conversation" download>
                 <Download size={13} style={{ color: "var(--cc-dim)" }} />
               </a>
-              <button onClick={() => removeConversation(activeId)} style={bareBtn}
+              <button className="hover-bg-elevated" onClick={() => removeConversation(activeId)} style={bareBtn}
                       title="Delete conversation" aria-label="Delete conversation">
                 <Trash2 size={13} style={{ color: "var(--cc-dim)" }} />
               </button>
@@ -802,7 +802,7 @@ export default function ChatView() {
                     style={{ display: "none" }}
                     onChange={(e) => { attachFiles(e.target.files); e.target.value = ""; }}
                   />
-                  <button
+                  <button className="hover-bg-elevated"
                     type="button"
                     onClick={() => paperclipInputRef.current?.click()}
                     aria-label="Attach a file"
@@ -811,7 +811,7 @@ export default function ChatView() {
                   >
                     <Paperclip size={13} />
                   </button>
-                  <button
+                  <button className="hover-bg-elevated"
                     type="button"
                     onClick={() => imageInputRef.current?.click()}
                     aria-label="Attach an image"
@@ -822,7 +822,7 @@ export default function ChatView() {
                   </button>
                   <VoiceButton />
                   <div style={{ position: "relative" }}>
-                    <button
+                    <button className="hover-bg-elevated"
                       type="button"
                       onClick={() => setMentionOpen((v) => !v)}
                       aria-label="Mention a file"
@@ -839,7 +839,7 @@ export default function ChatView() {
                     />
                   </div>
                   <div style={{ position: "relative" }}>
-                    <button
+                    <button className="hover-bg-elevated"
                       type="button"
                       onClick={() => setCommandsOpen((v) => !v)}
                       aria-label="Commands"
@@ -860,7 +860,7 @@ export default function ChatView() {
                     messages={thread?.messages}
                     onChange={changeModel}
                   />
-                  <button onClick={send} disabled={busy || !draft.trim()}
+                  <button className="hover-bg-elevated" onClick={send} disabled={busy || !draft.trim()}
                           aria-label="Send" title="Send"
                           style={{
                             width: 30, height: 30, borderRadius: "50%", border: "none",

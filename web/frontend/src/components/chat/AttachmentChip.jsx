@@ -116,7 +116,7 @@ export default function AttachmentChip({ attachment, onRemove }) {
         </span>
       )}
       {onRemove && (
-        <button
+        <button className="hover-color-red"
           type="button"
           onClick={onRemove}
           aria-label={`Remove ${name}`}

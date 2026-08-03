@@ -82,7 +82,7 @@ export default function VoiceButton() {
 
   return (
     <div style={{ position: "relative" }}>
-      <button
+      <button className="hover-bg-elevated"
         type="button"
         aria-disabled="true"
         aria-label="Voice input"
@@ -138,7 +138,7 @@ export default function VoiceButton() {
               )}
             </>
           )}
-          <button
+          <button className="hover-bg-elevated"
             type="button"
             onClick={() => setNoteOpen(false)}
             aria-label="Close"

@@ -147,8 +147,8 @@ export default function ChatModelPicker({ model, messages, onChange, disabled })
               <li>the reply style changes mid-thread.</li>
             </ul>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
-              <button onClick={() => setPending(null)} style={ghost}>Cancel</button>
-              <button onClick={confirm} style={primary}>Switch and re-inject</button>
+              <button className="hover-bg-elevated" onClick={() => setPending(null)} style={ghost}>Cancel</button>
+              <button className="hover-bg-elevated" onClick={confirm} style={primary}>Switch and re-inject</button>
             </div>
           </div>
         </div>
