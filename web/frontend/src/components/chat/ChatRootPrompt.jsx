@@ -123,7 +123,7 @@ export default function ChatRootPrompt({ conversationTitle, onChoose, onCancel }
           style={S.input}
           value={custom}
           onChange={(e) => setCustom(e.target.value)}
-          placeholder="C:\\Users\\you\\projects\\my-project"
+          placeholder={"C:\\Users\\you\\projects\\my-project"}
           aria-label="Custom folder"
           data-testid="chat-root-input"
           disabled={saving}
