@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Completed
 - [x] Linux/macOS PTY support (`unix_pty.py` via ptyprocess)
 - [x] Zoom controls (Ctrl+/-, Ctrl+mousewheel, Ctrl+0 reset)
-- [x] Chat UI with JSONL-powered conversation view (added in v1.1.0, reverted to terminal-only in v1.3.0)
+- [x] Chat UI — built twice, removed twice. A JSONL-powered conversation view arrived in v1.1.0 and was reverted to terminal-only in v1.3.0; a second, fuller Chat destination (`components/chat/`, `/api/chat/*`, its own SQLite store) was built in 2026-07/08 and **removed entirely on 2026-08-03**. Both times for the same reason: Studio is a terminal multiplexer, and an embedded chat is a weaker copy of the terminal beside it.
 - [x] History panel for browsing past sessions
 
 ### Backlog
@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Plugin system for custom session types
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
+
+## [Unreleased]
+
+### Removed
+- **Chat, entirely.** The embedded Chat destination is gone: `components/chat/` (14 components), `chat_runner.py`, `chat_store.py`, `chat_boundary.py`, `chat_boundary_check.py`, every `/api/chat/*` route, the `chat` rail destination, the `chat.{root, root_choice}` settings keys, and 28 test modules. This is a removal, not a deprecation — no flag and no stub. Chat ran the same `claude` CLI that Studio's terminals run, with a read-only tool set, so it was a strictly weaker version of the surface next to it; the interaction belongs to `plexar-chat`, a separate product with a separate trust model.
+- `resolve_chat_model_env` and the picker's `local:<provider>:<model>` id scheme, which existed only to route a Chat turn to a local engine. Terminals are unaffected — `pty_manager` has always used its own `<provider>::<model>` scheme and calls the shared local resolvers directly.
+
+### Preserved deliberately
+- **No user data was deleted.** `~/.plexar-studio/chat.sqlite3` and `chat-workspace/` are left exactly where they are. Removing a feature must not remove the record of what was said.
+- `app_paths.STUDIO_MARKERS` still names `chat.sqlite3` and `chat-workspace`. Those strings are how the data-directory resolver recognises an existing Studio install; removing them would change which directory a machine's usage and pricing history resolves to.
+- The app-wide ban on `window.prompt`/`confirm`/`alert` and its structural test, extracted to `__tests__/NoNativeDialogs.test.jsx`. The rule was pinned in a chat test file but was never chat's.
+- `voice_service.py`, `/api/voice/*` and the `voice.*` settings keys — a separate subsystem chat merely called. It now has **no UI renderer**; it is backend-only until something surfaces it.
 
 ## [1.3.9] - 2026-07-12
 
