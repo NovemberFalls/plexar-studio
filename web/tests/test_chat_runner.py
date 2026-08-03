@@ -212,6 +212,51 @@ async def test_a_turn_streams_deltas_then_reports_done(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_REROUTED_turn_reports_NO_cost_rather_than_the_harness_figure(monkeypatch):
+    """A local-provider turn must not publish an Anthropic-priced cost.
+
+    DISPLAY FIX, and its severity is stated so it does not inherit the alarm it
+    came from: nothing persists this field and no UI reads it today. The
+    evidence record was never at risk -- priced Anthropic traffic and free local
+    traffic live in separate tables and only `usage_events` has a money column,
+    while `local_runs` has none, so a local turn cannot move a spend cap.
+
+    It is fixed anyway because an unread wrong value is a trap for whoever later
+    decides to display it. The CLI prices its own harness usage from its
+    internal table and does not know its base URL was pointed at a local rig: a
+    turn served free by `qwen3-30b-instruct` reported $0.1466 against 28 real
+    prompt tokens at the rig.
+    """
+    def proc():
+        return _FakeProc(_lines(
+            {"type": "stream_event", "session_id": "s9",
+             "event": {"delta": {"type": "text_delta", "text": "hi"}}},
+            {"type": "result", "session_id": "s9", "total_cost_usd": 0.1466,
+             "is_error": False, "result": "hi"},
+        ))
+
+    overlay = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8760", "ANTHROPIC_AUTH_TOKEN": "k"}
+    rerouted = await _collect(monkeypatch, proc(), env_overlay=overlay)
+    native = await _collect(monkeypatch, proc())
+
+    r_done = [e for e in rerouted if e["type"] == "done"][0]
+    n_done = [e for e in native if e["type"] == "done"][0]
+
+    assert r_done["cost_usd"] is None, (
+        "a rerouted turn published the harness's Anthropic-priced figure"
+    )
+    # R10: the two must be DISTINGUISHABLE, not merely each plausible. Nulling
+    # cost unconditionally would also satisfy the assertion above while
+    # silently dropping the figure on real Anthropic turns, where it is true.
+    assert n_done["cost_usd"] == 0.1466, "a native turn lost its real cost"
+    assert r_done["cost_usd"] != n_done["cost_usd"]
+    # Everything else about the turn is unchanged -- this is a cost fix, not a
+    # rerouted-turns-are-different-events fix.
+    assert r_done["text"] == n_done["text"] == "hi"
+    assert r_done["session_id"] == n_done["session_id"] == "s9"
+
+
+@pytest.mark.asyncio
 async def test_a_failed_turn_reports_error_and_never_a_done(monkeypatch):
     """A non-zero exit must not be persisted as an empty assistant turn."""
     proc = _FakeProc([], rc=1, stderr=b"boom")

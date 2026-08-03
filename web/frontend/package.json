@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri:dev": "concurrently -k -n server,vite,tauri -c blue,green,magenta \"cd .. && python server.py\" \"vite\" \"npx @tauri-apps/cli dev\"",
-    "tauri:build": "vite build && npx @tauri-apps/cli build",
+    "verify:version": "node scripts/check-version-sources.mjs",
+    "tauri:build": "vite build && npm run verify:version && npx @tauri-apps/cli build",
     "prepare": "cd ../.. && node web/frontend/node_modules/husky/bin.js"
   },
   "dependencies": {

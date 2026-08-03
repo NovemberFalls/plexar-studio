@@ -428,7 +428,29 @@ async def stream_reply(
         # Reported per turn. Under a SUBSCRIPTION this is API-EQUIVALENT, not
         # money billed — spend_guard already draws that line and Chat must not
         # redraw it.
-        "cost_usd": result.get("total_cost_usd"),
+        #
+        # NULL ON A REROUTED TURN, and this is a DISPLAY fix rather than a data
+        # one — nothing persists this field and no UI reads it today. The CLI
+        # prices its own harness usage from its internal Anthropic table and
+        # DOES NOT KNOW its ANTHROPIC_BASE_URL was pointed at a local rig, so on
+        # a rerouted turn `total_cost_usd` is a real number about an imaginary
+        # transaction. Measured 2026-08-02: a local turn served free by
+        # `qwen3-30b-instruct` reported $0.1466 and 29,306 context tokens while
+        # the rig recorded 28 prompt tokens for the whole window.
+        #
+        # The evidence record was never at risk and that was checked before
+        # this line was written: priced Anthropic traffic and free local traffic
+        # live in SEPARATE TABLES and only `usage_events` has a money column —
+        # `local_runs` has none, so a local turn cannot move a spend cap because
+        # there is nowhere to put the money. `price_for()` also returns None for
+        # an unknown model rather than falling back to a Claude rate.
+        #
+        # So why fix it at all: an unread wrong value is a trap for whoever
+        # later decides to display it, and this codebase has repeatedly found a
+        # consumer starting to read a field nobody had checked. `env_overlay` is
+        # the exact discriminator — it is set precisely when this turn was
+        # rerouted off Anthropic.
+        "cost_usd": None if env_overlay else result.get("total_cost_usd"),
         "is_error": bool(result.get("is_error")),
         **_usage(result),
     }
