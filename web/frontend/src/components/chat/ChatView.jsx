@@ -858,7 +858,13 @@ function ConversationRow({ conversation: c, groups, selected, onSelect, onMove }
       onClick={onSelect}
       className="hover-bg-elevated"
       style={{
-        height: 56, display: "flex", alignItems: "center", gap: 10,
+        // DEFENCE IN DEPTH, kept even though block 1 fixes today's case: a
+        // FIXED height with no `overflow` means ANY future third line spills
+        // silently into the neighbouring row. That is the collapse-of-states
+        // shape in layout -- a row that is too tall and a row that is correct
+        // render identically until the content grows.
+        height: 56, overflow: "hidden",
+        display: "flex", alignItems: "center", gap: 10,
         padding: "0 14px", cursor: "pointer",
         background: selected ? "var(--cc-elev)" : "transparent",
         opacity: c.archived ? 0.6 : 1,
@@ -879,7 +885,17 @@ function ConversationRow({ conversation: c, groups, selected, onSelect, onMove }
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {c.message_count} message{c.message_count === 1 ? "" : "s"}
         </div>
-        <div style={{ ...LABEL, fontSize: 9.5 }}>{c.model || "no model"}</div>
+        {/* THE FIX. LABEL carries no overflow rules, so a real model id --
+            `local:plexar-vllm:qwen3-30b-instruct` -- wrapped to three lines,
+            overflowed the fixed 56px row and rendered ON TOP of its neighbours.
+            The two lines above always had these three properties; this one was
+            simply missed. `title` keeps the full value reachable: truncating a
+            value without making it recoverable is how a UI starts lying
+            quietly. The parent already sets `minWidth: 0`, without which
+            ellipsis on a flex child is inert. */}
+        <div style={{ ...LABEL, fontSize: 9.5, overflow: "hidden",
+                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+             title={c.model || "no model"}>{c.model || "no model"}</div>
       </div>
       <select
         value={c.group_id || ROOT.id}
@@ -887,7 +903,14 @@ function ConversationRow({ conversation: c, groups, selected, onSelect, onMove }
         onChange={(e) => onMove(e.target.value)}
         aria-label={`Move ${c.title}`}
         style={{ fontSize: 9, background: "transparent", color: "var(--cc-muted)",
-                 border: "1px solid var(--cc-border)", borderRadius: 5, maxWidth: 62 }}
+                 border: "1px solid var(--cc-border)", borderRadius: 5,
+                 // 62 cut this control's OWN label to "Ungroupe" -- a control
+                 // the user cannot read. 120 rather than a tight fit for
+                 // "Ungrouped" (~74px at this size) because group names are
+                 // USER-SUPPLIED and any tight number is the same defect at a
+                 // different threshold; ellipsis makes a long one degrade
+                 // instead of clipping mid-word.
+                 maxWidth: 120, textOverflow: "ellipsis" }}
       >
         <option value={ROOT.id}>{ROOT.name}</option>
         {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
