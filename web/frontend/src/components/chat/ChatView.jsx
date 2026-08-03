@@ -93,6 +93,7 @@ async function api(path, opts) {
   return body;
 }
 
+import ChatDialog from "./ChatDialog";
 import ChatRootPrompt from "./ChatRootPrompt";
 
 export default function ChatView() {
@@ -106,6 +107,11 @@ export default function ChatView() {
   // on a future launch. Persisting it would silently become a fourth
   // answer that the user never gave.
   const [rootAskDeferred, setRootAskDeferred] = useState(() => new Set());
+  // The in-app replacement for window.prompt/window.confirm. WebView2 renders
+  // native dialogs with the page ORIGIN prefixed -- "localhost:8420 says:" --
+  // so a desktop app was showing the user its own HTTP port, and a correct
+  // feature looked like it was writing to a server.
+  const [dialog, setDialog] = useState(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -213,14 +219,19 @@ export default function ChatView() {
     } catch (e) { setError(e.message); }
   };
 
-  const newGroup = async () => {
-    const name = window.prompt("Group name");
-    if (!name?.trim()) return;
-    try {
+  const newGroup = () => setDialog({
+    mode: "prompt",
+    title: "New group",
+    placeholder: "Group name",
+    confirmLabel: "Create",
+    // THROWS on failure rather than swallowing, so the dialog stays open and
+    // says why. A native prompt could not do this: it had already closed.
+    onSubmit: async (name) => {
       await api("/groups", { method: "POST", body: JSON.stringify({ name }) });
       await refreshLists();
-    } catch (e) { setError(e.message); }
-  };
+      setDialog(null);
+    },
+  });
 
   const moveConversation = async (conversationId, groupId) => {
     try {
@@ -245,14 +256,19 @@ export default function ChatView() {
     } catch (e) { setError(e.message); }
   };
 
-  const removeConversation = async (conversationId) => {
-    if (!window.confirm("Delete this conversation and all of its messages?")) return;
-    try {
+  const removeConversation = (conversationId) => setDialog({
+    mode: "confirm",
+    title: "Delete this conversation?",
+    message: "This removes the conversation and all of its messages. It cannot be undone.",
+    confirmLabel: "Delete",
+    danger: true,
+    onSubmit: async () => {
       await api(`/conversations/${conversationId}`, { method: "DELETE" });
       if (activeId === conversationId) setActiveId(null);
       await refreshLists();
-    } catch (e) { setError(e.message); }
-  };
+      setDialog(null);
+    },
+  });
 
   // Uploads ONE file to the existing /api/upload (one at a time, not a
   // batch) so the returned path maps unambiguously back to the file that
@@ -575,6 +591,13 @@ export default function ChatView() {
           <span>on this machine</span>
         </div>
       </aside>
+
+      {/* The in-app prompt/confirm. Rendered OUTSIDE the `activeId` branch on
+          purpose: "New group" is reachable with NO conversation selected, and
+          nesting it inside meant the button did nothing on an empty Chat --
+          the same "capability exists, no path reaches it" defect this surface
+          was just reported for. */}
+      {dialog ? <ChatDialog {...dialog} onCancel={() => setDialog(null)} /> : null}
 
       {/* ── Transcript · flex, min 560 · --cc-bg (§5, §6) ── */}
       <section style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex",

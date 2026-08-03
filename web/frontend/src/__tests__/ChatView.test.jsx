@@ -195,16 +195,25 @@ describe("ChatView", () => {
   });
 
   it("runs an existing handler from the commands popover — delete conversation", async () => {
+    // UPDATED 2026-08-03: the confirm step is now an IN-APP dialog, not
+    // `window.confirm`. WebView2 renders native dialogs with the page origin
+    // prefixed ("localhost:8420 says:"), which is what Len saw and reported.
+    // The guarantee under test is unchanged and still asserted: deleting is
+    // CONFIRMED before it happens, and only then does the DELETE fire.
     const calls = mockApi();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<ChatView />);
     fireEvent.click(await screen.findByText("First chat"));
     fireEvent.click(screen.getByLabelText("Commands"));
     fireEvent.click(await screen.findByText("/delete-chat"));
+
+    // Nothing is deleted until the user confirms -- assert the interlock, not
+    // just the outcome.
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    fireEvent.click(await screen.findByTestId("chat-dialog-confirm"));
+
     await waitFor(() => {
       expect(calls.some((c) => c.method === "DELETE" && c.url.includes("/conversations/cnv_1"))).toBe(true);
     });
-    confirmSpy.mockRestore();
   });
 
   it("mic stays disabled with the not_installed reason surfaced on hover and on click", async () => {
