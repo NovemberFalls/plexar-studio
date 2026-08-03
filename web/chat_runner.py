@@ -68,7 +68,7 @@ DEFAULT_TIMEOUT_S = 600.0
 _STREAM_LINE_LIMIT = 16 * 1024 * 1024
 
 
-def chat_workspace() -> str:
+def chat_workspace(conversation_root: Optional[str] = None) -> str:
     """A NEUTRAL working directory for chat turns.
 
     THE COST THIS AVOIDS, measured rather than assumed: the CLI injects the
@@ -104,6 +104,20 @@ def chat_workspace() -> str:
     seeing my files" should not have to re-derive it.
     """
     default = app_paths.data_dir() / "chat-workspace"
+
+    # PER-CONVERSATION FIRST. Len, asked directly: "per convo." The global
+    # `chat.root` is the DEFAULT a new conversation inherits; a conversation
+    # that has its own root overrides it. A conversation whose root is NULL has
+    # either never been asked or answered "default"/"declined", and all three
+    # correctly fall through to the global setting below -- the DISTINCTION
+    # between them lives in `root_choice` and is what the prompt reads, not
+    # something this function needs to know.
+    configured = (conversation_root or "").strip()
+    if configured:
+        resolved = _usable_root(configured, default)
+        if resolved is not None:
+            return resolved
+
     configured = ""
     try:
         import settings_store  # local: keeps module import order free of a cycle
@@ -114,26 +128,39 @@ def chat_workspace() -> str:
                        exc_info=True)
 
     if configured:
-        candidate = Path(configured).expanduser()
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            # WRITABILITY IS PROBED, NOT ASSUMED. `mkdir` succeeding on an
-            # existing directory says nothing about whether a turn can write in
-            # it, and the failure would otherwise surface as an unrelated CLI
-            # error several layers away.
-            probe = candidate / ".plexar-write-probe"
-            probe.write_text("", encoding="utf-8")
-            probe.unlink()
-            return str(candidate)
-        except Exception:
-            logger.warning(
-                "chat.root %s is not usable; falling back to %s. Chat still "
-                "works, and it is NOT running where the setting says.",
-                candidate, default, exc_info=True,
-            )
+        resolved = _usable_root(configured, default)
+        if resolved is not None:
+            return resolved
 
     default.mkdir(parents=True, exist_ok=True)
     return str(default)
+
+
+def _usable_root(configured: str, default) -> Optional[str]:
+    """Return *configured* as a usable directory, or None to fall back.
+
+    ONE implementation, shared by the per-conversation and global paths. Two
+    copies of "create it, probe it, fall back" would drift, and the half that
+    drifted would be the half nobody ran.
+    """
+    candidate = Path(configured).expanduser()
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        # WRITABILITY IS PROBED, NOT ASSUMED. `mkdir` succeeding on an
+        # existing directory says nothing about whether a turn can write in it,
+        # and the failure would otherwise surface as an unrelated CLI error
+        # several layers away.
+        probe = candidate / ".plexar-write-probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return str(candidate)
+    except Exception:
+        logger.warning(
+            "chat root %s is not usable; falling back to %s. Chat still works, "
+            "and it is NOT running where the setting says.",
+            candidate, default, exc_info=True,
+        )
+    return None
 
 
 class ChatRunnerError(RuntimeError):
@@ -298,6 +325,7 @@ async def stream_reply(
     allow_net: bool = False,
     cwd_scope: Optional[str] = None,
     env_overlay: Optional[dict] = None,
+    conversation_root: Optional[str] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> AsyncIterator[dict]:
     """Run one turn, yielding normalised events.
@@ -342,7 +370,12 @@ async def stream_reply(
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
             # Never the server's own directory — see chat_workspace().
-            cwd=chat_workspace(),
+            # THE SEAM: the per-conversation root has to reach the CHILD, not
+            # merely be resolved. A resolver returning the right string while
+            # the subprocess starts somewhere else is the exact
+            # helper-versus-wiring shape this codebase keeps finding, so the
+            # tests assert the `cwd` the subprocess was actually given.
+            cwd=chat_workspace(conversation_root),
             # THE 64KB CLIFF. asyncio's StreamReader defaults to a 64 KiB line
             # limit, and stream-json puts ONE EVENT PER LINE. A tool result
             # carrying a file — which is the entire point of a read-only tool

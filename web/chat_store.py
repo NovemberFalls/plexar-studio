@@ -147,6 +147,15 @@ class ChatStore:
                     -- reply can --resume rather than re-sending the whole
                     -- transcript every turn. NULL until the first reply.
                     harness_session_id TEXT,
+                    -- Per-conversation working root, and the record of whether
+                    -- the user was ever ASKED for it. Both NULL means "never
+                    -- asked", which is a real state and is never backfilled.
+                    -- Mirrored in _COLUMN_MIGRATIONS so an existing database
+                    -- reaches the same shape; a fresh one gets them here and
+                    -- never consults the migration list, which is exactly why
+                    -- the tests exercise the LEGACY path and not this one.
+                    root TEXT,
+                    root_choice TEXT,
                     FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE SET NULL
                 );
 
@@ -188,19 +197,78 @@ class ChatStore:
                 """
             )
 
+    #: Ordered, additive column migrations for `conversations`.
+    #:
+    #: APPEND ONLY. Reordering or removing an entry changes what an existing
+    #: database receives, which is how a migration list stops being a record of
+    #: what happened and becomes a wish about it.
+    #:
+    #: ADDITIVE ONLY -- no column is ever dropped or retyped here. An older
+    #: build pointed at a migrated file still runs, because it simply never
+    #: SELECTs the new column. That is what makes rollback "check out the
+    #: previous commit" rather than a restore.
+    #:
+    #: Every entry is guarded by a column-presence check, so applying this list
+    #: twice is a no-op regardless of `user_version`. The version below is for
+    #: ORDERING, not for idempotence -- a future migration that is NOT an
+    #: additive column (a data rewrite, a new table backfilled from an old one)
+    #: cannot be made idempotent by inspection and will need the version.
+    _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+        ("harness_session_id", "TEXT"),
+        # Per-conversation working root. Len, asked directly: "per convo."
+        # NULL is meaningful and is NEVER backfilled -- see _migrate.
+        ("root", "TEXT"),
+        ("root_choice", "TEXT"),
+        # Per-conversation working root. Len, asked directly: "per convo."
+        # NULL is meaningful and is NEVER backfilled -- see _migrate.
+    )
+
+    #: Bumped when `_COLUMN_MIGRATIONS` grows. There was NO schema version at
+    #: all before 2026-08-03 and exactly ONE migration entry, which is precisely
+    #: how a second becomes unorderable -- the rig's store hit this and it cost
+    #: a startup failure against exactly the databases that had history in them.
+    SCHEMA_VERSION = 1
+
     def _migrate(self) -> None:
         """Additively add columns to a store created by an older build.
 
         Never DROP and recreate: this database holds the user's conversations,
         and there is no upstream to re-ingest them from.
+
+        NO BACKFILL, and this is deliberate rather than lazy. Existing
+        conversations get NULL in `root`/`root_choice` and KEEP it. NULL is
+        "never asked", which is a state the app already models and can act on.
+        Inventing a root for a conversation that predates the setting would be a
+        guess written into the record and indistinguishable from an answer the
+        user actually gave.
+
+        ORDERING IS LOAD-BEARING AND IS WHY NOTHING HERE LIVES IN `_init_schema`.
+        That method runs `CREATE TABLE IF NOT EXISTS`, which is a NO-OP on a
+        database that already exists -- so a constraint or index naming a new
+        column, placed there, would reference a column that does not exist yet
+        and fail at startup against exactly the databases that have history,
+        while a fresh database came up fine. Invisible in development, fatal in
+        the field. Columns are added HERE, and anything depending on them goes
+        after this loop, never before it.
         """
         with self._lock, self._conn:
             cols = {r["name"] for r in
                     self._conn.execute("PRAGMA table_info(conversations)").fetchall()}
-            if "harness_session_id" not in cols:
+            for name, decl in self._COLUMN_MIGRATIONS:
+                if name in cols:
+                    continue
+                # Column names come from the frozen tuple above, never from
+                # input, so interpolation here cannot be reached by a caller.
                 self._conn.execute(
-                    "ALTER TABLE conversations ADD COLUMN harness_session_id TEXT")
-                logger.info("chat store: added conversations.harness_session_id")
+                    f"ALTER TABLE conversations ADD COLUMN {name} {decl}")
+                logger.info("chat store: added conversations.%s", name)
+
+            current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if current != self.SCHEMA_VERSION:
+                # PRAGMA does not accept a bound parameter for the value.
+                self._conn.execute(f"PRAGMA user_version = {int(self.SCHEMA_VERSION)}")
+                logger.info("chat store: schema version %s -> %s",
+                            current, self.SCHEMA_VERSION)
 
     def set_harness_session(self, conversation_id: str, session_id: str) -> None:
         """Record the harness session so the next turn can --resume it."""
@@ -208,6 +276,40 @@ class ChatStore:
             self._conn.execute(
                 "UPDATE conversations SET harness_session_id = ? WHERE id = ?",
                 (session_id, conversation_id),
+            )
+
+    #: The answers `root_choice` may hold. NULL (absent) is the fourth state --
+    #: "never asked" -- and is deliberately NOT in this set: it is the absence
+    #: of an answer, not an answer. Collapsing it into `declined` would re-ask a
+    #: user who already said no, and a question asked repeatedly gets answered
+    #: carelessly.
+    ROOT_CHOICES = frozenset({"default", "custom", "declined"})
+
+    def set_conversation_root(self, conversation_id: str, root: Optional[str],
+                              choice: str) -> None:
+        """Record this conversation's working root AND that it was asked.
+
+        Both are written together, always. Writing `root` without `choice`
+        would leave a conversation with a location and no record that anyone
+        chose it; writing `choice` without `root` on a "custom" answer would
+        leave it asked-and-unanswered. They are one fact.
+
+        `root` is None for "default" and "declined" -- both mean "use the global
+        default" -- and the two are still DISTINGUISHABLE because `choice`
+        differs. That distinction is the whole point of storing a choice at all.
+        """
+        if choice not in self.ROOT_CHOICES:
+            raise ValueError(
+                f"unknown root_choice {choice!r}; expected one of "
+                f"{sorted(self.ROOT_CHOICES)} (never-asked is NULL, not a value)")
+        if choice == "custom" and not (root or "").strip():
+            raise ValueError("root_choice 'custom' requires a root path")
+        if choice != "custom":
+            root = None
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE conversations SET root = ?, root_choice = ? WHERE id = ?",
+                (root, choice, conversation_id),
             )
 
     # -- groups ---------------------------------------------------------------

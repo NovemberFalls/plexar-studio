@@ -5956,6 +5956,10 @@ async def respond_in_chat(conversation_id: str, body: dict):
                 model=cli_model,
                 env_overlay=env_overlay,
                 session_id=session_id,
+                # Per-conversation working root ("per convo", Len). NULL on a
+                # conversation that has never been asked, which correctly falls
+                # through to the global `chat.root` default.
+                conversation_root=conv.get("root"),
                 # Read-only unless this conversation was explicitly opted in.
                 # Not yet settable from the UI, which is the honest state: the
                 # capability exists and nothing grants it by accident.
