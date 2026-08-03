@@ -93,6 +93,7 @@ async function api(path, opts) {
   return body;
 }
 
+import ChatContextMenu from "./ChatContextMenu";
 import ChatDialog from "./ChatDialog";
 import ChatRootPrompt from "./ChatRootPrompt";
 
@@ -112,6 +113,13 @@ export default function ChatView() {
   // so a desktop app was showing the user its own HTTP port, and a correct
   // feature looked like it was writing to a server.
   const [dialog, setDialog] = useState(null);
+  const [menu, setMenu] = useState(null);        // {x, y, items} | null
+  // The conversation currently being dragged. Held in state rather than read
+  // back from dataTransfer during dragover, because dataTransfer.getData() is
+  // BLANK during drag-over in every browser -- only the drop event may read it.
+  // Relying on it for the hover highlight would give a target that never lights.
+  const [dragConvId, setDragConvId] = useState(null);
+  const [dropGroupId, setDropGroupId] = useState(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -254,6 +262,47 @@ export default function ChatView() {
       setThread(await api(`/conversations/${activeId}`));
       refreshLists();
     } catch (e) { setError(e.message); }
+  };
+
+  /** Drop a conversation onto a group.
+   *
+   *  THE THREE OUTCOMES ARE DISTINCT AND ONLY ONE WRITES:
+   *    - onto a DIFFERENT group  -> PATCH, list refreshes
+   *    - onto the SAME group     -> NO-OP, and it must not look like a move
+   *    - onto nothing / no drag  -> NO-OP
+   *  A row that APPEARS to move and a row that IS reassigned are the same
+   *  picture, so the no-op paths return before touching the API rather than
+   *  issuing a PATCH that happens to change nothing.
+   */
+  const dropOnGroup = async (groupId) => {
+    const convId = dragConvId;
+    setDragConvId(null);
+    setDropGroupId(null);
+    if (!convId) return { moved: false, reason: "no-drag" };
+    const conv = conversations.find((c) => c.id === convId);
+    const currentGroup = conv?.group_id || ROOT.id;
+    if (currentGroup === groupId) return { moved: false, reason: "same-group" };
+    await moveConversation(convId, groupId);
+    return { moved: true, reason: null };
+  };
+
+  const openListMenu = (e, conversation) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const items = [
+      { label: "New group", run: newGroup },
+    ];
+    if (conversation) {
+      const target = [ROOT, ...groups].filter((g) => (conversation.group_id || ROOT.id) !== g.id);
+      items.push({ separator: true });
+      for (const g of target) {
+        items.push({ label: `Move to ${g.name}`, run: () => moveConversation(conversation.id, g.id) });
+      }
+      items.push({ separator: true });
+      items.push({ label: "Delete chat", danger: true,
+                   run: () => removeConversation(conversation.id) });
+    }
+    setMenu({ x: e.clientX, y: e.clientY, items });
   };
 
   const removeConversation = (conversationId) => setDialog({
@@ -557,7 +606,31 @@ export default function ChatView() {
           {[ROOT, ...groups].map((g) => {
             const items = byGroup.get(g.id) || [];
             return (
-              <div key={g.id}>
+              <div
+                key={g.id}
+                data-testid={`group-block-${g.id}`}
+                onContextMenu={(e) => openListMenu(e, null)}
+                onDragOver={(e) => {
+                  // Only claim the drag if it is OURS. The composer's file-drop
+                  // handlers already check `types.includes("Files")` before
+                  // preventDefault for the same reason -- a handler that claims
+                  // every drag silently swallows the others.
+                  if (!dragConvId) return;
+                  e.preventDefault();
+                  setDropGroupId(g.id);
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget)) setDropGroupId((d) => (d === g.id ? null : d));
+                }}
+                onDrop={(e) => { if (!dragConvId) return; e.preventDefault(); dropOnGroup(g.id); }}
+                style={{
+                  // The affordance for the new control, per S20: a drop target
+                  // that does not light up is a target the user cannot find.
+                  background: dropGroupId === g.id ? "var(--cc-elev)" : "transparent",
+                  outline: dropGroupId === g.id ? "1px solid var(--cc-accent)" : "none",
+                  borderRadius: 6,
+                }}
+              >
                 <div style={{ ...LABEL, display: "flex", justifyContent: "space-between",
                               padding: "10px 14px 5px" }}>
                   <span>{g.name}</span>
@@ -576,6 +649,9 @@ export default function ChatView() {
                     selected={c.id === activeId}
                     onSelect={() => setActiveId(c.id)}
                     onMove={(gid) => moveConversation(c.id, gid)}
+                    onContextMenu={(e) => openListMenu(e, c)}
+                    onDragStart={() => setDragConvId(c.id)}
+                    onDragEnd={() => { setDragConvId(null); setDropGroupId(null); }}
                   />
                 ))}
               </div>
@@ -598,6 +674,7 @@ export default function ChatView() {
           the same "capability exists, no path reaches it" defect this surface
           was just reported for. */}
       {dialog ? <ChatDialog {...dialog} onCancel={() => setDialog(null)} /> : null}
+      {menu ? <ChatContextMenu {...menu} onClose={() => setMenu(null)} /> : null}
 
       {/* ── Transcript · flex, min 560 · --cc-bg (§5, §6) ── */}
       <section style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex",
@@ -911,7 +988,8 @@ export default function ChatView() {
 }
 
 /** §4 — 56px row, three lines, brightness-encoded state. */
-function ConversationRow({ conversation: c, groups, selected, onSelect, onMove }) {
+function ConversationRow({ conversation: c, groups, selected, onSelect, onMove,
+                          onContextMenu, onDragStart, onDragEnd }) {
   const needsYou = c.attention === "needs_you";
   const unread = (c.unread_count || 0) > 0;
   // Brightness, never hue: a thing that needs you is --cc-fg, a resolved thing
@@ -922,6 +1000,17 @@ function ConversationRow({ conversation: c, groups, selected, onSelect, onMove }
   return (
     <div
       onClick={onSelect}
+      onContextMenu={onContextMenu}
+      draggable
+      onDragStart={(e) => {
+        // A payload is set even though the handler reads component state:
+        // without it some browsers refuse to start the drag at all.
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", c.id);
+        onDragStart?.(e);
+      }}
+      onDragEnd={onDragEnd}
+      data-testid={`conv-row-${c.id}`}
       className="hover-bg-elevated"
       style={{
         // DEFENCE IN DEPTH, kept even though block 1 fixes today's case: a
