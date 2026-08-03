@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import shutil
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import app_paths
@@ -84,10 +85,55 @@ def chat_workspace() -> str:
     Created on demand under the data dir so it is stable across restarts and a
     user can drop their own CLAUDE.md there deliberately, which is the honest
     way to get project context into Chat.
+
+    THE USER MAY NAME A DIFFERENT ROOT (`chat.root` in settings.json), and this
+    function is where that setting is ENFORCED -- it is read on every turn
+    rather than stored and admired. S8 had to fix a card with three controls the
+    server read none of; a stored path nobody honours is a worse lie than no
+    setting, because it looks like the user chose where their work happens.
+
+    IT RESOLVES THROUGH app_paths FOR THE DEFAULT AND NEVER RECOMPUTES ONE.
+    S14 made app_paths the single owner of where data lives, hours after a
+    second owner silently reverted a migration; a home-relative literal here
+    would be that defect again.
+
+    A BAD ROOT FALLS BACK AND SAYS SO. Same posture as app_paths' own migration
+    rule: an unreachable directory must be a non-event that keeps working, never
+    a turn that fails or -- worse -- one that quietly runs somewhere else. The
+    warning names the path, because the next person to ask "why is my chat not
+    seeing my files" should not have to re-derive it.
     """
-    path = app_paths.data_dir() / "chat-workspace"
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
+    default = app_paths.data_dir() / "chat-workspace"
+    configured = ""
+    try:
+        import settings_store  # local: keeps module import order free of a cycle
+        chat = settings_store.read_settings().get("chat") or {}
+        configured = (chat.get("root") or "").strip()
+    except Exception:
+        logger.warning("Could not read chat.root; using the default workspace",
+                       exc_info=True)
+
+    if configured:
+        candidate = Path(configured).expanduser()
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            # WRITABILITY IS PROBED, NOT ASSUMED. `mkdir` succeeding on an
+            # existing directory says nothing about whether a turn can write in
+            # it, and the failure would otherwise surface as an unrelated CLI
+            # error several layers away.
+            probe = candidate / ".plexar-write-probe"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+            return str(candidate)
+        except Exception:
+            logger.warning(
+                "chat.root %s is not usable; falling back to %s. Chat still "
+                "works, and it is NOT running where the setting says.",
+                candidate, default, exc_info=True,
+            )
+
+    default.mkdir(parents=True, exist_ok=True)
+    return str(default)
 
 
 class ChatRunnerError(RuntimeError):
