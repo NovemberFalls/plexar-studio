@@ -294,6 +294,11 @@ DEFAULT_SETTINGS = {
     #   the whole point: a user who declined has made a choice, and re-asking
     #   them is how a question gets answered carelessly.
     "chat": {"root": "", "root_choice": None},
+    # Terminal rendering. `no_color` is OFF by default and is the ONLY way to
+    # get a colourless terminal: `pty_manager` STRIPS an inherited NO_COLOR
+    # (launcher noise -- a GUI app's rendering must not depend on which shell
+    # started it) and re-applies it from here (intent).
+    "terminal": {"no_color": False},
     "claude_cli": {"binary_path": "", "detected_version": None},
     "sessions": {"model": None, "permission_mode": None, "effort": None, "fast": False, "max_sessions": 8},
     "appearance": {

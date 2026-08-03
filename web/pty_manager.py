@@ -761,6 +761,28 @@ class PtyManager:
         # 1. Remove Claude Code markers (avoids "inside another session" error)
         # 2. Remove PyInstaller artifacts (avoids DLL conflicts)
         blocked_keys = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+
+        # 3. STRIP INHERITED COLOUR SUPPRESSION. `NO_COLOR` is a real standard
+        #    and a legitimate preference for a CONSOLE program. This is not one:
+        #    Studio renders ANSI into xterm.js by construction, and the variable
+        #    it inherits belongs to whatever shell happened to launch the GUI.
+        #
+        #    MEASURED 2026-08-03, not hypothesised: `NO_COLOR=1` existed in the
+        #    PROCESS environment only -- not User, not Machine -- because Studio
+        #    was started from an agent shell that carried it. That shell had
+        #    already exited. The CLI correctly disabled colour, the terminal went
+        #    grey, and nothing anywhere was wrong except the inheritance.
+        #
+        #    STRIP RATHER THAN OVERRIDE, deliberately. Forcing `FORCE_COLOR=1`
+        #    would override the CLI's own detection in cases that have nothing to
+        #    do with this bug -- a redirected stream, a genuinely dumb terminal.
+        #    Removing an inherited signal that was never about this app leaves
+        #    the CLI free to decide correctly; forcing a value takes that away.
+        #
+        #    A GUI app's rendering must not be a function of its parent process:
+        #    the same launch, from two different shells, produced two different
+        #    terminals and neither the user nor the app could see why.
+        blocked_keys |= {"NO_COLOR"}
         if provider not in ("openrouter", "local"):
             # A machine-global OpenRouter/local config (e.g. exported in the
             # user's shell profile for other tools, or left behind by a
@@ -789,6 +811,26 @@ class PtyManager:
         # 10000-line scrollback. It affects only cockpit-spawned sessions; the
         # user's native-terminal TUI preference is left untouched.
         env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
+
+        # THE ESCAPE HATCH, and it must exist. A colourless terminal is a
+        # legitimate thing to want -- for accessibility, for a screen reader,
+        # for a preference. What it must never be is an ACCIDENT OF LAUNCH
+        # CONTEXT. So it is reachable from settings and nowhere else: an
+        # inherited NO_COLOR is discarded above as launcher noise, and a
+        # deliberate one is re-applied here as intent. The distinction between
+        # noise and intent is the whole fix.
+        try:
+            # NO local `import settings_store` here: the module is already
+            # imported at module scope (line 24), and a function-local import
+            # makes the name LOCAL for the ENTIRE function -- which turned the
+            # openrouter key lookup 120 lines above into an UnboundLocalError.
+            # Six existing tests caught it; the fix is to use the import that
+            # already exists rather than to add a second one.
+            if bool((settings_store.read_settings().get("terminal") or {}).get("no_color")):
+                env["NO_COLOR"] = "1"
+        except Exception:
+            logger.warning("Could not read terminal.no_color; leaving colour enabled",
+                           exc_info=True)
 
         # Suppress Claude Code's built-in auto-updater. With up to MAX_SESSIONS
         # (default 8) concurrent cockpit-spawned `claude` processes all holding
