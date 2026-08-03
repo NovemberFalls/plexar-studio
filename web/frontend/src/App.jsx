@@ -12,7 +12,6 @@ import FleetView from "./components/FleetView";
 import ProviderPicker from "./components/ProviderPicker";
 import EngineView from "./components/engine/EngineView";
 import ReportsView from "./components/reports/ReportsView";
-import ChatView from "./components/chat/ChatView";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
 import { computeEndEvents, formatEndEventToast, buildBusyTerminalIds, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 // Redesigned shell chrome (design handoff "Workspace — the approved shell").
@@ -54,7 +53,6 @@ function normalizeWorkdir(dir) {
 /** Command-bar title per rail destination. "projects" is absent by design — it
  *  opens the drawer over Workspace rather than replacing the content area. */
 const SECTION_TITLES = {
-  chat: "Chat",
   work: "Workspace",
   fleet: "Fleet",
   engine: "Engine",
@@ -1573,15 +1571,7 @@ export default function App() {
    *  drawer rather than a full-area section — the tree overlays the panes. */
   const selectSection = useCallback((section) => {
     if (section === "projects") {
-      // The tree is hidden in Chat, so a bare toggle there would read as a
-      // dead button: leave Chat and OPEN it. Everywhere else it keeps the old
-      // toggle feel.
-      if (activeSection === "chat") {
-        setActiveSection("work");
-        setSidebarOpen(true);
-      } else {
-        setSidebarOpen((v) => !v);
-      }
+      setSidebarOpen((v) => !v);
       return;
     }
     // Close the DEFAULTS drop-down on any destination change. It is the Phase-1
@@ -1592,7 +1582,7 @@ export default function App() {
     // survive leaving Workspace.
     setDefaultsOpen(false);
     setActiveSection((prev) => (prev === section ? "work" : section));
-  }, [activeSection]);
+  }, []);
 
   // Spill trigger for the interactive class, in seconds of predicted wait.
   // `null` in the broker payload means spill is DISABLED for the class — which
@@ -1962,7 +1952,6 @@ export default function App() {
               </div>
             )}
 
-            {activeSection !== "chat" && (
             <LaneStrip
               sessions={sessions}
               paneSlotById={paneSlotBySession}
@@ -1979,13 +1968,9 @@ export default function App() {
               onToggleSpill={toggleSpillEnabled}
               onOpenSpillDetails={() => setActiveSection("engine")}
             />
-            )}
 
           <div className="flex flex-1 min-h-0">
-            {/* Chat is a focused destination: no Projects tree beside it. The
-                tree files TERMINAL sessions into folders, which Chat has no
-                notion of, and it squeezes the thread into a column. */}
-            {sidebarOpen && activeSection !== "chat" && (
+            {sidebarOpen && (
               <div
                 className="flex flex-shrink-0"
                 style={{
@@ -2368,18 +2353,6 @@ export default function App() {
             {/* REPORTS owns "the past" (Phase 7). Clicking a session row obeys
                 the handoff's navigation rule — go to Workspace and focus that
                 session — rather than opening a trace view that does not exist. */}
-            {/* Chat owns the full content area, like Reports and Engine —
-                it is a destination, not an overlay on the Workspace grid. */}
-            {/* `flex-1 min-w-0` is load-bearing, not decoration: without it
-                ChatView is sized by its content inside the content flex row
-                and renders as a narrow column with dead space beside it.
-                Engine's wrapper has the same two classes for the same reason. */}
-            {activeSection === "chat" && (
-              <div className="flex-1 min-w-0 flex flex-col" style={{ background: "var(--cc-bg)" }}>
-                <ChatView />
-              </div>
-            )}
-
             {activeSection === "reports" && (
               <ReportsView
                 statusByTerminalId={reportsStatusByTerminal}
