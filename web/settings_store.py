@@ -264,36 +264,6 @@ DEFAULT_SETTINGS = {
         # beat an env var an operator deliberately set.
         "plexar": {"base_url": ""},
     },
-    # Chat's WORKING ROOT -- the directory every chat turn runs in.
-    #
-    # THIS IS ENFORCED, NOT DECORATIVE. `chat_runner.chat_workspace()` reads it
-    # on every turn. Said explicitly because S8 had to fix a settings card with
-    # three controls the server read NONE of, and a stored path nobody honours
-    # is a worse lie than no setting at all -- it looks like the user chose
-    # where their work happens.
-    #
-    # WHY THE ROOT MATTERS MORE THAN IT LOOKS: the CLI derives its own session
-    # transcript path from its cwd (`~/.claude/projects/<slug-of-cwd>/`), so
-    # this setting decides where the TRANSCRIPT lands as well as which files a
-    # turn can see. That is the connection behind Len's "where the transcription
-    # should be stored, or where it wants to declare root" -- they are one
-    # question, not two.
-    #
-    # `root`: "" means the neutral default under app_paths.data_dir(). A path
-    #   means that directory. NEVER a literal home-relative default computed
-    #   here -- S14 made app_paths the single owner of where data lives and a
-    #   second owner is the defect it just closed.
-    # `root_choice`: THREE DISTINGUISHABLE STATES, deliberately, because
-    #   "declined" must not render identically to "never asked":
-    #     None       -- never asked. The prompt should appear.
-    #     "default"  -- asked, and the user accepted the neutral workspace.
-    #     "custom"   -- asked, and the user named `root`.
-    #     "declined" -- asked, and the user dismissed it. Uses the default, and
-    #                   we KNOW they were asked, so we do not ask again.
-    #   A two-state boolean would collapse the last two, and the collapse is
-    #   the whole point: a user who declined has made a choice, and re-asking
-    #   them is how a question gets answered carelessly.
-    "chat": {"root": "", "root_choice": None},
     # Terminal rendering. `no_color` is OFF by default and is the ONLY way to
     # get a colourless terminal: `pty_manager` STRIPS an inherited NO_COLOR
     # (launcher noise -- a GUI app's rendering must not depend on which shell
