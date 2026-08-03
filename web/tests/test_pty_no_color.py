@@ -176,3 +176,45 @@ def test_stripping_NO_COLOR_does_not_disturb_the_rest_of_the_env(monkeypatch):
     assert "/usr/bin" in env.get("PATH", "")
     assert env.get("HOME") == "/home/x"
     assert env.get("TERM") == "xterm", "TERM is not ours to remove"
+
+# ── The defect the stubbed tests above could NOT see ───────────────────────
+
+def test_no_color_is_actually_reachable_in_DEFAULT_SETTINGS():
+    """THE ONE THAT WOULD HAVE CAUGHT IT.
+
+    Every test above monkeypatches `read_settings`, so none of them ever touch
+    `DEFAULT_SETTINGS` -- and `DEFAULT_SETTINGS` carried TWO `"terminal"` dict
+    literals. Python keeps the last, so `no_color` was silently discarded and
+    the escape hatch did not exist. The suite was green because it stubbed the
+    exact thing that was broken.
+
+    Found only by reading the live app's `/api/settings` after an install.
+    """
+    t = settings_store.DEFAULT_SETTINGS.get("terminal") or {}
+    assert "no_color" in t, (
+        "terminal.no_color is unreachable -- a duplicate 'terminal' key in "
+        "DEFAULT_SETTINGS would silently drop it"
+    )
+    assert t["no_color"] is False, "colour must be ON unless the user asks otherwise"
+
+
+def test_DEFAULT_SETTINGS_has_no_duplicate_top_level_keys():
+    """A dict literal with a repeated key is legal Python and silently lossy.
+
+    Structural, not a list of remembered keys: any future duplicate is caught,
+    not just this one.
+    """
+    import ast
+    import pathlib
+    src = pathlib.Path(settings_store.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(getattr(t, "id", None) == "DEFAULT_SETTINGS" for t in node.targets):
+            continue
+        keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+        dupes = {k for k in keys if keys.count(k) > 1}
+        assert not dupes, f"DEFAULT_SETTINGS has duplicate keys: {sorted(dupes)}"
+        return
+    raise AssertionError("DEFAULT_SETTINGS assignment not found")

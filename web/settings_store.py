@@ -298,7 +298,6 @@ DEFAULT_SETTINGS = {
     # get a colourless terminal: `pty_manager` STRIPS an inherited NO_COLOR
     # (launcher noise -- a GUI app's rendering must not depend on which shell
     # started it) and re-applies it from here (intent).
-    "terminal": {"no_color": False},
     "claude_cli": {"binary_path": "", "detected_version": None},
     "sessions": {"model": None, "permission_mode": None, "effort": None, "fast": False, "max_sessions": 8},
     "appearance": {
@@ -359,6 +358,12 @@ DEFAULT_SETTINGS = {
     # top-level section ALL-OR-NOTHING: without it, saving a terminal edit 400s
     # and silently discards every other page's pending edit in the same patch.
     "terminal": {
+        # STRIPPED from the child env when False, RE-APPLIED when True.
+        # An inherited NO_COLOR is launcher noise; a configured one is
+        # intent. See pty_manager. This key lived in a SECOND "terminal"
+        # dict literal until 2026-08-03 -- Python keeps the last, so it
+        # was silently discarded and the escape hatch did not exist.
+        "no_color": False,
         "font_family": "",       # "" = use the mono stack from index.css
         "font_size": 13,
         "scrollback": 10000,
