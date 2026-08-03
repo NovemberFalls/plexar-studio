@@ -38,6 +38,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -134,6 +135,20 @@ def chat_workspace(conversation_root: Optional[str] = None) -> str:
 
     default.mkdir(parents=True, exist_ok=True)
     return str(default)
+
+
+def default_group_root(name: str) -> str:
+    """Where a new project's folder goes when the user does not choose one.
+
+    THROUGH app_paths, never a literal -- one owner for where data lives (S14).
+    Projects sit beside the neutral chat workspace rather than inside it: a
+    project is a peer of "not in a project", not a child of it.
+
+    The name is SLUGGED rather than used raw. A project called `../../etc` or
+    `C:\Windows` must not become that directory, and a name is user input.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip()).strip("-.") or "project"
+    return str(app_paths.data_dir() / "projects" / slug[:64])
 
 
 def validate_root(configured: str) -> dict:

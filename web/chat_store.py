@@ -127,6 +127,11 @@ class ChatStore:
                     parent_id   TEXT,
                     created_at  TEXT NOT NULL,
                     sort_order  INTEGER NOT NULL DEFAULT 0,
+                    -- The project's folder. Chats in this group derive their
+                    -- working root from it. NULL = no folder yet, a real state
+                    -- and not an error. Mirrored in _COLUMN_MIGRATIONS for
+                    -- databases that predate it.
+                    root        TEXT,
                     FOREIGN KEY (parent_id) REFERENCES chat_groups(id) ON DELETE SET NULL
                 );
 
@@ -213,21 +218,34 @@ class ChatStore:
     #: ORDERING, not for idempotence -- a future migration that is NOT an
     #: additive column (a data rewrite, a new table backfilled from an old one)
     #: cannot be made idempotent by inspection and will need the version.
-    _COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
-        ("harness_session_id", "TEXT"),
-        # Per-conversation working root. Len, asked directly: "per convo."
-        # NULL is meaningful and is NEVER backfilled -- see _migrate.
-        ("root", "TEXT"),
-        ("root_choice", "TEXT"),
-        # Per-conversation working root. Len, asked directly: "per convo."
-        # NULL is meaningful and is NEVER backfilled -- see _migrate.
+    #: (table, column, declaration). TABLE-AWARE since 2026-08-03: this held
+    #: bare (column, decl) pairs and `_migrate` read `table_info(conversations)`
+    #: hardcoded, so the list could only ever describe ONE table. Adding a
+    #: column to `chat_groups` meant generalising it rather than bolting on a
+    #: second loop -- two migration mechanisms is how one of them stops running.
+    #:
+    #: (A duplicated comment block sat at the end of this tuple until now:
+    #: residue from a watch-to-fail restore that put the comment back without
+    #: its entries. Comment-only, so nothing behaved differently, but it was
+    #: dead text and is removed here rather than left to confuse a reader.)
+    _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+        ("conversations", "harness_session_id", "TEXT"),
+        # Per-conversation working root. NULL is meaningful and is NEVER
+        # backfilled -- see _migrate.
+        ("conversations", "root", "TEXT"),
+        ("conversations", "root_choice", "TEXT"),
+        ("chat_groups", "root", "TEXT"),
+        # A GROUP IS A PROJECT IS A FOLDER (DEC-35). The GROUP owns the
+        # directory; a chat in it derives its root from the group rather than
+        # being asked. NULL means "no folder yet" -- a real state for any group
+        # created before this, and never backfilled with a guess.
     )
 
     #: Bumped when `_COLUMN_MIGRATIONS` grows. There was NO schema version at
     #: all before 2026-08-03 and exactly ONE migration entry, which is precisely
     #: how a second becomes unorderable -- the rig's store hit this and it cost
     #: a startup failure against exactly the databases that had history in them.
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def _migrate(self) -> None:
         """Additively add columns to a store created by an older build.
@@ -252,16 +270,20 @@ class ChatStore:
         after this loop, never before it.
         """
         with self._lock, self._conn:
-            cols = {r["name"] for r in
-                    self._conn.execute("PRAGMA table_info(conversations)").fetchall()}
-            for name, decl in self._COLUMN_MIGRATIONS:
-                if name in cols:
+            cols_by_table: dict[str, set[str]] = {}
+            for table, name, decl in self._COLUMN_MIGRATIONS:
+                if table not in cols_by_table:
+                    cols_by_table[table] = {
+                        r["name"] for r in
+                        self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if name in cols_by_table[table]:
                     continue
-                # Column names come from the frozen tuple above, never from
-                # input, so interpolation here cannot be reached by a caller.
-                self._conn.execute(
-                    f"ALTER TABLE conversations ADD COLUMN {name} {decl}")
-                logger.info("chat store: added conversations.%s", name)
+                # Table and column names come from the frozen tuple above,
+                # never from input, so interpolation here cannot be reached by
+                # a caller.
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                cols_by_table[table].add(name)
+                logger.info("chat store: added %s.%s", table, name)
 
             current = self._conn.execute("PRAGMA user_version").fetchone()[0]
             if current != self.SCHEMA_VERSION:
@@ -314,7 +336,16 @@ class ChatStore:
 
     # -- groups ---------------------------------------------------------------
 
-    def create_group(self, name: str, parent_id: Optional[str] = None) -> dict:
+    def create_group(self, name: str, parent_id: Optional[str] = None,
+                     root: Optional[str] = None) -> dict:
+        """Create a project. `root` is its folder; None means "no folder yet".
+
+        THE STORE DOES NOT CHOOSE A PATH. Deciding where a project lives is a
+        filesystem question that belongs to whoever owns `app_paths` -- if this
+        method invented a default it would become a SECOND owner of where data
+        lives, which is the defect S14 closed hours ago. The caller passes a
+        resolved path or nothing.
+        """
         name = (name or "").strip()
         if not name:
             raise ValueError("group name must not be empty")
@@ -323,10 +354,25 @@ class ChatStore:
         gid = _new_id("grp")
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO chat_groups (id, name, parent_id, created_at) VALUES (?,?,?,?)",
-                (gid, name, parent_id, _now()),
+                "INSERT INTO chat_groups (id, name, parent_id, created_at, root) "
+                "VALUES (?,?,?,?,?)",
+                (gid, name, parent_id, _now(), (root or "").strip() or None),
             )
         return self.get_group(gid)
+
+    def set_group_root(self, group_id: str, root: Optional[str]) -> None:
+        """Give an EXISTING project a folder, or clear it.
+
+        Deliberately separate from `create_group` and deliberately does NOT
+        touch any chat: a group created before folders existed gains one
+        WITHOUT its chats moving. Moving files is its own step, gated on the
+        user asking, because it is user data.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE chat_groups SET root = ? WHERE id = ?",
+                ((root or "").strip() or None, group_id),
+            )
 
     def get_group(self, group_id: str) -> Optional[dict]:
         with self._lock:
