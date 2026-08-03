@@ -1,11 +1,21 @@
 /**
  * One message, with inline artifact rendering.
  *
- * DEPENDENCY-FREE ON PURPOSE. Cockpit ships no markdown or spreadsheet
- * renderer today, and `xlsx` + arbitrary HTML are the two open decisions in
- * backlog/10 §A. Rather than pull in a parser to pre-empt those, this renders
- * what can be rendered SAFELY with no new dependency and is explicit about the
- * rest.
+ * MARKDOWN IS RENDERED (2026-08-03); SPREADSHEETS AND RAW HTML STILL ARE NOT.
+ * This file said "dependency-free on purpose" until a user reported replies
+ * arriving as literal `**bold**` and raw pipe tables -- correct content in
+ * source-code form, on the surface read most. `react-markdown` + `remark-gfm`
+ * now render the prose between fences.
+ *
+ * THE DEPENDENCY WAS CHOSEN FOR SECURITY, NOT CONVENIENCE, and it is the same
+ * reasoning the HTML paragraph below already applies: react-markdown builds
+ * React ELEMENTS and never sets raw HTML, so model output cannot become markup.
+ * A hand-rolled renderer ends in string interpolation, and the first person who
+ * needs a table reaches for `dangerouslySetInnerHTML`. NO raw-HTML plugin is
+ * permitted -- no `rehype-raw`, no `allowDangerousHtml` -- and a test fails if
+ * either ever appears.
+ *
+ * `xlsx` remains an open decision in backlog/10 §A and is unchanged by this.
  *
  * HTML IS NOT EXECUTED. A model-authored `html` block rendered into the app's
  * own origin would be script execution against the user's session — a security
@@ -16,6 +26,8 @@
  * format most likely to be pasted in bulk.
  */
 
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useState } from "react";
 import { Table, Code, FileText } from "lucide-react";
 
@@ -98,11 +110,43 @@ function CsvTable({ text }) {
   );
 }
 
-function Block({ seg }) {
+function Block({ seg, markdown }) {
   const [asTable, setAsTable] = useState(true);
   if (seg.kind === "text") {
-    // Plain text, whitespace preserved — a paste keeps its shape.
-    return <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{seg.text}</div>;
+    // MARKDOWN, not plain text. Until 2026-08-03 this returned `seg.text`
+    // verbatim, so a reply came through as literal `**bold**` and a raw pipe
+    // table -- correct content, source-code presentation, on the surface a user
+    // reads most. `segment()` still owns fenced code above; this handles
+    // everything between the fences.
+    //
+    // WHY react-markdown AND NOT A HAND-ROLLED RENDERER, and the reason is
+    // security rather than convenience: this renders MODEL OUTPUT inside a
+    // desktop app. react-markdown builds React ELEMENTS and never sets raw
+    // HTML, so model text cannot become markup. A hand-rolled renderer ends in
+    // string interpolation, and the first person who needs a table reaches for
+    // `dangerouslySetInnerHTML` -- at which point model output is script
+    // execution in an Electron-class context. That door is closed by
+    // CONSTRUCTION here, not by everyone remembering.
+    //
+    // NO RAW-HTML PLUGIN, EVER. No `rehype-raw`, no `allowDangerousHtml`. A
+    // test fails if either appears anywhere in the tree; the whole value of
+    // "builds elements, never sets HTML" is that nobody adds an exception.
+    // MARKDOWN FOR THE ASSISTANT, VERBATIM FOR THE USER -- a deliberate split,
+    // not an oversight, and it resolves a real conflict rather than papering
+    // over it. Markdown COLLAPSES indentation by design, which broke the
+    // existing guarantee that "a paste keeps its shape" (a tested behaviour,
+    // and the reason someone pastes a log or a stack trace into chat at all).
+    // The user's own words are reproduced exactly; the model's output is
+    // formatted. Applying markdown to both would have silently reflowed the
+    // thing the user was asking about.
+    if (!markdown) {
+      return <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{seg.text}</div>;
+    }
+    return (
+      <div className="chat-md" style={{ wordBreak: "break-word" }}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{seg.text}</ReactMarkdown>
+      </div>
+    );
   }
 
   const isCsv = seg.lang === "csv";
@@ -152,7 +196,7 @@ export default function ChatMessage({ message }) {
         borderLeft: `2px solid ${mine ? "var(--cc-accent)" : "var(--cc-border)"}`,
         paddingLeft: 10,
       }}>
-        {segs.map((s, i) => <Block key={i} seg={s} />)}
+        {segs.map((s, i) => <Block key={i} seg={s} markdown={!mine} />)}
       </div>
     </div>
   );
