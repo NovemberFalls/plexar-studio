@@ -45,11 +45,14 @@ def _seed(dirpath, name="usage.sqlite3", content="rows"):
 # ---------------------------------------------------------------------------
 
 def test_an_existing_install_is_moved_and_its_data_arrives(isolated):
+    # DESTINATION CHANGED 2026-08-02: ~/.plexar -> ~/.plexar-studio. ~/.plexar
+    # belongs to the RIG after the R-E split; see test_app_paths_studio_split.py.
+    # The property under test is unchanged -- the data must ARRIVE.
     _seed(isolated / ".claude-cockpit")
 
     resolved = app_paths.data_dir()
 
-    assert resolved == isolated / ".plexar"
+    assert resolved == isolated / ".plexar-studio"
     assert (resolved / "usage.sqlite3").read_text(encoding="utf-8") == "rows"
 
 
@@ -64,7 +67,7 @@ def test_a_rollback_is_told_where_the_data_went(isolated):
 
     note = isolated / ".claude-cockpit" / app_paths.BREADCRUMB
     assert note.exists()
-    assert ".plexar" in note.read_text(encoding="utf-8")
+    assert ".plexar-studio" in note.read_text(encoding="utf-8")
     assert "Nothing was deleted" in note.read_text(encoding="utf-8")
 
 
@@ -90,8 +93,9 @@ def test_a_failed_move_keeps_using_the_old_directory(isolated, monkeypatch):
 
 
 def test_a_fresh_install_just_uses_the_new_name(isolated):
+    # DESTINATION CHANGED 2026-08-02 (see above).
     resolved = app_paths.data_dir()
-    assert resolved == isolated / ".plexar"
+    assert resolved == isolated / ".plexar-studio"
     assert resolved.is_dir()
     assert not (isolated / ".claude-cockpit").exists(), (
         "a fresh install must not manufacture the legacy directory"
@@ -99,12 +103,16 @@ def test_a_fresh_install_just_uses_the_new_name(isolated):
 
 
 def test_an_already_migrated_install_is_not_migrated_again(isolated):
+    # ~/.plexar seeded with usage.sqlite3 and no rig files is a PRE-SPLIT
+    # machine, so it is now migrated on to ~/.plexar-studio. What this test
+    # actually protects is unchanged and still asserted below: the live data
+    # wins, and ~/.claude-cockpit is left alone rather than re-migrated over it.
     _seed(isolated / ".plexar", content="new")
     _seed(isolated / ".claude-cockpit", content="old")
 
     resolved = app_paths.data_dir()
 
-    assert resolved == isolated / ".plexar"
+    assert resolved == isolated / ".plexar-studio"
     assert (resolved / "usage.sqlite3").read_text(encoding="utf-8") == "new", (
         "the new location wins; a second move would clobber live data"
     )
