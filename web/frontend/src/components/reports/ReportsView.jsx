@@ -95,7 +95,7 @@ const CARD = {
 
 import { NOT_BUILT_TABS as NOT_BUILT } from "./notBuilt.js";
 import TracesTab from "./TracesTab.jsx";
-import EngineLogs from "../engine/EngineLogs.jsx";
+import LogsTab from "./LogsTab.jsx";
 
 /**
  * The one thing Reports still has to say about tool calls, or null when the
@@ -723,9 +723,10 @@ export default function ReportsView({
     // no Claude usage this range does not mean no traces.
     body = <TracesTab />;
   } else if (tab === "logs") {
-    // S26: moved verbatim from Engine ▸ Logs. It is still an honest empty state
-    // until a log route exists; moving it did not invent a log stream.
-    body = <EngineLogs />;
+    // S26: moved from Engine ▸ Logs, and it now renders the REAL tail. The old
+    // panel claimed no log endpoint existed; GET /api/logs has existed all
+    // along. See LogsTab.jsx's header for the measurement.
+    body = <LogsTab />;
   } else if (tab === "local-engine") {
     // Sourced from Plexar, not from /api/usage/report — so it must NOT be
     // gated on that request's loading/error/empty state. A user with no Claude

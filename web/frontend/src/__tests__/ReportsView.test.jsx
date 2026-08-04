@@ -206,8 +206,11 @@ describe("ReportsView — tabs", () => {
        replaced ReportsView.tracesPointer.test.jsx. */
     await waitFor(() => expect(screen.queryByTestId("not-built-traces")).not.toBeInTheDocument());
 
+    /* S26-LOGS: this tab renders the REAL /api/logs tail now. The mock fetch here
+       serves the usage report only, so /api/logs 404s and the tab must say
+       "could not read" — NOT "empty", which would be a different claim. */
     fireEvent.click(screen.getByLabelText("Logs report"));
-    await waitFor(() => expect(screen.getByTestId("engine-logs-empty")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("logs-unreadable")).toBeInTheDocument());
 
     // Local engine is BUILT now, sourced from Plexar rather than from
     // /api/usage/report. With no Plexar answering (the fetch mock returns the
