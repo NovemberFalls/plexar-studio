@@ -25,7 +25,7 @@
  * Node + stdlib only, deliberately: this runs inside `npm run tauri:build`, on
  * any machine that can build the app, with no Python and no extra dependency.
  */
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -66,6 +66,45 @@ if (cargoVersion !== version) {
   );
 }
 
+// 2b. THE LOCK FILES. BLIND SPOT CLOSED 2026-08-03 — this check did not look at
+//     either of them, so a release could ship with both locks a version behind
+//     and nothing would say so. `npm ci` restores package-lock's version into
+//     node_modules metadata, and Cargo.lock is what a clean `cargo build`
+//     actually resolves. Two more places the number lives, both silent.
+//     NOTE the package NAME stays `claude-cockpit` in Cargo.lock — S25 froze
+//     every identifier on purpose. Only the version moves.
+const lockPath = join(FRONTEND, "package-lock.json");
+const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+if (lock.version !== version) {
+  fail(`package-lock.json root version is ${lock.version}, package.json is ${version}. Bump both.`);
+}
+if (lock.packages?.[""]?.version !== version) {
+  fail(
+    `package-lock.json packages[""].version is ${lock.packages?.[""]?.version}, package.json is ${version}.
+` +
+    `  There are TWO version fields in a lockfile and bumping only the root one is the easy miss.`
+  );
+}
+
+const cargoLock = readFileSync(join(FRONTEND, "src-tauri", "Cargo.lock"), "utf8");
+const lockEntry = /\[\[package\]\]\s+name = "claude-cockpit"\s+version = "([^"]+)"/.exec(cargoLock)?.[1];
+if (!lockEntry) {
+  fail(
+    `Cargo.lock has no [[package]] entry named "claude-cockpit".
+` +
+    `  Either the lock is missing or the crate was renamed — S25 froze that name
+` +
+    `  deliberately, so a rename here is a compatibility break, not a typo.`
+  );
+}
+if (lockEntry !== version) {
+  fail(
+    `Cargo.lock says claude-cockpit ${lockEntry}, package.json is ${version}.
+` +
+    `  Run \`cargo update -p claude-cockpit\` (or build once) after bumping Cargo.toml.`
+  );
+}
+
 // 3. THE ONE THAT CATCHES WHAT SHIPPED. `vite build` freezes package.json's
 //    version into the bundle as VITE_APP_VERSION. If dist/ predates the bump,
 //    the installer says one number and the UI displays another — the installer
@@ -99,4 +138,55 @@ if (!found) {
   );
 }
 
-console.log(`  version check OK — package.json, tauri.conf, Cargo.toml and dist/ all agree on ${version}`);
+// 4. FRESHNESS, NOT COINCIDENCE. BLIND SPOT CLOSED 2026-08-03.
+//    Check 3 is a STRING match, so it answers "does the bundle mention this
+//    number" and NOT "was this bundle built from this source". It catches
+//    "bumped without rebuilding". It does NOT catch "code changed without
+//    rebuilding" — measured on this very tree, dist built 19:59 while source
+//    was edited at 21:26, and check 3 passed happily because the version string
+//    was still in there.
+//
+//    A version string is evidence about a version. It is not evidence about
+//    code. So compare mtimes: no source file may be newer than the newest
+//    built asset. That is a real ordering claim, and it fails loudly.
+const newestAsset = readdirSync(assets)
+  .map((f) => statSync(join(assets, f)).mtimeMs)
+  .reduce((a, b) => Math.max(a, b), 0);
+
+const SRC_EXT = /\.(jsx?|tsx?|css|html)$/;
+let newestSrc = 0;
+let newestSrcFile = null;
+const walk = (dir) => {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === "node_modules" || e.name === "__tests__") continue;
+    const full = join(dir, e.name);
+    if (e.isDirectory()) walk(full);
+    else if (SRC_EXT.test(e.name)) {
+      const m = statSync(full).mtimeMs;
+      if (m > newestSrc) { newestSrc = m; newestSrcFile = full; }
+    }
+  }
+};
+walk(join(FRONTEND, "src"));
+for (const f of ["index.html", "vite.config.js"]) {
+  const full = join(FRONTEND, f);
+  if (existsSync(full)) {
+    const m = statSync(full).mtimeMs;
+    if (m > newestSrc) { newestSrc = m; newestSrcFile = full; }
+  }
+}
+
+if (newestSrc > newestAsset) {
+  const drift = Math.round((newestSrc - newestAsset) / 1000);
+  fail(
+    `dist/ is CONTENT-STALE: ${newestSrcFile} was modified ${drift}s AFTER the newest
+` +
+    `  built asset. The version string check above passed, which is exactly the trap —
+` +
+    `  it proves the bundle mentions ${version}, not that it was built from this source.
+` +
+    `  Re-run \`npm run build\` before packaging.`
+  );
+}
+
+console.log(`  version check OK — package.json, tauri.conf, Cargo.toml, both lock files and dist/ all agree on ${version}, and dist/ is newer than every source file`);
