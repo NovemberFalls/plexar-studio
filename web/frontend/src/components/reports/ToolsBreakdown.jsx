@@ -25,6 +25,24 @@ const CARD = {
   flexDirection: "column",
   overflow: "hidden",
   minWidth: 0,
+  // THE FOURTH DEFECT ON THIS PANEL (owner, twice: "MCP_Branchive_repo_file ...
+  // collided with 'ool calls have only been recorded'").
+  //
+  // ReportsView's body is a COLUMN FLEX BOX that scrolls. A flex item defaults
+  // to `flex-shrink: 1`, so this card was being COMPRESSED to the viewport
+  // instead of overflowing it and being scrolled to. Compressed, the rows
+  // region (which carried `minHeight: 0`, i.e. "you may collapse below your
+  // content") did exactly that, its rows overflowed their box, and because the
+  // footer note is a LATER SIBLING in the same stacking context the note
+  // painted on top of the last row. The longest tool name is bottom-most, so
+  // the collision is worst exactly where he saw it.
+  //
+  // The three earlier fixes here were defects OF A ROW (the bar clamp, the
+  // fabricated 0.0%, the 30 repeated captions). This is a defect OF THE BOX,
+  // which is why none of them touched it, and it is invisible to a short
+  // fixture -- five rows fit, so nothing is ever compressed. Do not remove
+  // this line; `ToolsBreakdown.footerCollision.test.jsx` fails if you do.
+  flexShrink: 0,
 };
 
 function ToolBar({ row, maxCalls }) {
@@ -143,8 +161,14 @@ export default function ToolsBreakdown({ byTool, note }) {
       </div>
 
       <div
+        data-testid="tools-rows"
         style={{
-          minHeight: 0,
+          // `minHeight: 0` USED TO BE HERE and it is half of the collision
+          // above: it is the instruction that permits this box to collapse
+          // below its 30 rows. The list is not independently scrollable -- the
+          // Reports body scrolls -- so this region must simply be as tall as
+          // its content and push the footer note down.
+          flexShrink: 0,
           padding: "12px 16px",
           display: "flex",
           flexDirection: "column",
