@@ -16,10 +16,10 @@ import {
   isUnservedSelection,
   UNSERVED_ROW_TAG,
 } from "../modelCatalog";
-// Lane math lives in utils/laneMath.js so the Workspace lane pressure meter,
-// this quick-glance pill, Engine > Live and the spill-policy control all read
-// the same arithmetic (see the handoff: "Conversions to implement once and
-// share"). Do not re-derive these locally.
+// Lane math lives in utils/laneMath.js so the Workspace lane meter, this
+// quick-glance pill and Engine > Live all read the same arithmetic (see the
+// handoff: "Conversions to implement once and share"). Do not re-derive these
+// locally. The spill-policy control was the fourth reader until 2026-08-03.
 import { fmtEta, laneLive } from "../utils/laneMath";
 // Permission modes + effort levels live in a plain module for the same reason
 // the model list lives in modelCatalog: four files had forked them and two had
