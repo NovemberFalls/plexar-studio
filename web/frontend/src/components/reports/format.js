@@ -112,6 +112,12 @@ export function fmtPct(n, missing = NOT_REPORTED) {
   if (isMissing(n)) return missing;
   const v = Number(n);
   const scaled = v > 1 ? v : v * 100;
+  // A nonzero share that rounds to 0.0% is a FABRICATED ZERO -- the one thing
+  // this file exists to forbid. Reports ▸ Tools showed six real tools, each
+  // with calls that demonstrably happened, all reading "0.0%". Say the figure
+  // is below the resolution shown; do not say it is nothing. A TRUE zero still
+  // renders 0.0%, because that is a measurement.
+  if (scaled !== 0 && Math.abs(scaled) < 0.05) return scaled > 0 ? "<0.1%" : ">-0.1%";
   return `${scaled.toFixed(1)}%`;
 }
 

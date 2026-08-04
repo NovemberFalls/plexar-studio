@@ -30,7 +30,16 @@ const CARD = {
 function ToolBar({ row, maxCalls }) {
   const name = row?.tool_name || "unknown tool";
   const calls = typeof row?.calls === "number" && Number.isFinite(row.calls) ? row.calls : null;
-  const width = maxCalls > 0 && calls !== null ? Math.max(1, (calls / maxCalls) * 100) : 0;
+  // MEASURED 2026-08-03 on the live 7d report: 30 tools, 3679 calls down to 1.
+  // The old `Math.max(1, ...)` floor put every row below ~1% of the leader --
+  // 23 of the 30 -- on the SAME 1% stub, so the whole bottom of the card drew
+  // as a column of identical ticks claiming figures that differ 37-fold are
+  // equal. A floor that lies is worse than a bar too small to see.
+  //
+  // So: no floor. A genuinely tiny share draws as a hairline, which is the
+  // truth, and `minWidth: 1px` in the style keeps it from vanishing entirely
+  // without overstating its size.
+  const width = maxCalls > 0 && calls !== null ? (calls / maxCalls) * 100 : 0;
 
   return (
     <div data-testid={`tool-row-${name}`} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -73,12 +82,20 @@ function ToolBar({ row, maxCalls }) {
       >
         <div
           data-testid={`tool-bar-${name}`}
-          style={{ width: `${width}%`, height: "100%", background: "var(--cc-accent)", borderRadius: 5 }}
+          style={{
+            width: `${width}%`,
+            minWidth: calls ? 1 : 0,
+            height: "100%",
+            background: "var(--cc-accent)",
+            borderRadius: 5,
+          }}
         />
       </div>
-      <div style={{ fontSize: 9, color: "var(--cc-muted)" }}>
-        {calls === 1 ? "1 call" : `${fmtCount(calls, "—")} calls`} of the tool calls in this range
-      </div>
+      {/* The per-row sentence that used to sit here -- "N calls of the tool
+          calls in this range" -- is GONE. It was ungrammatical, it restated
+          the count and the share already on the row, and repeating it under
+          all 30 rows at 9px is what turned the bottom of this card into
+          noise. The card's header already scopes everything to the range. */}
     </div>
   );
 }
