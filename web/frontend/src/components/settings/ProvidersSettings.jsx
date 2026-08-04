@@ -63,6 +63,25 @@ const CARD = {
   padding: 16,
 };
 
+/**
+ * The half-width pair. Three rows on this page are two blocks side by side:
+ * lane broker + spill policy, LM Studio + vLLM, Ollama + OpenRouter.
+ *
+ * It is one constant rather than three inline objects because the owner's
+ * instruction was about the PAGE, not about one row: nothing here earns the
+ * full column on its own, and a card that is wide for no reason reads as more
+ * important than its neighbours. `minWidth: 0` on the track is load-bearing —
+ * without it a grid child with its own horizontal scroller (spill policy) will
+ * refuse to shrink and push the page sideways instead.
+ */
+const PAIR = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: 16,
+  minWidth: 0,
+  alignItems: "start",
+};
+
 const LABEL = {
   fontSize: 10,
   fontWeight: 800,
@@ -1210,7 +1229,8 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
-      {/* ── Lane broker ───────────────────────────────── */}
+      {/* ── Lane broker + spill policy — half-width pair ─ */}
+      <div style={PAIR} data-testid="row-broker-spill">
       <div style={CARD} data-testid="card-lane-broker">
         <CardHeader icon={Route} token="var(--cc-accent)" name="Lane broker">
           <Pill
@@ -1316,8 +1336,12 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           is what makes a seconds threshold comprehensible. The pair is wider
           than the settings column, so it scrolls horizontally rather than
           squashing either half. */}
-      <div style={{ overflowX: "auto", overflowY: "hidden", minWidth: 0, paddingBottom: 2 }}>
+      <div
+        style={{ overflowX: "auto", overflowY: "hidden", minWidth: 0, paddingBottom: 2 }}
+        data-testid="card-spill-policy"
+      >
         <SpillPolicy provider={spillProvider} loading={providers === null} />
+      </div>
       </div>
 
       {/* ── Backends ──────────────────────────────────── */}
@@ -1325,7 +1349,8 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
         Backends behind the broker
       </SectionTitle>
 
-      {/* LM Studio */}
+      {/* LM Studio + vLLM — half-width pair */}
+      <div style={PAIR} data-testid="row-lmstudio-vllm">
       <div style={CARD} data-testid="card-lmstudio">
         <CardHeader icon={Boxes} token="var(--cc-type)" name="LM Studio">
           {reachabilityPill(
@@ -1529,9 +1554,10 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
             deliberately bypasses the draft store. */}
         <VllmModelsFolderSection provider={vllm} />
       </div>
+      </div>
 
-      {/* Ollama + OpenRouter — compact half-width pair */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, minWidth: 0 }}>
+      {/* Ollama + OpenRouter — half-width pair */}
+      <div style={PAIR} data-testid="row-ollama-openrouter">
         <div style={CARD} data-testid="card-ollama">
           <CardHeader icon={Layers} token="var(--cc-num)" name="Ollama">
             {reachabilityPill(
