@@ -51,11 +51,9 @@ import DiagnosticsSettings from "./DiagnosticsSettings.jsx";
  * source of truth for values the shell already owns.
  */
 const PAGES = {
-  general: null, // no page yet -- NotBuiltPanel handles it
   "claude-cli": ClaudeCliSettings,
   keys: KeysSettings,
   "session-defaults": SessionDefaultsSettings,
-  permissions: null,
   layout: null, // deliberately unbuilt -- see above
   terminal: TerminalSettings,
   theme: ThemeSettings,
@@ -69,10 +67,6 @@ const PAGES = {
 
 /** Page title + one-line description per section id (11px description line). */
 const PAGE_META = {
-  general: {
-    title: "General & startup",
-    description: "Workspace root, what Plexar Studio does on launch, and machine-wide behaviour.",
-  },
   providers: {
     title: "Providers & Endpoints",
     description: "Every model endpoint Plexar Studio can reach, its scope, and its health.",
@@ -88,10 +82,6 @@ const PAGE_META = {
   "session-defaults": {
     title: "Defaults & models",
     description: "The model, effort, and fast-mode a brand-new session starts with.",
-  },
-  permissions: {
-    title: "Permissions & safety",
-    description: "Default permission mode and the guardrails applied to new sessions.",
   },
   layout: {
     title: "Layout & panes",
@@ -136,14 +126,6 @@ const PAGE_META = {
  * `today: null` means it genuinely has no home yet — say so rather than invent one.
  */
 const NOT_BUILT = {
-  general: {
-    will: "Default workspace folder, restore-sessions-on-launch, max concurrent sessions, and the managed-service toggles (lane broker, vLLM).",
-    today: "environment variables on the server (COCKPIT_MANAGED_BROKER, COCKPIT_MANAGED_VLLM, MAX_SESSIONS).",
-  },
-  permissions: {
-    will: "Default permission mode for new sessions and which modes are allowed at all.",
-    today: "the DEFAULTS pill in the command bar and the per-session Inspector.",
-  },
   layout: {
     will: "Default pane count, lane strip visibility, inspector-open-by-default, and sidebar width.",
     today: "adjusted directly in the shell and remembered in browser storage — which is why this page may never need to exist. A second source of truth for values you already set by dragging is worse than none.",
@@ -173,7 +155,15 @@ export function middleEllipsize(text, max = 46) {
 
 function NotBuiltPanel({ sectionId }) {
   const meta = NOT_BUILT[sectionId];
-  const label = SETTINGS_SECTION_LABELS[sectionId] || sectionId;
+  // PAGE_META sits BETWEEN the nav label and the bare id, and it was missing.
+  // `SETTINGS_SECTION_LABELS` only knows ids the nav LISTS, so a deep-link-only
+  // section fell straight through to its raw id -- the panel read "layout is
+  // not built yet" while the breadcrumb two inches above it read "Layout &
+  // panes". That was latent until 2026-08-04: `permissions` was the nav-listed
+  // case everyone saw, and deleting it left the unlisted one as the ONLY
+  // reachable NotBuiltPanel. Fixed here rather than left as fallout of that
+  // deletion.
+  const label = SETTINGS_SECTION_LABELS[sectionId] || PAGE_META[sectionId]?.title || sectionId;
   return (
     <div
       className="cc-card"

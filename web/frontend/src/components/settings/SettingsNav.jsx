@@ -15,7 +15,14 @@ export const SETTINGS_GROUPS = [
   {
     label: "Machine",
     items: [
-      { id: "general", label: "General & startup" },
+      /* "General & startup" REMOVED 2026-08-04, owner ruling: *"General &
+         Startup Remove it."* It was genuine empty scaffolding -- `PAGES.general`
+         was `null`, so the pane only ever rendered NotBuiltPanel -- and every
+         value it advertised (COCKPIT_MANAGED_BROKER, COCKPIT_MANAGED_VLLM,
+         MAX_SESSIONS) is server-side environment, not a settings key, so the
+         page could not have been built as drawn without changing what the
+         server reads.
+         ⚠ IT WAS ALSO `DEFAULT_SETTINGS_SECTION`. See the constant below. */
       { id: "providers", label: "Providers & Endpoints" },
       { id: "claude-cli", label: "Claude CLI" },
       { id: "keys", label: "Keys & secrets" },
@@ -25,7 +32,14 @@ export const SETTINGS_GROUPS = [
     label: "Sessions",
     items: [
       { id: "session-defaults", label: "Defaults & models" },
-      { id: "permissions", label: "Permissions & safety" },
+      /* "Permissions & safety" REMOVED 2026-08-04, owner ruling: *"Permissions
+         & Safety remove it."* Same category as General: `PAGES.permissions` was
+         `null` and the pane rendered NotBuiltPanel only. The stronger reason is
+         the one the pane's own copy conceded -- permission mode is ALREADY
+         owned by three shipped surfaces (the DEFAULTS pill in the command bar,
+         the per-session Inspector, and Defaults & models). A fourth page would
+         have been a second source of truth for a value you set in three places
+         already, which is the same argument that retired "Layout & panes". */
       /* "Layout & panes" REMOVED, owner-confirmed. Pane count, sidebar width and
          which panels are open are all set by direct manipulation in the shell and
          already persist. A settings page for them would be a second source of
@@ -65,7 +79,25 @@ export const SETTINGS_SECTION_LABELS = SETTINGS_GROUPS.reduce((acc, group) => {
   return acc;
 }, {});
 
-export const DEFAULT_SETTINGS_SECTION = "general";
+/**
+ * The section Settings opens on, and the fallback for an unknown one.
+ *
+ * ⚠ THIS WAS `"general"`, AND `general` WAS DELETED ABOVE. Re-pointed in the
+ * SAME commit, because the failure mode is silent rather than loud:
+ * `SettingsView` resolves an unknown section BY FALLING BACK TO THIS CONSTANT,
+ * so a default naming a deleted section makes the fallback point at nothing
+ * too. Settings would open on an untitled, unlisted, un-highlighted frame every
+ * single launch and never throw.
+ *
+ * `providers` is the replacement because it is the first Machine item, it is a
+ * real built page, and it is the page the owner actually opens.
+ *
+ * PINNED BY `SettingsNav.defaultSection.test.jsx`, which was WATCHED TO FAIL
+ * 4/5 against this constant still reading `"general"`. It asserts the default
+ * resolves, NOT that it equals `providers` -- re-point it at any other deleted
+ * id and that file goes red again.
+ */
+export const DEFAULT_SETTINGS_SECTION = "providers";
 
 /** Case-insensitive label filter; groups with no surviving item are dropped. */
 export function filterSettingsGroups(query) {

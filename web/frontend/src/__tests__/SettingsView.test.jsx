@@ -101,12 +101,14 @@ describe("SettingsNav — deep-linkable ids", () => {
       "System",
     ]);
     expect(Object.keys(SETTINGS_SECTION_LABELS)).toEqual([
-      "general",
+      /* "general" and "permissions" REMOVED 2026-08-04 on the owner's ruling.
+         Both were `PAGES[id] === null` scaffolding. Note the settings.json KEY
+         `general.workspace_root` is UNRELATED and still live -- this list is
+         nav section ids, a different namespace that merely shared a word. */
       "providers",
       "claude-cli",
       "keys",
       "session-defaults",
-      "permissions",
       // "layout" REMOVED (owner-confirmed): pane count and sidebar width are set
       // by direct manipulation and already persist, so a page for them could only
       // ever disagree with what is on screen.
@@ -138,14 +140,14 @@ describe("SettingsNav — deep-linkable ids", () => {
   });
 
   it("renders the import/export footer button, disabled without a handler", () => {
-    render(<SettingsNav section="general" onSelectSection={() => {}} query="" />);
+    render(<SettingsNav section="providers" onSelectSection={() => {}} query="" />);
     expect(screen.getByText("Import / export settings…")).toBeDisabled();
   });
 });
 
 describe("SettingsView — page frame", () => {
   it("renders the breadcrumb, storage path, and Reveal button", async () => {
-    render(<SettingsView section="general" onSelectSection={() => {}} />);
+    render(<SettingsView section="diagnostics" onSelectSection={() => {}} />);
 
     expect(screen.getByText("Settings")).toBeInTheDocument();
     await waitFor(() => {
@@ -176,20 +178,20 @@ describe("SettingsView — page frame", () => {
     });
   });
 
-  /* This used to assert the not-built panel via `theme`, which was correct when
-     `providers` was the only real page. Twelve of the fourteen sections now have
-     one, so the case is pinned on a section that is GENUINELY unbuilt instead --
-     and `permissions` is the one still genuinely unbuilt. (`layout` was RETIRED
-     from the nav entirely rather than built -- see the id-contract test above.)
-     If someone builds Permissions, this test should fail and be retired along
-     with NotBuiltPanel, not edited to point at yet another section. */
+  /* RE-POINTED 2026-08-04. This case was pinned on `permissions`, which has now
+     been DELETED rather than built -- so the note it carried ("if someone builds
+     Permissions, retire this test") resolved the other way. `layout` is the last
+     id that is genuinely unbuilt: it is absent from the nav but still reachable
+     by deep link, which is exactly the case NotBuiltPanel exists to answer
+     honestly instead of dead-ending. If `layout` is ever deleted too, this test
+     and NotBuiltPanel retire together -- do NOT point it at a third section. */
   it("renders an honest not-built panel for a section that genuinely has no page", async () => {
-    render(<SettingsView section="permissions" onSelectSection={() => {}} providersPage={ProvidersStub} />);
+    render(<SettingsView section="layout" onSelectSection={() => {}} providersPage={ProvidersStub} />);
     await waitFor(() => {
-      expect(screen.getByText("Permissions & safety is not built yet")).toBeInTheDocument();
+      expect(screen.getByText("Layout & panes is not built yet")).toBeInTheDocument();
     });
     // Still names where the setting lives today rather than leaving a blank panel.
-    expect(screen.getByText(/DEFAULTS pill/)).toBeInTheDocument();
+    expect(screen.getByText(/remembered in browser storage/)).toBeInTheDocument();
     expect(screen.queryByTestId("providers-page")).not.toBeInTheDocument();
   });
 
@@ -219,7 +221,10 @@ describe("SettingsView — page frame", () => {
   });
 
   it("disables Save changes until something is dirty", async () => {
-    render(<SettingsView section="general" onSelectSection={() => {}} />);
+    // NOT `diagnostics`: that page has a "Save changes" string of its own, so
+    // the frame button stops being uniquely addressable. `keys` is a plain
+    // built page with no such collision.
+    render(<SettingsView section="keys" onSelectSection={() => {}} />);
     await waitFor(() => expect(screen.getByText("Save changes")).toBeDisabled());
   });
 
@@ -243,7 +248,7 @@ describe("SettingsView — page frame", () => {
   });
 
   it("filtering the header search filters the nav", async () => {
-    render(<SettingsView section="general" onSelectSection={() => {}} />);
+    render(<SettingsView section="diagnostics" onSelectSection={() => {}} />);
     await waitFor(() => expect(screen.getByText("Keybindings")).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "pricing" } });
@@ -331,7 +336,7 @@ describe("useSettings — dotted-path helpers and minimal patch", () => {
   });
 
   it("does not poll — settings are fetched exactly once", async () => {
-    render(<SettingsView section="general" onSelectSection={() => {}} />);
+    render(<SettingsView section="diagnostics" onSelectSection={() => {}} />);
     await waitFor(() => expect(screen.getByTitle(SETTINGS_PATH)).toBeInTheDocument());
     const gets = globalThis.fetch.mock.calls.filter((c) => c[0] === "/api/settings" && !c[1]);
     expect(gets).toHaveLength(1);
