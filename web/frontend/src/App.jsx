@@ -9,6 +9,10 @@ import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
 import BridgeModal from "./components/BridgeModal";
 import FleetView from "./components/FleetView";
+// One boundary PER full-area view. The root ErrorBoundary in main.jsx is
+// full-screen and never resets, so a fault in any one view took the whole
+// product AND then blamed every view visited afterwards. See ViewBoundary.
+import ViewBoundary from "./components/ViewBoundary";
 import ProviderPicker from "./components/ProviderPicker";
 import EngineView from "./components/engine/EngineView";
 import ReportsView from "./components/reports/ReportsView";
@@ -2015,13 +2019,15 @@ export default function App() {
                 and top bar stay visible so navigation never disappears. The
                 rail icons are the way in AND out (toggles, mutually exclusive). */}
             {showFleetView && (
-              <FleetView
-                sessions={sessions}
-                usageByTerminal={usageByTerminal}
-                dailyUsage={dailyUsage}
-                workflowsByTerminal={workflowsByTerminal}
-                onClose={() => setActiveSection("work")}
-              />
+              <ViewBoundary name="Fleet" resetKey={activeSection}>
+                <FleetView
+                  sessions={sessions}
+                  usageByTerminal={usageByTerminal}
+                  dailyUsage={dailyUsage}
+                  workflowsByTerminal={workflowsByTerminal}
+                  onClose={() => setActiveSection("work")}
+                />
+              </ViewBoundary>
             )}
             {/* ENGINE owns "now" (Phase 6). Replaces LocalBrokerView, whose
                 config moved to Settings and whose reporting moved to Reports.
@@ -2044,6 +2050,15 @@ export default function App() {
                 >
                   <ProviderPicker enabled={localEnabled} onSelect={setSelectedProvider} />
                 </div>
+                {/* The boundary wraps EngineView ONLY, deliberately — the
+                    ProviderPicker above it is the sole writer of
+                    `selectedProvider`, so taking it down with a failed Engine
+                    tab would silently kill every /api/local poll in App. The
+                    reset key carries the TAB as well as the section, because
+                    Engine's tabs switch without remounting: keyed on the
+                    section alone, a bad Logs tab would keep showing its error
+                    over Live, which is the latching bug one layer down. */}
+                <ViewBoundary name={`Engine ▸ ${engineTab}`} resetKey={`${activeSection}:${engineTab}`}>
                 <EngineView
                   active={showLocalBroker}
                   provider={selectedProvider}
@@ -2065,6 +2080,7 @@ export default function App() {
                     if (section === "settings" && subsection) setSettingsSection(subsection);
                   }}
                 />
+                </ViewBoundary>
               </div>
             )}
 
@@ -2344,25 +2360,39 @@ export default function App() {
                 terminals stay mounted so xterm and every WebSocket survive the
                 trip through Settings. */}
             {activeSection === "settings" && (
-              <SettingsView
-                section={settingsSection}
-                onSelectSection={setSettingsSection}
-              />
+              /* Keyed on the settings PAGE too — SettingsView swaps pages
+                 without remounting, so a section alone would latch a broken
+                 page's error over every other page. */
+              <ViewBoundary
+                name={`Settings ▸ ${settingsSection}`}
+                resetKey={`${activeSection}:${settingsSection}`}
+              >
+                <SettingsView
+                  section={settingsSection}
+                  onSelectSection={setSettingsSection}
+                />
+              </ViewBoundary>
             )}
 
             {/* REPORTS owns "the past" (Phase 7). Clicking a session row obeys
                 the handoff's navigation rule — go to Workspace and focus that
                 session — rather than opening a trace view that does not exist. */}
             {activeSection === "reports" && (
-              <ReportsView
-                statusByTerminalId={reportsStatusByTerminal}
-                onOpenTrace={(terminalId) => {
-                  const s = sessions.find((x) => x.terminalId === terminalId);
-                  if (!s) return;
-                  setActiveSection("work");
-                  selectSession(s.id);
-                }}
-              />
+              /* Reports owns its own tab state internally, so the key is the
+                 section. The fallback replaces the tab strip with it, and
+                 "Try again" is the way back — an honest dead end rather than
+                 a strip whose other tabs are also gone. */
+              <ViewBoundary name="Reports" resetKey={activeSection}>
+                <ReportsView
+                  statusByTerminalId={reportsStatusByTerminal}
+                  onOpenTrace={(terminalId) => {
+                    const s = sessions.find((x) => x.terminalId === terminalId);
+                    if (!s) return;
+                    setActiveSection("work");
+                    selectSession(s.id);
+                  }}
+                />
+              </ViewBoundary>
             )}
 
             {/* Inspector follows pane focus. Only in Workspace — the full-area
