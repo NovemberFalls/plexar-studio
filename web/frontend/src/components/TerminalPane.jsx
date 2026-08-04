@@ -13,6 +13,7 @@ import { useModelCatalog } from "../modelCatalog";
 import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
 import { buildXtermTheme } from "../utils/xtermTheme";
+import { diagnoseSocketFailure, WS_REFUSED, REFUSED_MESSAGE } from "../wsDiagnose";
 import "@xterm/xterm/css/xterm.css";
 
 const TerminalPane = forwardRef(function TerminalPane({
@@ -42,6 +43,10 @@ const TerminalPane = forwardRef(function TerminalPane({
   const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
+  // Sticky: once the server has told us this origin is not allowed, reconnecting
+  // cannot fix it. Without this the pane retries forever under a message claiming
+  // the backend is down — a false statement about the machine's state.
+  const originRefused = useRef(false);
   const pendingDataRef = useRef("");  // Batched WS data for xterm
   const writeRafRef = useRef(null);   // rAF handle for batched writes
   const searchRef = useRef(null);       // SearchAddon instance
@@ -143,6 +148,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   // Connect terminal to PTY via WebSocket
   const connectWs = useCallback((terminalId) => {
     if (!xtermRef.current) return;
+    if (originRefused.current) return;
 
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${terminalId}`);
@@ -195,6 +201,15 @@ const TerminalPane = forwardRef(function TerminalPane({
         }
         return;
       }
+
+      // A refused origin arrives as 1006, indistinguishable here from a dead
+      // backend — the server's 4403 never survives the failed handshake. Ask.
+      diagnoseSocketFailure().then((verdict) => {
+        if (verdict !== WS_REFUSED) return;
+        originRefused.current = true;
+        clearTimeout(reconnectTimer.current);
+        xtermRef.current?.write(REFUSED_MESSAGE);
+      });
 
       // Auto-reconnect: fast backoff (1s/2s/4s), then slow poll (10s) indefinitely
       const attempt = reconnectAttempts.current;

@@ -14,6 +14,7 @@ import {
 } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
 import { buildXtermTheme } from "../utils/xtermTheme";
+import { diagnoseSocketFailure, WS_REFUSED, REFUSED_MESSAGE } from "../wsDiagnose";
 import "@xterm/xterm/css/xterm.css";
 
 export default function PopoutTerminal({ terminalId, name, model }) {
@@ -28,6 +29,8 @@ export default function PopoutTerminal({ terminalId, name, model }) {
   const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
+  // Sticky refusal — see TerminalPane.
+  const originRefused = useRef(false);
   const pendingDataRef = useRef("");
   const writeRafRef = useRef(null);
   const connectWsRef = useRef(null);
@@ -360,6 +363,7 @@ export default function PopoutTerminal({ terminalId, name, model }) {
       // -------------------------------------------------------------------------
       const connectWs = (tid) => {
         if (!xtermRef.current) return;
+        if (originRefused.current) return;
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const wsBase = location.hostname === "localhost"
           ? `ws://localhost:8420`
@@ -397,6 +401,15 @@ export default function PopoutTerminal({ terminalId, name, model }) {
         };
 
         ws.onclose = (evt) => {
+          if (evt.code !== 1000 && evt.code !== 4004) {
+            // See TerminalPane: 1006 hides both "origin refused" and "backend down".
+            diagnoseSocketFailure().then((verdict) => {
+              if (verdict !== WS_REFUSED) return;
+              originRefused.current = true;
+              clearTimeout(reconnectTimer.current);
+              xtermRef.current?.write(REFUSED_MESSAGE);
+            });
+          }
           if (evt.code === 1000 || evt.code === 4004) {
             if (evt.code === 4004 && xtermRef.current) {
               xtermRef.current.write("\r\n\x1b[31m[Terminal no longer exists on server]\x1b[0m\r\n");

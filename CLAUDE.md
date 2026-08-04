@@ -134,11 +134,42 @@ second socket **supersedes the real pane** on a terminal already in use.
 — measured at the wire, and the opposite of what this section first claimed. Starlette
 converts a `close()` before `accept()` into a handshake rejection, so the `4403` code and
 its reason are **discarded, never delivered**. That is the stronger outcome and is kept on
-purpose: a refused origin never holds a live socket, not even for an instant. **The cost is
-real and is not fixed:** a browser reports a failed handshake as `onerror` + `onclose(1006)`,
-so the client cannot tell "origin refused" from "server down" and a stale bundle silently
-retries instead of saying "reload the app". Surfacing that is a frontend change (probe
-`/api/version` on a `1006` and read the `403`) and it is **open work, not shipped**.
+purpose: a refused origin never holds a live socket, not even for an instant. The cost is
+that a browser reports a failed handshake as `onerror` + `onclose(1006)` — byte-identical to
+a dead backend — so the close reason never reaches the user.
+
+**`wsDiagnose.js` closes that gap** (shipped 2026-08-04). On any abnormal close both panes
+probe `GET /api/version` — a **relative** path, so it travels the same route the page's
+other calls do, including the Vite proxy in dev — and a `403` means the server is UP and
+refusing this origin. That sets a sticky `originRefused` ref: `connectWs` returns early, the
+backoff timer is cleared, and the pane writes "reload the app". **The distinction matters
+because the remedies are opposite:** a dead backend is fixed by waiting, which is exactly
+what the panes already do forever; a refused origin never is. Anything other than a `403` is
+reported `unknown`, **NOT refused** — claiming an origin problem we did not observe is the
+same class of false statement as the "Backend down — waiting for recovery" message this
+replaced.
+
+## PID files are PER-INSTANCE, not per-directory
+
+`PtyManager._PID_TRACK_FILE` (`.cockpit-child-pids-<port>`) and `server.PID_FILE`
+(`.cockpit-<port>.pid`) are **port-scoped, and that is load-bearing.** Both used to be one
+fixed path shared by every server started from `web/`, which made the file a *cross-instance
+channel* rather than a per-instance record: a second server — a dev run, a test rig, a probe
+— read the LIVE server's tracked child PIDs and `cleanup_orphans()` **killed them at
+startup**. Starting a second copy killed the user's running sessions. Two servers cannot
+share a port, so the port is exactly the right discriminator.
+
+- **The child-PID path is resolved in `__init__`, not at class-definition time** — a class
+  constant would freeze whatever port the process first saw.
+- **`_migrate_legacy_pid_file` adopts the old unsuffixed file exactly once, and ONLY on the
+  default port.** Ignoring it would strand one upgrade's orphans forever; adopting it from a
+  *non-default* port would recreate the exact bug, because the process that wrote it may be
+  an older build that is **still running**. The default-port instance is the only one that
+  can safely claim to be its successor.
+- **Do not test this with `importlib.reload(server)`.** `PID_FILE` resolves at import, so
+  proving it varies needs a fresh import — and a reload detonates module state the rest of
+  the suite depends on (measured: green → 20 failed, 57 errors). `test_pid_file_scoping.py`
+  uses a subprocess.
 
 - **`Origin: null` is refused, never treated as absent.** A sandboxed iframe or `data:`
   document is a real browser origin that is definitively not ours.
