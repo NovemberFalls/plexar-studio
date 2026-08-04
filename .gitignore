@@ -48,6 +48,10 @@ web/dist/
 web/build/
 web/.cockpit.pid
 web/.cockpit-child-pids
+# Port-scoped since S17 — the unsuffixed names above are the legacy files the
+# default-port instance migrates once, so both shapes must stay ignored.
+web/.cockpit-*.pid
+web/.cockpit-child-pids-*
 
 # Reaper hygiene-tool incremental review cache
 .reaper/
