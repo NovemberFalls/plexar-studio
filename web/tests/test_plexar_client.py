@@ -13,6 +13,7 @@ defend.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -239,3 +240,48 @@ def test_gpus_honour_plexars_own_unavailable_envelope(monkeypatch):
     out = pc.fetch_gpus("http://x")
     assert out["available"] is False
     assert "nvidia-smi" in out["detail"]
+
+
+# ---------------------------------------------------------------------------
+# _refused — the detail is PROSE, and the contract says so
+# ---------------------------------------------------------------------------
+
+def _http_error(code: int, body: dict):
+    import io
+    import urllib.error
+    return urllib.error.HTTPError(
+        "http://x", code, "refused", {},
+        io.BytesIO(json.dumps(body).encode("utf-8")),
+    )
+
+
+def test_refusal_detail_is_always_a_string():
+    """MEASURED LIVE 2026-08-03: Plexar's 403 body is OpenAI-shaped, so
+    ``detail`` is an OBJECT (``{message, type, param, code}``), not a sentence.
+
+    ``unavailable(reason: str, detail: str)`` declares prose, and every consumer
+    of this envelope renders ``detail`` directly. Passing the dict through made
+    the annotation a lie and handed the browser something it cannot render --
+    which is what blanked Reports > Local engine. The message Plexar wrote is at
+    ``detail.message``; that is the sentence a human needs.
+    """
+    body = {"detail": {"message": "This key is a guest key. It cannot change anything on this rig.",
+                       "type": "permission_error", "param": None, "code": "forbidden"}}
+    out = pc._refused(_http_error(403, body))
+
+    assert out["reason"] == "forbidden"
+    assert isinstance(out["detail"], str), "an object cannot be rendered to a human"
+    assert "guest key" in out["detail"], "Plexar's own words must survive the trip"
+
+
+def test_refusal_detail_survives_a_shape_we_have_not_seen():
+    """An unrecognised body must still degrade to prose, never to a dict.
+
+    The failure this guards is not "Plexar sends objects" -- it is that ANY
+    unanticipated shape reaching a renderer as a raw value is a crash waiting
+    for the day the provider changes its error format again.
+    """
+    out = pc._refused(_http_error(403, {"detail": {"code": "forbidden"}}))
+    assert isinstance(out["detail"], str)
+    out = pc._refused(_http_error(400, {"error": ["a", "list"]}))
+    assert isinstance(out["detail"], str)

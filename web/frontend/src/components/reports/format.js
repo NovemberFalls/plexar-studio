@@ -484,3 +484,32 @@ export function csvFilename(range, generatedAt) {
   const stamp = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : new Date().toISOString().slice(0, 10);
   return `cockpit-usage-${range || "all"}-${stamp}.csv`;
 }
+
+/**
+ * A refusal is not a crash.
+ *
+ * `detail` is contracted to be prose (`plexar_client.unavailable(detail: str)`)
+ * and it was NOT: Plexar's refusals are OpenAI-shaped, so the field arrived as
+ * `{message, type, param, code}`. React will not render an object, so putting
+ * this straight into a `<p>` threw and blanked the whole tab -- the crash Len
+ * hit on 1.29.0. The server now sends prose, and this is the second lock:
+ * a provider changing its error shape must be able to make a message worse,
+ * never to take the tab away.
+ *
+ * A dropped detail would be worse than a wrong one -- an empty reason reads as
+ * "nothing was wrong" -- so an unparseable shape is stringified, not discarded.
+ */
+export function detailProse(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "string") return raw || null;
+  if (typeof raw === "object") {
+    for (const key of ["message", "detail", "error", "reason"]) {
+      if (typeof raw[key] === "string" && raw[key]) return raw[key];
+    }
+  }
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return String(raw);
+  }
+}

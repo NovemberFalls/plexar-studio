@@ -31,7 +31,7 @@
 
 import { useEffect, useState } from "react";
 
-import { DASH, fmtInt, isMissing, toPlexarRange } from "./format.js";
+import { DASH, detailProse, fmtInt, isMissing, toPlexarRange } from "./format.js";
 
 const CARD = {
   borderRadius: 12,
@@ -245,6 +245,29 @@ function figureValue(f) {
   return String(f.value);
 }
 
+/**
+ * The remedy depends on WHICH refusal, and they are opposite.
+ *
+ * "Check COCKPIT_PLEXAR_URL" is correct for a Plexar that never answered and
+ * actively wrong for one that answered and said no -- it sends the reader to
+ * fix the one thing demonstrably working. Same rule the model picker already
+ * follows for 401 vs 403.
+ */
+const UNAVAILABLE_TITLES = {
+  forbidden: "This key cannot read engine history",
+  unauthorized: "Plexar did not accept the credential",
+  bad_range: "Plexar refused that range",
+};
+
+const UNAVAILABLE_ACTIONS = {
+  unreachable:
+    "Local-engine reporting comes from Plexar. If it is running, check COCKPIT_PLEXAR_URL.",
+  forbidden:
+    "Engine and gateway totals cover the whole rig, so they cannot be narrowed to one guest identity. An owner key on this machine would read them; the credential itself is fine.",
+  unauthorized: "Set or correct COCKPIT_PLEXAR_KEY, then reopen this tab.",
+  bad_response: "Something answered on Plexar's address but did not speak its protocol.",
+};
+
 function Unavailable({ title, reason, action }) {
   return (
     <div style={{ ...CARD, padding: 18, maxWidth: 640 }}>
@@ -321,12 +344,12 @@ export default function LocalEnginePanel({ range }) {
   if (reports?.available !== true) {
     return (
       <Unavailable
-        title="No local engine history"
+        title={UNAVAILABLE_TITLES[reports?.reason] || "No local engine history"}
         reason={
-          reports?.detail ||
+          detailProse(reports?.detail) ||
           "Plexar is not answering, so there is no local-engine history to show."
         }
-        action="Local-engine reporting comes from Plexar. If it is running, check COCKPIT_PLEXAR_URL."
+        action={UNAVAILABLE_ACTIONS[reports?.reason] || UNAVAILABLE_ACTIONS.unreachable}
       />
     );
   }

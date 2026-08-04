@@ -372,3 +372,46 @@ describe("LocalEnginePanel — history", () => {
     ).toBeInTheDocument();
   });
 });
+
+/**
+ * The crash Len walked into on 1.29.0 (Reports ▸ Local engine, blank).
+ *
+ * MEASURED against the live rig 2026-08-03: every capability-gated Plexar route
+ * (`reports`, `gpus`, `timeseries`) answers 200 with
+ * `{available:false, reason:"forbidden", detail:{message,type,param,code}}` --
+ * this machine's key is a GUEST key. `detail` is therefore an OBJECT, and this
+ * panel put it straight into a `<p>`, which React refuses to render. The tab
+ * did not degrade; it threw.
+ *
+ * Two rules come out of it and both are pinned here:
+ *   1. the panel renders a REASON, never a payload -- a provider changing its
+ *      error shape must not be able to blank a tab;
+ *   2. `forbidden` and `unreachable` are different problems with opposite
+ *      remedies. "Check COCKPIT_PLEXAR_URL" is exactly wrong advice for a key
+ *      that reached Plexar and was told no.
+ */
+describe("LocalEnginePanel — a refusal is not a crash", () => {
+  const GUEST_DETAIL = {
+    message: "This key is a guest key. It can call the models that are currently serving and read its own usage, but it cannot change anything on this rig.",
+    type: "permission_error",
+    param: null,
+    code: "forbidden",
+  };
+
+  it("renders a structured refusal detail instead of throwing", async () => {
+    mockRoutes({
+      reports: { available: false, reason: "forbidden", detail: GUEST_DETAIL },
+    });
+    render(<LocalEnginePanel range="7d" />);
+    expect(await screen.findByText(/guest key/i)).toBeInTheDocument();
+  });
+
+  it("does not blame the address when the key was refused", async () => {
+    mockRoutes({
+      reports: { available: false, reason: "forbidden", detail: GUEST_DETAIL },
+    });
+    render(<LocalEnginePanel range="7d" />);
+    await screen.findByText(/guest key/i);
+    expect(screen.queryByText(/COCKPIT_PLEXAR_URL/)).not.toBeInTheDocument();
+  });
+});

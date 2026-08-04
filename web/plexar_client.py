@@ -121,6 +121,32 @@ def unavailable(reason: str, detail: str) -> dict:
     return {"available": False, "reason": reason, "detail": detail}
 
 
+def _detail_prose(raw) -> Optional[str]:
+    """Reduce whatever Plexar put in ``detail``/``error`` to a SENTENCE.
+
+    ``unavailable()`` declares ``detail: str`` and every consumer renders it
+    directly, so this is the one place that promise can be kept. It was not
+    being kept: Plexar's refusals are OpenAI-shaped, so ``detail`` arrives as
+    ``{"message": ..., "type": ..., "param": ..., "code": ...}``. Handing that
+    object to the browser is what blanked Reports > Local engine on 1.29.0 --
+    React refuses to render an object and the whole tab threw.
+
+    The human sentence lives at ``message``. Anything else is stringified
+    rather than dropped: a detail we cannot parse is still evidence, and an
+    empty reason reads as "no problem", which is the opposite claim.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw or None
+    if isinstance(raw, dict):
+        for key in ("message", "detail", "error", "reason"):
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return str(raw)
+
+
 def _refused(exc: "urllib.error.HTTPError") -> dict:
     """Plexar answered, and its answer was a refusal.
 
@@ -134,7 +160,7 @@ def _refused(exc: "urllib.error.HTTPError") -> dict:
     try:
         body = json.loads(exc.read().decode("utf-8"))
         if isinstance(body, dict):
-            detail = body.get("detail") or body.get("error")
+            detail = _detail_prose(body.get("detail") or body.get("error"))
     except Exception:
         detail = None
 
