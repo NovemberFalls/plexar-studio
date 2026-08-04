@@ -6,8 +6,6 @@ inference server (LM Studio at 127.0.0.1:1234, max_concurrent=1 by law).
 - Forwards EXACTLY ONE request at a time upstream; responses are relayed
   byte-verbatim (no body translation, SSE preserved).
 - ETA from rolling median wall per prompt-size bucket, logged to jobs.jsonl.
-- Load-aware spill: 503 {spill:true,...} when predicted wait exceeds the
-  class threshold at enqueue time. The broker never calls any external API.
 - --shadow: observe + log only, no queueing (safe first deploy).
 
 stdlib only. Python 3.12. Windows-first.
@@ -111,39 +109,14 @@ class Job:
 
 class Broker:
     def __init__(self, upstream_host: str, upstream_port: int, eta: EtaModel,
-                 spill: dict[str, float | None], shadow: bool):
+                 shadow: bool):
         self.upstream = (upstream_host, upstream_port)
         self.eta = eta
-        self.spill = spill
         self.shadow = shadow
         self._heap: list[tuple[int, int, Job]] = []
         self._seq = itertools.count()
         self._kick = asyncio.Event()
         self.inflight: Job | None = None
-        self.spilled: collections.Counter = collections.Counter()
-        # Persisted spill EVENTS (additive; separate from jobs.jsonl so metrics
-        # aggregation stays clean — a spilled request never ran, so it is not a run).
-        self.spill_log = os.path.join(
-            os.path.dirname(eta.log_path) or ".", "spills.jsonl")
-        self.spill_records: list[dict] = []
-        try:
-            with open(self.spill_log, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        self.spill_records.append(json.loads(line))
-                    except ValueError:
-                        continue
-        except OSError:
-            pass
-
-    def record_spill(self, event: dict) -> None:
-        self.spill_records.append(event)
-        try:
-            os.makedirs(os.path.dirname(self.spill_log) or ".", exist_ok=True)
-            with open(self.spill_log, "a", encoding="utf-8") as f:
-                f.write(json.dumps(event, separators=(",", ":")) + "\n")
-        except OSError:
-            pass
 
     def predicted_wait_by_class(self) -> dict:
         return {c: round(self.predicted_wait(c), 1)
@@ -339,8 +312,8 @@ def _parse_bucket(s: str | None):
 
 def _classify_status(http_status: int, raw: bytes) -> tuple[str, str | None]:
     """Map an upstream HTTP status (0 = transport failure) + response bytes to the
-    jobs.jsonl status enum + error_kind. status: ok|error (spilled/cancelled are set
-    at their own call sites)."""
+    jobs.jsonl status enum + error_kind. status: ok|error (cancelled is set at its
+    own call site)."""
     if http_status and 200 <= http_status < 300:
         return "ok", None
     body = raw.lower() if raw else b""
@@ -490,13 +463,6 @@ class Server:
         if path == "/metrics":
             await self._serve_metrics(writer, target)
             return
-        if path == "/spills":
-            await self._serve_spills(writer, target)
-            return
-        if path == "/config/spill":
-            body = await read_body(reader, headers)
-            await self._serve_spill_config(writer, method, body)
-            return
         if path == "/traces":
             await self._serve_traces(writer, target)
             return
@@ -535,28 +501,26 @@ class Server:
         }
 
     async def _queued_forward(self, writer, method, target, headers, body) -> None:
+        """Admit a request to the priority queue and relay it when its turn comes.
+
+        THERE IS NO LOCAL REFUSAL PATH. Spill -- a per-class predicted-wait
+        threshold above which this method answered 503 {spill:true} so the
+        caller could escalate to a paid API -- was REMOVED 2026-08-03 on the
+        owner's ruling. Nothing replaced it, deliberately: nothing in Studio
+        ever consumed that 503, so the refusal escalated to no one.
+
+        So a request that would previously have been spilled now WAITS. It is
+        enqueued at its class priority and served single-flight in turn. That
+        is a deliberate choice, not an oversight, and its consequence is stated
+        rather than hidden: THE QUEUE HAS NO DEPTH LIMIT AND NO WAIT CEILING.
+        Backpressure is the client's timeout, not the broker's. The only
+        request this method ever fails is one whose connection drops mid-relay,
+        which is logged as cancelled.
+        """
         broker = self.broker
         lane_class = self._lane_class(headers)
         pchars = prompt_chars_of(body)
         meta = self._job_meta(headers, body, target.split("?")[0], writer)
-        threshold = broker.spill.get(lane_class)
-        predicted = broker.predicted_wait(lane_class)
-        if threshold is not None and predicted > threshold:
-            broker.spilled[lane_class] += 1
-            broker.record_spill({
-                "ts": now_iso(), "lane_class": lane_class,
-                "predicted_wait_s": round(predicted, 1), "threshold_s": threshold,
-                "client_id": meta.get("client_id", ""), "agent": meta.get("agent", ""),
-                "trace_id": meta.get("trace_id", ""),
-            })
-            payload = json.dumps({
-                "spill": True,
-                "predicted_wait_s": round(predicted, 1),
-                "hint": "escalate-to-api",
-            }).encode()
-            await send_simple(writer, 503, payload)
-            return
-
         job = Job(lane_class, pchars, meta)
         broker.enqueue(job)
         try:
@@ -825,39 +789,6 @@ class Server:
         else:
             await send_simple(writer, 200, json.dumps(state, indent=1).encode())
 
-    # ---- /config/spill -----------------------------------------------------
-    # Spill semantics: threshold is SECONDS OF PREDICTED WAIT per lane class
-    # (not queue depth). null disables spill for that class. Changes are
-    # session-only (persisted: false) — restart restores CLI/default values.
-
-    async def _serve_spill_config(self, writer, method: str, body: bytes) -> None:
-        b = self.broker
-        if method in ("PUT", "POST"):
-            try:
-                changes = json.loads(body)
-                if not isinstance(changes, dict):
-                    raise ValueError("body must be an object")
-                for cls, val in changes.items():
-                    if cls not in CLASS_RANK:
-                        raise ValueError(f"unknown class {cls!r}")
-                    if val is not None and not (
-                            isinstance(val, (int, float)) and 0 <= val <= 86_400):
-                        raise ValueError(f"{cls}: threshold must be null or 0..86400 s")
-                for cls, val in changes.items():
-                    b.spill[cls] = float(val) if val is not None else None
-            except ValueError as e:
-                await send_simple(writer, 400, json.dumps({"error": str(e)}).encode())
-                return
-        elif method != "GET":
-            await send_simple(writer, 400, b'{"error":"use GET or PUT"}')
-            return
-        await send_simple(writer, 200, json.dumps({
-            "spill_thresholds_s": b.spill,
-            "spilled_total": sum(b.spilled.values()),
-            "spilled_by_class": dict(b.spilled),
-            "persisted": False,
-        }).encode())
-
     # ---- /traces & /trace/{id} ---------------------------------------------
     # Definitions (contract with Cockpit): a ROOT is a trace_id whose runs'
     # trace_parent is empty OR references a trace_id absent from the data.
@@ -978,7 +909,7 @@ class Server:
         }).encode())
 
     # ---- /metrics/timeseries ----------------------------------------------
-    # Recomputed from jobs.jsonl (+ spills.jsonl), so it survives restart and
+    # Recomputed from jobs.jsonl, so it survives restart and
     # reports persisted:true. One provider entry (COCKPIT_PROVIDER_ID, default
     # 'local') — the broker fronts one upstream today; the shape is N-ready.
 
@@ -1012,15 +943,6 @@ class Server:
             idx = (int(dt.timestamp()) - start_e) // bucket_s
             if 0 <= idx < nbuckets:
                 grouped[idx].append(r)
-        spills = [0] * nbuckets
-        for ev in self.broker.spill_records:
-            dt = _parse_iso(ev.get("ts", ""))
-            if dt is None:
-                continue
-            idx = (int(dt.timestamp()) - start_e) // bucket_s
-            if 0 <= idx < nbuckets:
-                spills[idx] += 1
-
         buckets = []
         for i in range(nbuckets):
             rs = grouped[i]
@@ -1045,7 +967,6 @@ class Server:
                     "decode_tps_p50": round(statistics.median(decodes), 2) if decodes else None,
                     "ttft_ms_p50": _pct_of(ttfts, 0.50),
                     "queue_wait_ms_p50": _pct_of(qwaits, 0.50),
-                    "spilled": spills[i],
                     "errors": errors,
                 }},
             })
@@ -1057,21 +978,6 @@ class Server:
         params = dict(kv.split("=", 1) for kv in qs.split("&") if "=" in kv)
         state = self._timeseries(params.get("window", "24h"), params.get("bucket"))
         await send_simple(writer, 200, json.dumps(state, indent=1).encode())
-
-    # ---- /spills ----------------------------------------------------------
-    async def _serve_spills(self, writer, target: str) -> None:
-        qs = (target.split("?", 1) + [""])[1]
-        params = dict(kv.split("=", 1) for kv in qs.split("&") if "=" in kv)
-        try:
-            limit = int(params.get("limit", 20))
-        except ValueError:
-            limit = 20
-        limit = max(1, min(1000, limit))
-        events = sorted(self.broker.spill_records,
-                        key=lambda e: e.get("ts", ""), reverse=True)[:limit]
-        await send_simple(writer, 200, json.dumps({
-            "spills": events, "count": len(events),
-        }).encode())
 
     # ---- /queue ----------------------------------------------------------
     def _queue_state(self) -> dict:
@@ -1139,9 +1045,8 @@ async def send_simple(writer, status: int, body: bytes, ctype: str = "applicatio
 async def amain(args) -> None:
     log_path = args.log_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.jsonl")
     eta = EtaModel(log_path)
-    spill = {"interactive": args.spill_interactive, "worker": args.spill_worker, "batch": None}
     host, _, port = args.upstream.rpartition(":")
-    broker = Broker(host.replace("http://", "").strip("/"), int(port), eta, spill, args.shadow)
+    broker = Broker(host.replace("http://", "").strip("/"), int(port), eta, args.shadow)
     srv = Server(broker, args.port)
     dispatcher = asyncio.create_task(broker.dispatcher())
     server = await asyncio.start_server(srv.handle, "127.0.0.1", args.port)
@@ -1161,8 +1066,6 @@ def main() -> None:
     p.add_argument("--upstream", default="http://127.0.0.1:1234")
     p.add_argument("--shadow", action="store_true", help="observe+log only, no queueing")
     p.add_argument("--log-file", default=None, help="jobs.jsonl path (default: alongside broker.py)")
-    p.add_argument("--spill-interactive", type=float, default=30.0)
-    p.add_argument("--spill-worker", type=float, default=300.0)
     args = p.parse_args()
     try:
         asyncio.run(amain(args))

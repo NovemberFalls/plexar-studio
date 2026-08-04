@@ -23,7 +23,7 @@ import EngineApi, {
   runBlockReason,
 } from "../components/engine/EngineApi.jsx";
 
-const CAPS = new Set(["queue", "metrics", "spill", "models", "traces", "health", "model-control"]);
+const CAPS = new Set(["queue", "metrics", "models", "traces", "health", "model-control"]);
 
 const PROVIDER = { id: "lmstudio-local", label: "LM Studio (local)", kind: "lmstudio", scope: "local" };
 
@@ -135,7 +135,7 @@ describe("EngineApi route explorer", () => {
 
   it("refuses to run routes that need a body, naming the body it would need", () => {
     setup();
-    const run = screen.getByTestId("route-run-PUT /api/local/{provider_id}/spill");
+    const run = screen.getByTestId("route-run-POST /api/local/{provider_id}/endpoint");
     expect(run).toBeDisabled();
     expect(run.getAttribute("title")).toMatch(/needs a request body/i);
   });
@@ -228,14 +228,14 @@ describe("EngineApi pure helpers", () => {
     const routes = [
       { group: "broker", method: "GET", path: "/queue", desc: "broker queue" },
       { group: "provider", method: "GET", path: "/api/local/{provider_id}/queue", desc: "proxied queue" },
-      { group: "provider", method: "PUT", path: "/api/local/{provider_id}/spill", desc: "set spill", body: "{}" },
+      { group: "provider", method: "PUT", path: "/api/local/{provider_id}/models-dir", desc: "set models dir", body: "{}" },
     ];
     const spec = buildOpenApi(routes);
     expect(spec.openapi).toBe("3.1.0");
     expect(spec.servers).toEqual([{ url: "/" }]);
     expect(Object.keys(spec.paths)).toEqual([
       "/api/local/{provider_id}/queue",
-      "/api/local/{provider_id}/spill",
+      "/api/local/{provider_id}/models-dir",
     ]);
     expect(spec.paths["/api/local/{provider_id}/queue"].get.summary).toBe("proxied queue");
     expect(spec.paths["/api/local/{provider_id}/queue"].get.parameters[0]).toMatchObject({
@@ -243,7 +243,7 @@ describe("EngineApi pure helpers", () => {
       in: "path",
       required: true,
     });
-    expect(spec.paths["/api/local/{provider_id}/spill"].put.requestBody.required).toBe(true);
+    expect(spec.paths["/api/local/{provider_id}/models-dir"].put.requestBody.required).toBe(true);
   });
 
   it("highlightJson classifies keys, strings, numbers and null distinctly", () => {

@@ -109,7 +109,7 @@ describe("LaneStrip — exact container types App.jsx passes", () => {
     expect(screen.queryByText("popped out")).not.toBeInTheDocument();
   });
 
-  it("lane=null renders no pressure meter", () => {
+  it("lane=null renders no lane meter", () => {
     const { container } = render(
       <LaneStrip
         sessions={[]}
@@ -121,8 +121,8 @@ describe("LaneStrip — exact container types App.jsx passes", () => {
         lane={null}
       />
     );
-    // The pressure meter is the only element with role="switch" (spill toggle).
-    expect(container.querySelector('[role="switch"]')).toBeNull();
+    expect(container.querySelector('[data-testid="lane-meter"]')).toBeNull();
+    expect(container.querySelector('[data-testid="lane-shadow-note"]')).toBeNull();
   });
 
   it("empty sessions array still renders the + New chip", () => {
@@ -268,7 +268,6 @@ describe("Inspector — null/empty tolerances", () => {
   it("bridge left unset (undefined, not just null) renders no bridge card instead of crashing", () => {
     // REGRESSION: Inspector.jsx guarded `bridge !== null`, which is true for
     // undefined — so an OMITTED bridge prop mounted BridgeCard with
-    // bridge=undefined, which then threw dereferencing `bridge.kind`. The guard
     // is now `bridge != null` (loose), catching both. Rendering with no bridge
     // prop at all must be a no-op, since that is what an omitted prop means.
     expect(() =>

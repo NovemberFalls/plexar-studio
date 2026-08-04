@@ -97,29 +97,6 @@ def test_shadow_does_not_queue(tmp_path):
         proc.terminate(); proc.wait(timeout=5); up.stop()
 
 
-def test_shadow_never_spills_even_with_a_threshold_that_must_trigger(tmp_path):
-    """Spill is recorded ONLY inside `_queued_forward`, which shadow skips.
-
-    A zero threshold means "spill anything with a predicted wait above 0s", and
-    seeded history guarantees a non-zero prediction. In shadow it STILL does not
-    fire -- so the SpillPolicy card configures something that cannot happen on
-    the default build.
-    """
-    log = str(tmp_path / "jobs.jsonl")
-    seed_history(log, [5000, 5000, 5000])
-    up = FakeUpstream(delay=0.1)
-    up.start()
-    proc, port = start_broker(up.port, log, ["--shadow", "--spill-worker", "0.0"])
-    try:
-        statuses = _fire(port, 2)
-        assert all(s == 200 for s in statuses), f"shadow spilled: {statuses}"
-        spills = tmp_path / "spills.jsonl"
-        assert not spills.exists() or spills.read_text().strip() == "", \
-            "shadow recorded a spill event"
-    finally:
-        proc.terminate(); proc.wait(timeout=5); up.stop()
-
-
 def test_shadow_queue_depth_is_indistinguishable_from_no_queue(tmp_path):
     """The R10 half that matters: inert must look like absent.
 

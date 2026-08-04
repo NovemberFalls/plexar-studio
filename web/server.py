@@ -3033,10 +3033,6 @@ _LOCAL_BROKER_TIMEOUT = 3.0
 # The broker's documented window set (broker-team contract). Never forward an
 # unbounded client string through to the broker.
 _LOCAL_METRICS_WINDOWS = ("lifetime", "24h", "session")
-# Spill config = per-lane-class predicted-wait thresholds in SECONDS (broker
-# contract). A value may be null (spill disabled for that class) or 0..86400.
-_SPILL_CLASSES = ("interactive", "worker", "batch")
-_SPILL_MAX_S = 86400
 
 # ── Provider registry ─────────────────────────────────────
 #
@@ -3090,7 +3086,7 @@ _VLLM_LOCAL_PROVIDER = {
     "broker_url": _VLLM_URL,
     "management_url": _VLLM_URL,
     "auth": {"type": "none"},
-    # vLLM does not serve the broker's queue/spill/traces shapes, but it
+    # vLLM does not serve the broker's queue/traces shapes, but it
     # DOES export a Prometheus /metrics endpoint that _vllm_metrics reshapes
     # into the broker metrics contract (cumulative-since-start; see adapter).
     "capabilities": ["models", "health", "metrics", "model-discovery"],
@@ -3103,7 +3099,7 @@ _PROVIDERS = {
         "broker_url": os.getenv("COCKPIT_BROKER_URL", "http://127.0.0.1:1235").rstrip("/"),
         "management_url": os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234").rstrip("/"),
         "auth": {"type": "none"},
-        "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
+        "capabilities": ["queue", "metrics", "models", "traces", "health"],
     },
     "vllm-local": _VLLM_LOCAL_PROVIDER,
     "plexar-vllm": {
@@ -3909,26 +3905,6 @@ def _broker_get(path: str, query: str = "", base_url: str | None = None) -> dict
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _broker_put(path: str, body: dict, base_url: str | None = None) -> dict:
-    """PUT a JSON body to {broker}{path} and return the parsed JSON echo.
-
-    ``base_url`` defaults to the legacy ``_LOCAL_BROKER_URL`` — see
-    ``_broker_get``. Blocking (urllib) — run via ``asyncio.to_thread``. Same
-    monkeypatch-friendly free-function shape as ``_broker_get``.
-    """
-    import urllib.request
-
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url or _LOCAL_BROKER_URL}{path}",
-        data=data,
-        method="PUT",
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
-    )
-    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
 def _models_path(provider: dict) -> str:
     """Return the model-catalog path for *provider*'s management plane.
 
@@ -4555,10 +4531,9 @@ async def _fleet_history_loop() -> None:
 
 # Pinned from broker source (broker.py::_queue_state, confirmed 2026-07-24):
 # top level = shadow · in_flight (object|null) · queued (array) ·
-# estimated_clear_seconds. Spill counters live on /config/spill, NOT here.
+# estimated_clear_seconds.
 _QUEUE_SHAPE_KEYS = ("shadow", "in_flight", "queued", "estimated_clear_seconds")
 _METRICS_SHAPE_KEYS = ("runs_total", "prompts_total", "tokens_total", "tokens_per_sec")
-_SPILL_SHAPE_KEYS = ("spill_thresholds_s", "spilled_total", "spilled_by_class")
 
 # Detection is cached so the 3s poller doesn't fire fingerprint probes each tick.
 _DETECT_CACHE_TTL = 30.0
@@ -4678,13 +4653,11 @@ async def start_managed_broker() -> bool:
         #
         # MEASURED CONSEQUENCE (S3, lane_broker/tests/test_shadow_default_is_inert.py):
         # under this default the broker forwards and logs but NEVER queues and
-        # NEVER spills -- so the queue and spill surfaces render a feature that
+        # NEVER queues -- so the queue surface renders a feature that
         # cannot fire as shipped, while traces/metrics and the transport are
         # real and load-bearing.
         shadow=os.getenv("COCKPIT_BROKER_SHADOW", "1") == "1",
         log_file=os.path.join(state_dir, "jobs.jsonl"),
-        spill_interactive=30.0,
-        spill_worker=300.0,
     )
 
     async def _run():
@@ -4857,9 +4830,9 @@ async def get_local_status():
 
 # ── Provider-keyed local routes ───────────────────────────
 #
-# Thin wrappers around the same _broker_get/_broker_put/_mgmt_get machinery
+# Thin wrappers around the same _broker_get/_mgmt_get machinery
 # above, parameterized by a registered provider instead of the hard-coded
-# _LOCAL_BROKER_URL. The legacy /api/local/{queue,metrics,spill} routes above
+# _LOCAL_BROKER_URL. The legacy /api/local/{queue,metrics} routes above
 # stay as-is and keep working unchanged -- only the write-refusal/model/health/
 # traces routes are new, all provider-keyed by construction.
 
@@ -5144,71 +5117,6 @@ async def get_provider_metrics(provider_id: str, window: str = "lifetime"):
         return JSONResponse({"reachable": False}, status_code=503)
     if not _looks_like(data, _METRICS_SHAPE_KEYS):
         return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
-    return JSONResponse(data)
-
-
-@app.get("/api/local/{provider_id}/spill")
-async def get_provider_spill(provider_id: str):
-    provider = _require_provider(provider_id)
-    if provider is None:
-        return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "spill" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
-    try:
-        data = await asyncio.to_thread(_broker_get, "/config/spill", "", provider["broker_url"])
-    except Exception:
-        logger.debug("Provider %s GET /config/spill unreachable", provider_id, exc_info=True)
-        return JSONResponse({"reachable": False}, status_code=503)
-    if not _looks_like(data, _SPILL_SHAPE_KEYS):
-        return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
-    return JSONResponse(data)
-
-
-@app.put("/api/local/{provider_id}/spill")
-async def set_provider_spill(provider_id: str, request: Request):
-    provider = _require_provider(provider_id)
-    if provider is None:
-        return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "spill" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
-    if provider["scope"] != "local":
-        return JSONResponse({"error": "read-only for remote providers"}, status_code=403)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
-    if not isinstance(body, dict) or not body:
-        return JSONResponse(
-            {"ok": False, "error": "body must be a non-empty {class: seconds|null} map"},
-            status_code=400,
-        )
-    for cls, val in body.items():
-        if cls not in _SPILL_CLASSES:
-            return JSONResponse(
-                {"ok": False, "error": f"unknown lane class '{cls}'; known: {list(_SPILL_CLASSES)}"},
-                status_code=400,
-            )
-        if val is None:
-            continue
-        if isinstance(val, bool) or not isinstance(val, (int, float)):
-            return JSONResponse(
-                {"ok": False, "error": f"'{cls}' must be a number of seconds or null"},
-                status_code=400,
-            )
-        if val < 0 or val > _SPILL_MAX_S:
-            return JSONResponse(
-                {"ok": False, "error": f"'{cls}' seconds must be in 0..{_SPILL_MAX_S}"},
-                status_code=400,
-            )
-    try:
-        data = await asyncio.to_thread(_broker_put, "/config/spill", body, provider["broker_url"])
-    except Exception:
-        logger.debug("Provider %s PUT /config/spill failed", provider_id, exc_info=True)
-        return JSONResponse({"reachable": False}, status_code=503)
-    if not _looks_like(data, _SPILL_SHAPE_KEYS):
-        return JSONResponse({"reachable": True, "compatible": False,
-                             "error": "connected service is not the lane broker"},
-                            status_code=502)
     return JSONResponse(data)
 
 
@@ -6075,24 +5983,6 @@ async def get_provider_metrics_timeseries(provider_id: str, window: str = "24h",
     return JSONResponse(data)
 
 
-@app.get("/api/local/{provider_id}/spills")
-async def get_provider_spills(provider_id: str, limit: int = 20):
-    """Proxy the broker's per-spill-event log (GET :broker/spills?limit=)."""
-    provider = _require_provider(provider_id)
-    if provider is None:
-        return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "spill" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
-    if limit < 1 or limit > 100:
-        limit = max(1, min(100, limit))
-    try:
-        data = await asyncio.to_thread(_broker_get, "/spills", f"limit={limit}", provider["broker_url"])
-    except Exception:
-        logger.debug("Provider %s /spills unreachable", provider_id, exc_info=True)
-        return JSONResponse({"reachable": False}, status_code=503)
-    return JSONResponse(data)
-
-
 # ── API-side usage summary + reference pricing ────────────
 
 _USAGE_SUMMARY_WINDOWS = ("session", "24h", "7d", "lifetime")
@@ -6570,31 +6460,6 @@ async def get_local_metrics(window: str = "lifetime"):
     forwarding — an unbounded client string is never passed to the broker.
     """
     return await get_provider_metrics(_DEFAULT_PROVIDER, window)
-
-
-@app.get("/api/local/spill")
-async def get_local_spill():
-    """Proxy the broker's current per-class spill thresholds + spilled counters.
-
-    Broker shape: {spill_thresholds_s: {interactive, worker, batch}, spilled_total,
-    spilled_by_class, persisted}. 503 {reachable: false} when the broker is down.
-    """
-    return await get_provider_spill(_DEFAULT_PROVIDER)
-
-
-@app.put("/api/local/spill")
-@app.post("/api/local/spill")
-async def set_local_spill(request: Request):
-    """Set per-lane-class spill thresholds (seconds) on the broker.
-
-    Body is a PARTIAL map of {class: seconds|null} — any subset of the known
-    lane classes; ``null`` disables spill for that class. Validated all-or-
-    nothing BEFORE forwarding (defense in depth — the broker validates too):
-    unknown class or out-of-range value → 400 and nothing is forwarded. The
-    change is session-only on the broker (not persisted), so it is fully
-    reversible. Forwarded to the broker as ``PUT /config/spill``.
-    """
-    return await set_provider_spill(_DEFAULT_PROVIDER, request)
 
 
 # ── Static files ─────────────────────────────────────────

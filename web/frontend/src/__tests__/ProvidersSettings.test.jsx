@@ -23,7 +23,7 @@ const PROVIDERS = {
       scope: "local",
       // Deliberately the full broker vocabulary MINUS "traces" so the dim path
       // is exercised on a card that otherwise looks fully capable.
-      capabilities: ["models", "health", "queue", "metrics", "spill"],
+      capabilities: ["models", "health", "queue", "metrics"],
     },
     {
       id: "vllm-local",

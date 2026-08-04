@@ -1,8 +1,8 @@
 /**
  * EngineLive — Engine ▸ Live (screen 2b). What the engine is doing RIGHT NOW.
  *
- * Four cards: the loaded model + its memory, the live lane, routing & spill, and
- * the in-flight/queued table (shared with Engine ▸ Requests).
+ * Four cards: the loaded model + its memory, the live lane, routing, and the
+ * in-flight/queued table (shared with Engine ▸ Requests).
  *
  * Every number here comes from an endpoint that exists. Where the platform does
  * not report a value the card says so in words — VRAM is the honest example: no
@@ -11,13 +11,18 @@
  * untrustworthy, which defeats the point of a live view.
  *
  * All lane arithmetic is imported from utils/laneMath.js. It is deliberately not
- * reimplemented: the spill threshold in Settings and the pressure shown here
- * only mean something if both sides do the same sum.
+ * reimplemented: the strip, the TopBar pill and this screen only agree if they
+ * do the same sum.
+ *
+ * SPILL WAS REMOVED 2026-08-03. This card used to show the interactive
+ * threshold, a pressure bar measuring the distance to it, and a "Spilled"
+ * counter. All three are gone rather than zeroed -- a counter pinned at 0 for a
+ * mechanism that no longer exists still claims the mechanism exists.
  */
 import { useState } from "react";
 import { Cpu, Gauge, Route, RefreshCw } from "lucide-react";
 
-import { laneLive, fmtEta, pressureFraction, predictedWaitSeconds } from "../../utils/laneMath.js";
+import { laneLive, fmtEta } from "../../utils/laneMath.js";
 import { QueueTable } from "./EngineRequests.jsx";
 import {
   Bar,
@@ -74,13 +79,6 @@ function controlUnavailableReason(provider) {
     "restart route to swap with. For LM Studio that usually means the lms CLI is not on the " +
     "server's PATH."
   );
-}
-
-/** Fields the broker's /config/spill echo carries (broker.py::_serve_spill_config). */
-function spillThreshold(spill, cls) {
-  const map = spill && spill.reachable !== false ? spill.spill_thresholds_s : null;
-  if (!map || !(cls in map)) return undefined; // unknown
-  return map[cls]; // number | null (null = spill disabled for the class)
 }
 
 /** The engine identity line: label plus whatever endpoint the server is willing
@@ -407,28 +405,20 @@ function LaneCard({ queue, metrics, series }) {
 }
 
 /**
- * Routing & spill. READ-ONLY on purpose: thresholds are intent and now live in
- * Settings ▸ Providers, so this card reports the live effect of that intent and
- * links to the owner instead of shipping a second set of sliders that could
- * disagree with the first.
+ * Routing. The local-inference master switch plus what the lane actually
+ * served. There is nothing to configure here any more: the spill policy that
+ * this card used to report was removed 2026-08-03, and Plexar Studio does not
+ * replace a removed control with a placeholder for one.
  */
-function RoutingCard({ caps, spill, metrics, queue, localEnabled, setLocalEnabled, onNavigate }) {
-  const offered = Boolean(caps?.has("spill"));
-  const interactive = spillThreshold(spill, "interactive");
-  const live = laneLive(queue, metrics);
-  const wait = predictedWaitSeconds(live?.running, live?.queued, live?.p50WallSeconds);
-  const fraction =
-    typeof interactive === "number" ? pressureFraction(wait, interactive) : null;
-
+function RoutingCard({ metrics, localEnabled, setLocalEnabled }) {
   const runs = metrics && metrics.reachable !== false ? metrics.runs_total : null;
-  const spilledTotal = spill && spill.reachable !== false ? spill.spilled_total : null;
   const canToggle = typeof setLocalEnabled === "function";
 
   return (
     <Card
       testId="engine-routing-card"
       style={{ flex: 1 }}
-      title={<CardTitle icon={Route} token="var(--cc-macro)">Routing &amp; spill</CardTitle>}
+      title={<CardTitle icon={Route} token="var(--cc-macro)">Routing</CardTitle>}
       right={
         <button
           type="button"
@@ -463,84 +453,22 @@ function RoutingCard({ caps, spill, metrics, queue, localEnabled, setLocalEnable
         </button>
       }
     >
-      {offered && spill === undefined ? (
-        /* Not yet asked. Saying "not reported" before the first poll would be a
-           claim about the broker we have not earned. */
-        <Note testId="spill-loading">Reading the spill policy…</Note>
-      ) : !offered ? (
-        <Note testId="spill-not-offered">
-          This backend is served directly and has no spill policy — spill is a lane-broker
-          behaviour, and the broker is not in front of it.
-        </Note>
-      ) : spill === null ? (
-        <Note testId="spill-offline">
-          The broker is not answering /config/spill, so the current thresholds are unknown.
-        </Note>
-      ) : (
-        <>
-          <div style={{ fontSize: 11, color: "var(--cc-fg)", lineHeight: 1.55 }}>
-            {interactive === undefined
-              ? "Interactive threshold not reported by the broker."
-              : interactive === null
-                ? "Spill is disabled for interactive — every request stays local however long the wait."
-                : `Spill when predicted wait > ${interactive}s (interactive).`}
-          </div>
-          <Bar
-            testId="spill-pressure"
-            label="Interactive pressure"
-            fraction={fraction}
-            readout={
-              wait == null || typeof interactive !== "number"
-                ? UNKNOWN
-                : `${fmtNum(wait, 1)}s / ${interactive}s`
-            }
-            token="var(--cc-waiting)"
-            unknownNote={
-              typeof interactive !== "number"
-                ? "No active threshold to measure against."
-                : "Predicted wait needs a measured p50 run time; none has been recorded yet."
-            }
-          />
-          <div style={{ display: "flex", gap: 18, marginTop: 12, flexWrap: "wrap" }}>
-            <Stat testId="count-local" label="Served local" value={fmtInt(runs)} token="var(--cc-ok)" />
-            <Stat testId="count-spilled" label="Spilled" value={fmtInt(spilledTotal)} token="var(--cc-macro)" />
-            <Stat
-              testId="count-rejected"
-              label="Rejected"
-              value={UNKNOWN}
-              title="Neither the broker nor Plexar Studio counts rejections today, so this cannot be reported."
-            />
-          </div>
-          <Note testId="spill-counter-window">
-            Counters are totals since the broker started, not this hour — the broker exposes no
-            windowed counters, and rejections are not counted at all.
-          </Note>
-        </>
-      )}
-      <Note testId="spill-owner">
-        Thresholds are set in Settings ▸ Providers &amp; Endpoints.
-        {typeof onNavigate === "function" && (
-          <>
-            {" "}
-            <button
-              type="button"
-              data-testid="spill-goto-settings"
-              onClick={() => onNavigate("settings", "providers")}
-              aria-label="Open spill policy in Settings"
-              style={{
-                background: "none",
-                border: "none",
-                padding: 0,
-                font: "inherit",
-                color: "var(--cc-accent)",
-                cursor: "pointer",
-                textDecoration: "underline",
-              }}
-            >
-              Open it
-            </button>
-          </>
-        )}
+      <div style={{ fontSize: 11, color: "var(--cc-fg)", lineHeight: 1.55 }}>
+        Every request on this lane is served locally. Plexar Studio has no rule that
+        sends work anywhere else.
+      </div>
+      <div style={{ display: "flex", gap: 18, marginTop: 12, flexWrap: "wrap" }}>
+        <Stat testId="count-local" label="Served local" value={fmtInt(runs)} token="var(--cc-ok)" />
+        <Stat
+          testId="count-rejected"
+          label="Rejected"
+          value={UNKNOWN}
+          title="Neither the broker nor Plexar Studio counts rejections today, so this cannot be reported."
+        />
+      </div>
+      <Note testId="routing-counter-window">
+        Counters are totals since the broker started, not this hour — the broker exposes no
+        windowed counters, and rejections are not counted at all.
       </Note>
     </Card>
   );
@@ -582,7 +510,6 @@ export default function EngineLive({
   series,
   localEnabled,
   setLocalEnabled,
-  onNavigate,
   onToast,
 }) {
   return (
@@ -601,13 +528,9 @@ export default function EngineLive({
 
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", minWidth: 0 }}>
         <RoutingCard
-          caps={caps}
-          spill={data?.spill}
           metrics={data?.metrics}
-          queue={data?.queue}
           localEnabled={localEnabled}
           setLocalEnabled={setLocalEnabled}
-          onNavigate={onNavigate}
         />
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
           <QueueTable queue={data?.queue} caps={caps} metrics={data?.metrics} compact style={{ flex: 1 }} />

@@ -1,5 +1,5 @@
 """lane-broker metrics-v2 tests (TTFT, true decode, queue wait, errors,
-by_model, timeseries, spill events, predicted_wait_s_by_class).
+by_model, timeseries, predicted_wait_s_by_class).
 
 Pure/offline: seeds a synthetic jobs.jsonl and drives the aggregation methods
 directly — no live upstream, no sockets.
@@ -16,11 +16,9 @@ sys.path.insert(0, os.path.dirname(HERE))
 import broker as B  # noqa: E402
 
 
-def make_server(log_path, spill=None):
+def make_server(log_path):
     eta = B.EtaModel(log_path)
-    spill = spill if spill is not None else {
-        "interactive": 30.0, "worker": 300.0, "batch": None}
-    brk = B.Broker("127.0.0.1", 1234, eta, spill, shadow=False)
+    brk = B.Broker("127.0.0.1", 1234, eta, shadow=False)
     return B.Server(brk, 1235), brk
 
 
@@ -169,27 +167,6 @@ def test_timeseries_bucketing(tmp_path):
     assert 100.0 in decodes
 
 
-# ---- spill events + /spills reload ----------------------------------------
-
-def test_spill_events_persist_and_reload(tmp_path):
-    log = str(tmp_path / "jobs.jsonl")
-    seed(log, [])
-    _, brk = make_server(log)
-    brk.record_spill({"ts": "2026-07-24T00:00:00Z", "lane_class": "interactive",
-                      "predicted_wait_s": 55.0, "threshold_s": 30.0,
-                      "client_id": "c0", "agent": "a0", "trace_id": "t0"})
-    brk.record_spill({"ts": "2026-07-24T00:00:05Z", "lane_class": "worker",
-                      "predicted_wait_s": 400.0, "threshold_s": 300.0,
-                      "client_id": "c1", "agent": "a1", "trace_id": "t1"})
-    assert len(brk.spill_records) == 2
-    # a fresh broker over the same dir reloads spills.jsonl
-    eta2 = B.EtaModel(log)
-    brk2 = B.Broker("127.0.0.1", 1234, eta2,
-                    {"interactive": 30.0, "worker": 300.0, "batch": None}, False)
-    assert len(brk2.spill_records) == 2
-    assert brk2.spill_records[0]["lane_class"] == "interactive"
-
-
 # ---- predicted_wait_s_by_class on /queue ----------------------------------
 
 def test_predicted_wait_by_class_on_queue(tmp_path):
@@ -332,9 +309,7 @@ def test_streaming_chunked_relay_records_promptly(tmp_path):
         up_srv = await asyncio.start_server(upstream, "127.0.0.1", 0)
         up_port = up_srv.sockets[0].getsockname()[1]
         eta = B.EtaModel(log)
-        brk = B.Broker("127.0.0.1", up_port, eta,
-                       {"interactive": 30.0, "worker": 300.0, "batch": None},
-                       shadow=False)
+        brk = B.Broker("127.0.0.1", up_port, eta, shadow=False)
         srv = B.Server(brk, 0)
         disp = asyncio.create_task(brk.dispatcher())
         br_srv = await asyncio.start_server(srv.handle, "127.0.0.1", 0)

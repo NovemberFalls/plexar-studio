@@ -1,19 +1,16 @@
 /**
- * Lane pressure math — the single implementation of every depth <-> wait
+ * Lane math — the single implementation of every queue-depth <-> wait
  * conversion in the app.
  *
- * WHY THIS FILE EXISTS: the same numbers are rendered in four places (the
- * Workspace lane pressure meter, the TopBar quick-glance pill, Engine > Live,
- * and Settings > Providers > Spill policy). The design handoff calls this out
- * explicitly — "Conversions to implement once and share" — because a spill
- * threshold only means something if the meter that shows your position and the
- * control that sets the trigger agree on the arithmetic. Two implementations
- * would drift and the operator would be reading a lie.
+ * WHY THIS FILE EXISTS: the same numbers are rendered in three places (the
+ * Workspace lane strip, the TopBar quick-glance pill, and Engine > Live). Two
+ * implementations would drift and the operator would be reading a lie.
  *
- * THE KEY SEMANTIC, verified in lane_broker/broker.py: a spill threshold is
- * SECONDS OF PREDICTED WAIT for a lane class, NOT queue depth. `null` disables
- * spill for that class. Depth is only ever a derived, displayed convenience —
- * never the stored unit.
+ * SPILL WAS REMOVED 2026-08-03 on the owner's ruling, and with it went the
+ * three functions that existed only to measure distance to a spill trigger:
+ * `wouldSpill`, `pressureFraction`, `depthEquivalent`/`waitEquivalent`. There
+ * is no threshold left to be a fraction of the way towards, so nothing here
+ * invents one. Depth and wait are now reported, never compared.
  *
  * Every function here is pure and total: polled broker data is best-effort and
  * routinely arrives null, unreachable, or missing fields, so these return null
@@ -86,65 +83,6 @@ export function predictedWaitSeconds(inFlight, aheadOfYou, p50WallSeconds) {
 }
 
 /**
- * The queue depth that a seconds-based threshold corresponds to — i.e. how many
- * requests can be ahead of you before the threshold trips.
- *
- *   depthEquivalent = ceil(thresholdSeconds / p50WallSeconds)
- */
-export function depthEquivalent(thresholdSeconds, p50WallSeconds) {
-  if (typeof thresholdSeconds !== "number" || !isFinite(thresholdSeconds) || thresholdSeconds < 0) return null;
-  if (typeof p50WallSeconds !== "number" || !isFinite(p50WallSeconds) || p50WallSeconds <= 0) return null;
-  return Math.ceil(thresholdSeconds / p50WallSeconds);
-}
-
-/**
- * The predicted wait that a depth-based threshold corresponds to.
- *
- *   waitEquivalent = thresholdDepth * p50WallSeconds
- */
-export function waitEquivalent(thresholdDepth, p50WallSeconds) {
-  const depth = toCount(thresholdDepth);
-  if (depth == null) return null;
-  if (typeof p50WallSeconds !== "number" || !isFinite(p50WallSeconds) || p50WallSeconds <= 0) return null;
-  return depth * p50WallSeconds;
-}
-
-/**
- * Would a request submitted at this predicted wait be spilled to the API?
- *
- * The comparison is STRICTLY GREATER, pinned from broker source
- * (broker.py::_queued_forward): `if threshold is not None and predicted >
- * threshold`. A predicted wait exactly equal to the threshold runs LOCALLY.
- * Getting this off by one boundary would make the translation panel disagree
- * with the broker on precisely the row the operator is squinting at.
- *
- * @returns {boolean|null} null when the answer is unknowable — either the wait
- *   is unmeasured (no p50) or the threshold is null (spill disabled for the
- *   class, so nothing ever spills, which is `false` not `null`). Only the
- *   unmeasured case is null.
- */
-export function wouldSpill(predictedWait, thresholdSeconds) {
-  if (thresholdSeconds === null || thresholdSeconds === undefined) return false; // spill disabled
-  if (typeof thresholdSeconds !== "number" || !isFinite(thresholdSeconds) || thresholdSeconds < 0) return null;
-  if (typeof predictedWait !== "number" || !isFinite(predictedWait) || predictedWait < 0) return null;
-  return predictedWait > thresholdSeconds;
-}
-
-/**
- * Fraction of the way to the spill trigger, clamped to 0..1 — the fill of the
- * lane pressure meter and of the per-class live bars.
- *
- * Returns null when either side is unknown, or when the threshold is null
- * (spill disabled for the class) — a disabled class has no "fraction of the way
- * there" and must not render a full or empty bar as if it did.
- */
-export function pressureFraction(currentSeconds, thresholdSeconds) {
-  if (typeof currentSeconds !== "number" || !isFinite(currentSeconds) || currentSeconds < 0) return null;
-  if (typeof thresholdSeconds !== "number" || !isFinite(thresholdSeconds) || thresholdSeconds <= 0) return null;
-  return Math.min(1, Math.max(0, currentSeconds / thresholdSeconds));
-}
-
-/**
  * THE SEAM: broker payload -> the object LaneStrip renders.
  *
  * WHY THIS IS A NAMED, EXPORTED FUNCTION AND NOT AN INLINE `useMemo` (R26).
@@ -171,21 +109,20 @@ export function pressureFraction(currentSeconds, thresholdSeconds) {
  * with no hand-built lane object anywhere in the chain.
  *
  * FIELD NAME PINNED FROM PROVIDER SOURCE, not from an inventory (R25):
- * `broker.py::_queue_state` line 1079 emits `{"shadow": b.shadow, ...}` as a
- * real bool, and `server.py` passes the body through untouched.
+ * `broker.py::_queue_state` emits `{"shadow": b.shadow, ...}` as a real bool,
+ * and `server.py` passes the body through untouched.
  *
  * @returns {{inFlight:number, queued:number, predictedWaitSeconds:number|null,
- *   thresholdSeconds:number|null, estimatedClearSeconds:number|null,
+ *   estimatedClearSeconds:number|null,
  *   shadow:boolean}|null} null when nothing is live.
  */
-export function laneStripFrom(localQueue, localMetrics, thresholdSeconds) {
+export function laneStripFrom(localQueue, localMetrics) {
   const live = laneLive(localQueue, localMetrics);
   if (!live) return null;
   return {
     inFlight: live.running,
     queued: live.queued,
     predictedWaitSeconds: predictedWaitSeconds(live.running, live.queued, live.p50WallSeconds),
-    thresholdSeconds,
     estimatedClearSeconds: live.etaSec,
     // Read the field. Do not restate the condition as prose, and do not infer
     // it from a depth of zero -- that is also what a genuinely idle queue looks
@@ -204,7 +141,6 @@ export const LANE_STRIP_KEYS = Object.freeze([
   "inFlight",
   "queued",
   "predictedWaitSeconds",
-  "thresholdSeconds",
   "estimatedClearSeconds",
   "shadow",
 ]);

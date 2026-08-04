@@ -2,7 +2,6 @@
    re-exported here so it stays unit-testable in isolation (see CLAUDE.md
    conventions for pure helpers alongside components). */
 import { ExternalLink, ChevronDown, Cpu } from "lucide-react";
-import { pressureFraction } from "../../utils/laneMath";
 
 /** Map a session's activity state/status to a --cc-* state color token.
  * Mirrors the STATE_COLOR semantics already established in Sidebar.jsx /
@@ -178,17 +177,17 @@ function NewChip({ onNew }) {
  *  direction -- "0 in flight, 0 queued" is indistinguishable from a healthy
  *  idle lane, so the user reads "nothing is waiting" when the truth is
  *  "nothing is ever queued on this build". Measured in
- *  `lane_broker/tests/test_shadow_default_is_inert.py`: with a spill threshold
- *  of 0.0 seconds and seeded history, shadow still produced zero spills.
+ *  `lane_broker/tests/test_shadow_default_is_inert.py`: under the shipped
+ *  default the broker never enters `_queued_forward` at all.
  *
  *  Omitting the meter would be the OTHER lie, and it is the one S9 spent a
  *  whole unit removing from the model picker: absence reads as "this build has
  *  no queueing", which is a different claim from "queueing exists and is
  *  switched off". Both states must be visible and must not look alike. */
-function LaneShadowNote({ onOpenSpillDetails }) {
+function LaneShadowNote({ onOpenLaneDetails }) {
   const sentence =
     "Queueing is not active: the lane broker is running in shadow mode, so requests are " +
-    "forwarded and logged but never queued, and spill thresholds cannot trigger. " +
+    "forwarded and logged but never queued. " +
     "Set COCKPIT_BROKER_SHADOW=0 and restart to enable queueing.";
   return (
     <div
@@ -212,7 +211,7 @@ function LaneShadowNote({ onOpenSpillDetails }) {
         queueing off · shadow
       </span>
       <button
-        onClick={onOpenSpillDetails}
+        onClick={onOpenLaneDetails}
         className="hover-bg-elevated transition-colors"
         style={{ display: "flex", flexShrink: 0, color: "var(--cc-muted)", background: "transparent", border: "none", padding: 2 }}
         title="Why queueing is not active"
@@ -224,30 +223,36 @@ function LaneShadowNote({ onOpenSpillDetails }) {
   );
 }
 
-function LanePressureMeter({ lane, spillEnabled, onToggleSpill, onOpenSpillDetails }) {
+/** The live lane readout.
+ *
+ *  SPILL WAS REMOVED 2026-08-03 and this component lost three controls with
+ *  it: the fill bar (it was the fraction of the way to a spill trigger), the
+ *  spill on/off switch, and the "spill 30s" label. There is no threshold left,
+ *  so there is nothing to be a fraction of -- a bar drawn against no trigger
+ *  would be decoration pretending to be a measurement, and this strip exists
+ *  to refuse exactly that.
+ *
+ *  What remains is what was always measured rather than compared: how many
+ *  requests are in flight, how many are queued behind them, and how long the
+ *  lane is expected to take to drain. */
+function LaneMeter({ lane, onOpenLaneDetails }) {
   if (!lane) return null;
   // Checked BEFORE any number is read: in shadow every one of them is a
   // structural zero, not a measurement.
-  if (lane.shadow) return <LaneShadowNote onOpenSpillDetails={onOpenSpillDetails} />;
+  if (lane.shadow) return <LaneShadowNote onOpenLaneDetails={onOpenLaneDetails} />;
 
   const inFlight = Number.isFinite(lane.inFlight) ? lane.inFlight : 0;
   const queued = Number.isFinite(lane.queued) ? lane.queued : 0;
   const predictedWait = Number.isFinite(lane.predictedWaitSeconds) ? lane.predictedWaitSeconds : null;
-  const threshold = Number.isFinite(lane.thresholdSeconds) ? lane.thresholdSeconds : null;
   const clear = Number.isFinite(lane.estimatedClearSeconds) ? lane.estimatedClearSeconds : null;
-
-  const fraction = pressureFraction(predictedWait, threshold);
-  const spillOff = fraction == null;
-  const pct = spillOff ? 0 : fraction * 100;
 
   const sentence = `${inFlight} in flight, ${queued} queued. Predicted wait ${formatDuration(
     predictedWait
-  )}${threshold != null ? ` against a ${formatDuration(threshold)} spill threshold` : ""}. Estimated clear in ${formatDuration(
-    clear
-  )}. Spill is ${spillOff ? "off — no threshold set for this class" : spillEnabled ? "on" : "off"}.`;
+  )}. Estimated clear in ${formatDuration(clear)}.`;
 
   return (
     <div
+      data-testid="lane-meter"
       style={{
         display: "flex",
         alignItems: "center",
@@ -268,77 +273,15 @@ function LanePressureMeter({ lane, spillEnabled, onToggleSpill, onOpenSpillDetai
         <span style={{ color: "var(--cc-muted)" }}>{"▸"}</span>
         {queued}
       </span>
-      <div
-        style={{
-          width: 50,
-          height: 5,
-          borderRadius: 999,
-          background: "var(--cc-elev)",
-          overflow: "hidden",
-          flexShrink: 0,
-        }}
-      >
-        {spillOff ? (
-          <div
-            style={{
-              width: "100%",
-              height: "100%",
-              background:
-                "repeating-linear-gradient(45deg, color-mix(in srgb, var(--cc-muted) 35%, transparent) 0 3px, transparent 3px 6px)",
-            }}
-          />
-        ) : (
-          <div
-            style={{
-              width: `${pct}%`,
-              height: "100%",
-              background: "var(--cc-waiting)",
-            }}
-          />
-        )}
-      </div>
       <span style={{ fontSize: 10, whiteSpace: "nowrap", color: "var(--cc-dim)" }}>
         ~{formatDuration(clear)}
       </span>
-      <span style={{ fontSize: 10, whiteSpace: "nowrap", color: "var(--cc-muted)" }}>
-        {spillOff ? "spill off" : `spill ${formatDuration(threshold)}`}
-      </span>
       <button
-        role="switch"
-        aria-checked={spillEnabled}
-        aria-label="Toggle spill"
-        title={spillEnabled ? "Spill enabled — click to disable" : "Spill disabled — click to enable"}
-        onClick={() => onToggleSpill?.(!spillEnabled)}
-        style={{
-          width: 26,
-          height: 14,
-          borderRadius: 999,
-          flexShrink: 0,
-          border: "1px solid var(--cc-border)",
-          background: spillEnabled ? "var(--cc-waiting)" : "var(--cc-elev)",
-          position: "relative",
-          cursor: "pointer",
-        }}
-      >
-        <span
-          style={{
-            position: "absolute",
-            top: 1,
-            left: spillEnabled ? 13 : 1,
-            width: 10,
-            height: 10,
-            borderRadius: 999,
-            background: "var(--cc-bg)",
-            transition: "left .15s ease",
-          }}
-        />
-      </button>
-      <button
-        onClick={onOpenSpillDetails}
+        onClick={onOpenLaneDetails}
         className="hover-bg-elevated transition-colors"
         style={{ display: "flex", flexShrink: 0, color: "var(--cc-muted)", background: "transparent", border: "none", padding: 2 }}
-        title="Open per-class spill thresholds"
-        aria-label="Open per-class spill thresholds"
+        title="Open the lane in Engine"
+        aria-label="Open the lane in Engine"
       >
         <ChevronDown size={12} />
       </button>
@@ -355,9 +298,7 @@ export default function LaneStrip({
   onNew,
   onChipDragStart,
   lane,
-  spillEnabled,
-  onToggleSpill,
-  onOpenSpillDetails,
+  onOpenLaneDetails,
 }) {
   const list = Array.isArray(sessions) ? sessions : [];
   const hasSlot = paneSlotById && typeof paneSlotById.get === "function";
@@ -395,12 +336,7 @@ export default function LaneStrip({
           <NewChip onNew={onNew} />
         </div>
       </div>
-      <LanePressureMeter
-        lane={lane}
-        spillEnabled={spillEnabled}
-        onToggleSpill={onToggleSpill}
-        onOpenSpillDetails={onOpenSpillDetails}
-      />
+      <LaneMeter lane={lane} onOpenLaneDetails={onOpenLaneDetails} />
     </div>
   );
 }

@@ -1,6 +1,28 @@
 # 15 — Spill: the measurement, and why nothing was built
 
-**Status:** MEASURED. **NOT BUILT — deliberately.** Blocked on ASK-SPILLTARGET.
+**Status: CLOSED 2026-08-03 — THE FEATURE WAS REMOVED, SO NOTHING HERE WILL BE
+BUILT.** ASK-SPILLTARGET is answered, not still open.
+
+**The owner ruled, verbatim: _"let's just remove spill I'll read the rest
+later."_** He ruled with the measurement below in front of him — that the
+subscription path refuses structurally rather than for want of quota, and lifts
+only for a caller presenting as Claude Code, so Studio spilling on its own
+behalf would circumvent a control Anthropic enforces on purpose. Rather than
+choose between the two remaining shapes, he removed the feature.
+
+**Everything below this line is retained as the RECORD of what was measured and
+why the decision was reachable. It is not a plan. Do not resurrect it as one.**
+(R18: a dated record is a witness. The measurement was correct when it was
+taken and is not retroactively corrected by the ruling that followed it.)
+
+The removal itself is documented in `CLAUDE.md` ▸ "Spill — REMOVED ENTIRELY,
+2026-08-03", including the two consequences it left behind: an unbounded queue,
+and three surfaces that lost a state rather than gaining an invented one.
+
+---
+
+**Original status (2026-08-03, before the ruling):** MEASURED. **NOT BUILT —
+deliberately.** Blocked on ASK-SPILLTARGET.
 
 **Filed 2026-08-03. Row: S24.**
 

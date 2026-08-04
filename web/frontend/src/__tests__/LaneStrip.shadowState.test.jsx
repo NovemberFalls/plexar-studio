@@ -3,8 +3,8 @@
  *
  * Measured in `lane_broker/tests/test_shadow_default_is_inert.py`: under
  * Plexar Studio's shipped default the broker forwards and logs but NEVER queues, and
- * a spill threshold of 0.0 seconds with seeded history still produces zero
- * spills. So the live meter's "0 in flight, 0 queued" is not a measurement —
+ * the broker never enters `_queued_forward` at all. So the live meter's
+ * "0 in flight, 0 queued" is not a measurement —
  * it is a structural constant.
  *
  * THREE STATES, and the two failure modes are opposite lies:
@@ -52,7 +52,7 @@ const SHADOW_LANE = {
 
 function renderStrip(lane) {
   return render(
-    <LaneStrip sessions={sessions} lane={lane} spillEnabled={true} />
+    <LaneStrip sessions={sessions} lane={lane} />
   );
 }
 
@@ -70,7 +70,7 @@ describe("LaneStrip: queueing-off must be visible, and must not look like idle o
     expect(described).toMatch(/COCKPIT_BROKER_SHADOW=0/);
   });
 
-  it("SHADOW — does NOT render the live pressure numbers", () => {
+  it("SHADOW — does NOT render the live lane numbers", () => {
     const { queryByTestId, container } = renderStrip(SHADOW_LANE);
     expect(queryByTestId("lane-shadow-note")).not.toBeNull();
     // The live meter's sentence is the thing that would be false here.

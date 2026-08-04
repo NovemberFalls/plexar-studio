@@ -26,7 +26,7 @@ import Inspector from "./components/shell/Inspector";
 import StatusStrip from "./components/shell/StatusStrip";
 import SettingsView from "./components/settings/SettingsView";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
-import { laneStripFrom, pressureFraction } from "./utils/laneMath";
+import { laneStripFrom } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
 import { FEATURED_LAYOUTS, clampFeatured, computePaneOrder, swapSlots } from "./utils/paneLayout";
 
@@ -67,11 +67,6 @@ const SECTION_TITLES = {
 /** Shown in the status strip. Sourced from the Vite-injected package version so
  *  it cannot drift from the installer the user actually ran. */
 const APP_VERSION = import.meta.env?.VITE_APP_VERSION || null;
-
-/** Spill threshold for the interactive class, in SECONDS of predicted wait (not
- *  queue depth — see utils/laneMath.js). Mirrors the broker's own
- *  `--spill-interactive 30.0` default, used until /config/spill reports back. */
-const DEFAULT_INTERACTIVE_SPILL_SECONDS = 30;
 
 /**
  * Adaptive layout engine (README "Adaptive Layout Engine" table).
@@ -300,10 +295,6 @@ export default function App() {
   });
   const [localQueue, setLocalQueue] = useState(null);   // GET /api/local/queue, or null/offline
   const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
-  // GET /api/local/spill (per-class thresholds + counters). The VALUE is now
-  // read (the lane strip's trigger and toggle come from it) — it used to be
-  // write-only, which is why the meter had no real threshold to measure against.
-  const [localSpill, setLocalSpill] = useState(null);
   const [localStatus, setLocalStatus] = useState(null); // GET /api/local/status — what's actually connected
   const [metricsWindow] = useState("lifetime"); // lifetime | 24h | session (legacy TopBar quick-glance poller)
   // Provider registry (ProviderPicker owns the fetch + localStorage selection;
@@ -1035,19 +1026,15 @@ export default function App() {
     };
   }, [backendReady, localEnabled]);
 
-  // Poll the selected provider's queue (3s) and metrics + spill (10s) — gated
-  // so a disabled feature or unselected provider costs nothing. Best-effort:
+  // Poll the selected provider's queue (3s) and metrics (10s) — gated so a
+  // disabled feature or unselected provider costs nothing. Best-effort:
   // errors/offline are swallowed and surfaced as a null (offline) state the
   // panels render as "broker offline". Each fetch is additionally gated on
-  // the provider actually listing that capability; spill also requires
-  // scope=="local" (PUT is 403 for remote providers, so the read-only sliders
-  // are withheld there too) — spillConfig === null tells LaneQueuePanel to
-  // omit the section entirely rather than show a false "offline" state.
+  // the provider actually listing that capability.
   useEffect(() => {
     if (!backendReady || !localEnabled || !selectedProvider) {
       setLocalQueue(null);
       setLocalMetrics(null);
-      setLocalSpill(null);
       return;
     }
     const providerId = selectedProvider.id;
@@ -1065,7 +1052,7 @@ export default function App() {
       }
     };
 
-    const fetchMetricsAndSpill = async () => {
+    const fetchMetrics = async () => {
       if (caps.includes("metrics")) {
         try {
           const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/metrics?window=${encodeURIComponent(metricsWindow)}`, { signal });
@@ -1076,22 +1063,12 @@ export default function App() {
       } else {
         setLocalMetrics(null);
       }
-      if (caps.includes("spill") && selectedProvider.scope === "local") {
-        try {
-          const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/spill`, { signal });
-          setLocalSpill(res.ok ? await res.json() : { reachable: false });
-        } catch (_) {
-          // swallow — best-effort
-        }
-      } else {
-        setLocalSpill(null);
-      }
     };
 
     fetchQueue();
-    fetchMetricsAndSpill();
+    fetchMetrics();
     const queueId = setInterval(fetchQueue, 3000);
-    const slowId = setInterval(fetchMetricsAndSpill, 10000);
+    const slowId = setInterval(fetchMetrics, 10000);
     return () => {
       clearInterval(queueId);
       clearInterval(slowId);
@@ -1115,28 +1092,6 @@ export default function App() {
     watching: showLocalBroker || defaultsOpen,
     onToast: toast,
   });
-
-  // Commit a single lane-class spill threshold (seconds, or null to disable),
-  // scoped to the selected provider. PUTs the partial map and applies the
-  // broker's echoed full state.
-  const commitSpill = useCallback(async (cls, value) => {
-    if (!selectedProvider) return;
-    try {
-      const res = await fetch(`/api/local/${encodeURIComponent(selectedProvider.id)}/spill`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [cls]: value }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        toast(data.error || "Could not update spill threshold", "error");
-        return;
-      }
-      setLocalSpill(data);
-    } catch (_) {
-      toast("Broker unreachable — spill threshold not changed", "error");
-    }
-  }, [toast, selectedProvider]);
 
   // Bridge modal handlers
   const handleOpenBridge = useCallback((sessionId) => {
@@ -1588,24 +1543,6 @@ export default function App() {
     setActiveSection((prev) => (prev === section ? "work" : section));
   }, []);
 
-  // Spill trigger for the interactive class, in seconds of predicted wait.
-  // `null` in the broker payload means spill is DISABLED for the class — which
-  // is why the toggle reads presence, not truthiness of a number.
-  const spillThresholdSeconds = useMemo(() => {
-    const t = localSpill?.spill_thresholds_s?.interactive;
-    if (t === null) return null;
-    return typeof t === "number" ? t : DEFAULT_INTERACTIVE_SPILL_SECONDS;
-  }, [localSpill]);
-  const spillEnabled = spillThresholdSeconds != null;
-
-  /** Master spill switch for the interactive lane. Turning it off sends null
-   *  (the broker's "disabled" sentinel); turning it back on restores the
-   *  default trigger. This is the same key the Engine view and Settings write —
-   *  three surfaces, one PUT, per the handoff. */
-  const toggleSpillEnabled = useCallback((next) => {
-    commitSpill({ interactive: next ? DEFAULT_INTERACTIVE_SPILL_SECONDS : null });
-  }, [commitSpill]);
-
   /** Per-session override. Phase 1 writes the WORKSPACE default (the existing
    *  behaviour) — true per-session overrides need a backend hop to re-spawn or
    *  re-key a live session, which is Phase 3. Keeping it honest here rather
@@ -1649,7 +1586,7 @@ export default function App() {
     });
   }, [activeIds]);
 
-  // Lane pressure, from the shared math (utils/laneMath.js) so the strip, the
+  // Lane readout, from the shared math (utils/laneMath.js) so the strip, the
   // TopBar pill and Engine > Live cannot disagree.
   // The mapping itself lives in utils/laneMath.js as `laneStripFrom` so it can
   // be tested. It used to be inline here, and the R26 re-audit of S10 found it
@@ -1658,13 +1595,18 @@ export default function App() {
   // tells the truth about a lane object -- but nothing carried the flag from
   // one to the other. See laneMath.js::laneStripFrom for the full note.
   const laneStripData = useMemo(
-    () => laneStripFrom(localQueue, localMetrics, spillThresholdSeconds),
-    [localQueue, localMetrics, spillThresholdSeconds]
+    () => laneStripFrom(localQueue, localMetrics),
+    [localQueue, localMetrics]
   );
 
-  /** Engine rail dot: down when something is configured but unreachable,
-   *  pressure when the lane is backed up past its trigger, else serving.
-   *  null (no dot) when the local engine is switched off entirely. */
+  /** Engine rail dot: down when something is configured but unreachable, else
+   *  serving. null (no dot) when the local engine is switched off entirely.
+   *
+   *  THE "pressure" STATE WENT WITH SPILL (2026-08-03). It was defined as
+   *  "predicted wait has reached the spill trigger"; with no trigger there is
+   *  no such threshold, and inventing a new one -- some depth or wall-clock
+   *  number nobody chose -- would be a vocabulary this program did not decide
+   *  on. Two honest states beat three with one made up. */
   const engineStatus = useMemo(() => {
     if (!localEnabled) return null;
     // Field names pinned to GET /api/local/status, which returns
@@ -1675,10 +1617,8 @@ export default function App() {
     // `compatible: false` is also down for our purposes: something is answering,
     // but not the broker contract, so it cannot serve us.
     if (localStatus && (localStatus.reachable === false || localStatus.compatible === false)) return "down";
-    const frac = pressureFraction(laneStripData?.predictedWaitSeconds, laneStripData?.thresholdSeconds);
-    if (frac != null && frac >= 1) return "pressure";
     return "serving";
-  }, [localEnabled, localStatus, laneStripData]);
+  }, [localEnabled, localStatus]);
 
   const bridgeCount = useMemo(
     () => activeBridges.filter((b) => b?.state === "active").length
@@ -1968,9 +1908,7 @@ export default function App() {
                 e.dataTransfer.setData("text/plain", `session:${sessionId}`);
               }}
               lane={laneStripData}
-              spillEnabled={spillEnabled}
-              onToggleSpill={toggleSpillEnabled}
-              onOpenSpillDetails={() => setActiveSection("engine")}
+              onOpenLaneDetails={() => setActiveSection("engine")}
             />
 
           <div className="flex flex-1 min-h-0">

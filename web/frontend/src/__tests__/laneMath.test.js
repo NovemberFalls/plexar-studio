@@ -12,9 +12,6 @@ import {
   fmtEta,
   laneLive,
   predictedWaitSeconds,
-  depthEquivalent,
-  waitEquivalent,
-  pressureFraction,
 } from "../utils/laneMath";
 
 describe("queueDepth", () => {
@@ -157,83 +154,3 @@ describe("predictedWaitSeconds", () => {
   });
 });
 
-describe("depthEquivalent", () => {
-  it("returns null for a non-positive p50WallSeconds", () => {
-    expect(depthEquivalent(30, 0)).toBeNull();
-    expect(depthEquivalent(30, -1)).toBeNull();
-    expect(depthEquivalent(30, null)).toBeNull();
-  });
-
-  it("returns null for a non-finite/negative threshold", () => {
-    expect(depthEquivalent(NaN, 5)).toBeNull();
-    expect(depthEquivalent(-1, 5)).toBeNull();
-  });
-
-  it("ceils the division — e.g. 31s at 10s/wall needs to survive 4 requests, not 3", () => {
-    expect(depthEquivalent(31, 10)).toBe(4);
-  });
-
-  it("returns 0 for a zero threshold with a valid wall time (0 depth is a real, known value)", () => {
-    expect(depthEquivalent(0, 10)).toBe(0);
-  });
-
-  it("exact multiples do not round up an extra unit", () => {
-    expect(depthEquivalent(30, 10)).toBe(3);
-  });
-});
-
-describe("waitEquivalent", () => {
-  it("returns null when depth is malformed (negative/NaN/non-number)", () => {
-    expect(waitEquivalent(-1, 10)).toBeNull();
-    expect(waitEquivalent(NaN, 10)).toBeNull();
-    expect(waitEquivalent("3", 10)).toBeNull();
-  });
-
-  it("returns null for a non-positive p50WallSeconds", () => {
-    expect(waitEquivalent(3, 0)).toBeNull();
-    expect(waitEquivalent(3, null)).toBeNull();
-  });
-
-  it("multiplies depth by wall seconds, flooring fractional depth", () => {
-    expect(waitEquivalent(3.9, 10)).toBe(30);
-  });
-
-  it("0 depth with a valid wall time yields a known 0 wait", () => {
-    expect(waitEquivalent(0, 10)).toBe(0);
-  });
-});
-
-describe("pressureFraction", () => {
-  it("returns null when currentSeconds is unknown/malformed", () => {
-    expect(pressureFraction(null, 10)).toBeNull();
-    expect(pressureFraction(NaN, 10)).toBeNull();
-    expect(pressureFraction(-1, 10)).toBeNull();
-  });
-
-  it("returns null when the threshold is null — spill is DISABLED for this class", () => {
-    const result = pressureFraction(5, null);
-    expect(result).toBeNull();
-    // The disabled case must not be confused with either meter extreme.
-    expect(result).not.toBe(0);
-    expect(result).not.toBe(1);
-  });
-
-  it("returns null for a zero or negative threshold (also not a valid trigger)", () => {
-    expect(pressureFraction(5, 0)).toBeNull();
-    expect(pressureFraction(5, -10)).toBeNull();
-  });
-
-  it("clamps a currentSeconds beyond the threshold down to 1 (never over-full)", () => {
-    // Negative currentSeconds is rejected earlier as malformed, so the only
-    // reachable clamp in practice is the upper one.
-    expect(pressureFraction(20, 10)).toBe(1);
-  });
-
-  it("returns the honest fraction inside the range", () => {
-    expect(pressureFraction(5, 10)).toBe(0.5);
-  });
-
-  it("0 current seconds against a valid threshold is a real, known 0 (no pressure)", () => {
-    expect(pressureFraction(0, 10)).toBe(0);
-  });
-});

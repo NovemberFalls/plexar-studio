@@ -4,7 +4,7 @@ Queue-owning API gateway in front of the local LM Studio inference server.
 LM Studio (`127.0.0.1:1234`) serves **one request at a time** (measured law:
 `max_concurrent=1` — parallel decode loses on one GPU; the broker enforces
 this, never work around it). Its internal queue is invisible; the broker makes
-it explicit: priority, position, ETA, and load-aware spill.
+it explicit: priority, position and ETA.
 
 Single file, Python 3.12, **stdlib only** — nothing to install.
 
@@ -26,12 +26,13 @@ Single file, Python 3.12, **stdlib only** — nothing to install.
   `jobs.jsonl` (ts, class, prompt_chars, wall_ms, model, client_id,
   `X-Trace-Id`/`X-Trace-Parent` if present, plus v2 `status`, `error_kind`,
   `http_status`, `ttft_ms`, `queue_wait_ms`) and keeps a rolling median wall per
-  prompt-size bucket (`<4K`, `4-16K`, `16-48K`, `>48K` chars) for ETA. Spill
-  decisions are logged separately to `spills.jsonl`.
-- **Spill:** if the predicted wait at enqueue exceeds the class threshold
-  (interactive 30s, worker 300s, batch none — `--spill-interactive` /
-  `--spill-worker` to change), responds `503`
-  `{"spill":true,"predicted_wait_s":…,"hint":"escalate-to-api"}`.
+  prompt-size bucket (`<4K`, `4-16K`, `16-48K`, `>48K` chars) for ETA.
+- **No local refusal.** Spill — a per-class predicted-wait threshold above which
+  the broker answered `503 {"spill":true}` — was REMOVED 2026-08-03 on the
+  owner's ruling. A request that would have been refused now queues and waits;
+  **there is no depth limit and no wait ceiling**, and the client's timeout is
+  the only backpressure. Removed with it: `/config/spill`, `/spills`,
+  `spills.jsonl`, `--spill-interactive`, `--spill-worker`.
   The client decides what to do; the broker never calls Anthropic itself and
   never sees API keys.
 
@@ -45,7 +46,7 @@ python tools/lane-broker/broker.py --shadow        # observe+log only — safe f
 ```
 
 Flags: `--port 1235` · `--upstream http://127.0.0.1:1234` · `--shadow` ·
-`--log-file <path>` · `--spill-interactive 30` · `--spill-worker 300`.
+`--log-file <path>`.
 
 Persistent on Windows (no install, survives closing the terminal):
 
@@ -76,10 +77,10 @@ Stop it: `taskkill /F /IM pythonw.exe` (or find the PID via
   predicted remaining), queued jobs in dispatch order (class, position,
   predicted wall), `estimated_clear_seconds`, and (v2, additive)
   `predicted_wait_s_by_class {interactive, worker, batch}` — the per-class
-  predicted wait a new job would see right now. This is what arms a spill/offload
-  alert: a class is over-threshold when its value exceeds its (non-null)
-  `spill_thresholds_s` entry. `estimated_clear_seconds` and every existing field
-  are unchanged.
+  predicted wait a new job would see right now. It is a REPORTED number and
+  nothing compares it to anything: the per-class threshold that used to do so
+  went with spill (2026-08-03). `estimated_clear_seconds` and every existing
+  field are unchanged.
 - `GET http://127.0.0.1:1235/queue?html=1` — minimal auto-refreshing page.
 
 ## Metrics (`/metrics` — Cockpit contract)
@@ -124,8 +125,7 @@ also carries `ttft_ms`, `decode_tokens_per_sec`, `queue_wait_ms` and
 `status` (`ok | error | cancelled`), `error_kind` (or `null`), `http_status`
 (upstream code; `0` = transport failure), `ttft_ms` (or `null` for
 non-streaming) and `queue_wait_ms`. Legacy records with no `status` are treated
-as completed (`ok`). Spilled requests never run and are logged separately (see
-`/spills`), so they never inflate `runs_total`.
+as completed (`ok`).
 
 **Definitional contract** (agreed wording — derived ratios depend on it):
 
@@ -148,7 +148,7 @@ null token fields and are excluded from the tps average.
 ## Time series (`/metrics/timeseries` — v2, read-only)
 
 `GET /metrics/timeseries?window=<session|24h|7d|lifetime>&bucket=<5m|1h|1d|Ns>`.
-Recomputed from `jobs.jsonl` (+ `spills.jsonl`), so it survives restart and
+Recomputed from `jobs.jsonl`, so it survives restart and
 reports `persisted: true`. Default bucket follows the window (`5m` for session,
 `1h` for 24h, `1d` for 7d/lifetime). Response:
 
@@ -160,51 +160,15 @@ reports `persisted: true`. Default bucket follows the window (`5m` for session,
       "by_provider": {
         "local": { "runs": int, "tokens": int, "decode_tps_p50": num|null,
                    "ttft_ms_p50": int|null, "queue_wait_ms_p50": int|null,
-                   "spilled": int, "errors": int } } }
+                   "errors": int } } }
   ]
 }
 ```
 
 The broker fronts a single upstream, so `by_provider` carries one entry keyed on
 `COCKPIT_PROVIDER_ID` (env, default `local`) — the shape is N-ready for a later
-multi-backend phase. `runs` counts completed runs; `spilled` counts spill events
+multi-backend phase. `runs` counts completed runs
 in the bucket. Bucket count is capped at 1000.
-
-## Spill events (`/spills` — v2, read-only)
-
-`spilled_by_class` (below) is a lifetime tally with no time or reason. Each spill
-**decision** is now also logged to `spills.jsonl` (sibling of `jobs.jsonl`) and
-exposed via `GET /spills?limit=N` (default 20, clamped 1..1000, newest-first):
-
-```json
-{ "spills": [ { "ts": "iso", "lane_class": "interactive",
-                "predicted_wait_s": 55.0, "threshold_s": 30.0,
-                "client_id": "str", "agent": "str", "trace_id": "str" } ],
-  "count": int }
-```
-
-Spill events live in their own file so a spilled request (which never ran) never
-contaminates `/metrics` run counts or wall-time percentiles.
-
-## Spill control (`/config/spill` — the one mutation endpoint)
-
-`GET /config/spill` returns the live config; `PUT /config/spill` with a
-partial map changes it — e.g. `{"interactive": 45}`, `{"batch": 600}`,
-`{"worker": null}` (null disables spill for that class). Response echoes the
-full effective config plus `spilled_total` / `spilled_by_class` counters and
-`persisted: false`.
-
-**Semantics (answering Cockpit):** the threshold is **seconds of predicted
-wait** for that lane class at enqueue time — not queue depth. A slider should
-be per-class, labeled in seconds (sane ranges: interactive 5–120s, worker
-30–1800s, batch usually disabled).
-
-**Guardrails:** values validated broker-side (null or 0–86400 s, known classes
-only; invalid input → 400, config untouched, all-or-nothing). Changes are
-**session-only** — a broker restart restores CLI/default values; persistence
-stays with the operator (`--spill-interactive` / `--spill-worker`), so a
-localhost caller can never silently make a bad threshold permanent. This is
-deliberately the only write on the service; everything else stays read-only.
 
 ## Traces (`/traces` and `/trace/{id}` — read-only observability)
 
@@ -294,10 +258,10 @@ python -m pytest tools/lane-broker/tests -q
 ```
 
 Covers: single-flight ordering, priority preemption in queue, ETA math from
-seeded history, spill trigger, byte-verbatim chunked-SSE pass-through with
+seeded history, byte-verbatim chunked-SSE pass-through with
 `tool_use` JSON, `/queue` with 3 queued jobs, shadow-mode concurrency +
 logging, and a live smoke against real LM Studio (skips cleanly if `:1234`
 is down). `tests/test_metrics_v2.py` covers the v2 additive metrics offline
 (TTFT null-exclusion, decode math, queue wait, error counting + runs/attempts
-split, `by_model`, `/metrics/timeseries` bucketing, `/spills` persist+reload,
+split, `by_model`, `/metrics/timeseries` bucketing,
 `predicted_wait_s_by_class`).

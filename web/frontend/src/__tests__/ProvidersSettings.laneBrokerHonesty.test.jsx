@@ -63,7 +63,7 @@ beforeEach(() => {
             label: "LM Studio (local)",
             kind: "lmstudio",
             scope: "local",
-            capabilities: ["models", "health", "queue", "metrics", "spill"],
+            capabilities: ["models", "health", "queue", "metrics"],
           },
         ],
       });

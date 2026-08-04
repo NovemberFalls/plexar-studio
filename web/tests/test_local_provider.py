@@ -274,7 +274,7 @@ class TestLocalProviderValidation:
             "broker_url": "https://example.com:1235",
             "management_url": "https://example.com:1234",
             "auth": {"type": "none"},
-            "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
+            "capabilities": ["queue", "metrics", "models", "traces", "health"],
         }
         try:
             assert _server.resolve_local_base_url("remote-test-provider") is None

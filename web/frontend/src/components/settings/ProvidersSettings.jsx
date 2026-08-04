@@ -49,7 +49,6 @@ import {
   Terminal,
   TriangleAlert,
 } from "lucide-react";
-import SpillPolicy from "./SpillPolicy";
 
 // ── tokens / shared style fragments ───────────────────────
 const ACCENT_FG = "#0f1216"; // the one permitted literal: accent-button foreground
@@ -65,14 +64,14 @@ const CARD = {
 
 /**
  * The half-width pair. Three rows on this page are two blocks side by side:
- * lane broker + spill policy, LM Studio + vLLM, Ollama + OpenRouter.
+ * lane broker + queueing, LM Studio + vLLM, Ollama + OpenRouter.
  *
  * It is one constant rather than three inline objects because the owner's
  * instruction was about the PAGE, not about one row: nothing here earns the
  * full column on its own, and a card that is wide for no reason reads as more
  * important than its neighbours. `minWidth: 0` on the track is load-bearing —
- * without it a grid child with its own horizontal scroller (spill policy) will
- * refuse to shrink and push the page sideways instead.
+ * without it a grid child with its own horizontal scroller would refuse to
+ * shrink and push the page sideways instead.
  */
 const PAIR = {
   display: "grid",
@@ -108,7 +107,7 @@ const FIELD_GRID = {
 // both were missing here, which hid the very capability the vLLM models-folder
 // section is gated on.
 const ALL_CAPABILITIES = [
-  "models", "model-control", "model-discovery", "health", "queue", "metrics", "spill", "traces",
+  "models", "model-control", "model-discovery", "health", "queue", "metrics", "traces",
 ];
 
 /** Plexar Studio's expected Claude CLI binary name — anything else earns a warning callout. */
@@ -1106,6 +1105,92 @@ function OpenRouterCard({ get, setField, isDirty }) {
 
 // ── page ──────────────────────────────────────────────────
 
+/**
+ * Queueing — the lane broker's own operating mode, read from the wire.
+ *
+ * THIS CARD IS WHY THE SPILL BLOCK'S REMOVAL DID NOT SILENTLY REFLOW THE PAGE.
+ * Spill policy paired with Lane broker on the owner's explicit instruction
+ * (S22). Deleting it left Lane broker orphaned and the "every card is inside a
+ * pair" gate red. It also would have deleted the ONLY place in Settings that
+ * states whether queueing is actually running -- and S10's ruling is that
+ * hiding that state is its own lie: absence reads as "this build has no
+ * queueing", which is a different claim from "queueing exists and is switched
+ * off".
+ *
+ * So the partner is not decoration. It is the statement the deleted card was
+ * carrying, moved to a card of its own and read from `GET /queue`'s `shadow`
+ * field rather than restated as prose (the same rule LaneStrip follows: read
+ * the flag, never infer it from a depth of zero -- an idle queueing broker
+ * reports 0/0 too).
+ *
+ * There is nothing to configure here, and it says so. `--shadow` is start-time
+ * only on the broker, so a control would be a switch that cannot move.
+ */
+function QueueingCard({ provider, loading }) {
+  const [queue, setQueue] = useState(undefined); // undefined = not asked yet
+
+  // No synchronous setState in the effect body (react-hooks/set-state-in-effect,
+  // the same rule the page's own probe() obeys): the no-provider case is handled
+  // inside the async body, after the first await.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!provider) {
+        if (!cancelled) setQueue(undefined);
+        return;
+      }
+      const data = await safeGet(`/api/local/${encodeURIComponent(provider.id)}/queue`);
+      if (!cancelled) setQueue(data ?? null);
+    })();
+    return () => { cancelled = true; };
+  }, [provider]);
+
+  // Three states, never collapsed: shadow (queueing off), queueing on, and
+  // unknown (nothing answered). A `.get()` on an absent field yields undefined,
+  // which must not read as "queueing is on".
+  const shadow = queue && queue.reachable !== false ? queue.shadow : undefined;
+
+  return (
+    <div style={CARD} data-testid="card-queueing">
+      <CardHeader icon={Layers} token="var(--cc-accent)" name="Queueing">
+        {shadow === true && <Badge token="var(--cc-waiting)">shadow — not queueing</Badge>}
+        {shadow === false && <Badge token="var(--cc-accent)">queueing</Badge>}
+        <span style={{ marginLeft: "auto" }} />
+        <OverflowButton name="queueing" />
+      </CardHeader>
+
+      <div style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-fg)", paddingTop: 6 }}>
+        {loading || shadow === undefined ? (
+          <span data-testid="queueing-unknown" style={{ color: "var(--cc-muted)" }}>
+            The broker did not report its mode, so whether requests are being queued is
+            unknown. This is not the same as &ldquo;queueing is off&rdquo;.
+          </span>
+        ) : shadow ? (
+          <span data-testid="queueing-shadow">
+            The lane broker is running in <strong>shadow mode</strong>: it forwards and
+            logs every request but never queues one. Requests are not ordered by lane
+            class and nothing waits. Set <code>COCKPIT_BROKER_SHADOW=0</code> and restart
+            Plexar Studio to enable queueing.
+          </span>
+        ) : (
+          <span data-testid="queueing-on">
+            The lane broker is queueing: one request is forwarded at a time and the rest
+            wait their turn, ordered interactive &rsaquo; worker &rsaquo; batch.
+            <strong> The queue has no depth limit and no wait ceiling</strong> — a request
+            waits as long as the lane takes.
+          </span>
+        )}
+      </div>
+
+      <NotEnforcedNote
+        name="queueing-mode"
+        what="Queueing mode"
+        why="the broker reads --shadow once at start-up, so this cannot be a switch. It is reported here, not set here."
+      />
+    </div>
+  );
+}
+
 export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) {
   const [providers, setProviders] = useState(null); // null = not yet read
   const [status, setStatus] = useState(undefined); // undefined = checking, null = unknown
@@ -1158,12 +1243,11 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
 
   const rows = providers || [];
   const byKind = (kind) => rows.find((p) => p.kind === kind) || null;
-  // The spill card hosts whichever backend declares the `spill` capability —
-  // spill is a lane-broker feature, so in practice that is the broker-fronted
-  // provider. Passed down as a prop rather than re-fetched so the page keeps
-  // exactly one /api/local/providers read.
-  const spillProvider = rows.find(
-    (p) => Array.isArray(p.capabilities) && p.capabilities.includes("spill")
+  // Whichever backend sits behind the broker — the one that declares `queue`.
+  // Passed down as a prop rather than re-fetched so the page keeps exactly one
+  // /api/local/providers read.
+  const queueProvider = rows.find(
+    (p) => Array.isArray(p.capabilities) && p.capabilities.includes("queue")
   ) || null;
   const lmStudio = byKind("lmstudio");
   const vllm = byKind("vllm");
@@ -1229,8 +1313,8 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
-      {/* ── Lane broker + spill policy — half-width pair ─ */}
-      <div style={PAIR} data-testid="row-broker-spill">
+      {/* ── Lane broker + queueing — half-width pair ──── */}
+      <div style={PAIR} data-testid="row-broker-queueing">
       <div style={CARD} data-testid="card-lane-broker">
         <CardHeader icon={Route} token="var(--cc-accent)" name="Lane broker">
           <Pill
@@ -1331,17 +1415,8 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
         />
       </div>
 
-      {/* ── Spill policy + its translation panel ──────── */}
-      {/* The translation table sits BESIDE the control, never in a tooltip — it
-          is what makes a seconds threshold comprehensible. The pair is wider
-          than the settings column, so it scrolls horizontally rather than
-          squashing either half. */}
-      <div
-        style={{ overflowX: "auto", overflowY: "hidden", minWidth: 0, paddingBottom: 2 }}
-        data-testid="card-spill-policy"
-      >
-        <SpillPolicy provider={spillProvider} loading={providers === null} />
-      </div>
+      {/* ── Queueing ──────────────────────────────────── */}
+      <QueueingCard provider={queueProvider} loading={providers === null} />
       </div>
 
       {/* ── Backends ──────────────────────────────────── */}

@@ -3,7 +3,6 @@
 Covers:
   1. GET /api/local/{provider}/metrics/timeseries proxies broker JSON verbatim
      (new fields pass through unchanged -- no shape validation to strip them).
-  2. GET /api/local/{provider}/spills proxies broker JSON, forwards limit.
   3. GET /api/local/{provider}/metrics passthrough of new (ttft_ms etc.) fields.
   4. GET /api/usage/summary sources usage_tracker.summary(window) and validates
      the window param.
@@ -44,7 +43,7 @@ async def test_timeseries_proxies_broker_json(client, monkeypatch):
         "buckets": [
             {"ts": "2026-07-24T00:00:00Z", "by_provider": {
                 "lmstudio-local": {"runs": 3, "tokens": 900, "decode_tps_p50": 42.0,
-                                    "ttft_ms_p50": 210, "queue_wait_ms_p50": 15, "spilled": 0, "errors": 0}
+                                    "ttft_ms_p50": 210, "queue_wait_ms_p50": 15, "errors": 0}
             }}
         ]
     }
@@ -92,54 +91,6 @@ async def test_timeseries_offline_returns_503(client, monkeypatch):
     res = await client.get("/api/local/lmstudio-local/metrics/timeseries")
     assert res.status_code == 503
     assert res.json() == {"reachable": False}
-
-
-@pytest.mark.asyncio
-async def test_spills_proxies_and_forwards_limit(client, monkeypatch):
-    payload = {"spills": [{"ts": "2026-07-24T00:00:00Z", "lane_class": "interactive",
-                            "predicted_wait_s": 55.0, "threshold_s": 30.0,
-                            "client_id": "c1", "agent": "ash", "trace_id": "t1"}]}
-    seen = {}
-
-    def fake_get(path, query="", base_url=None):
-        seen["path"] = path
-        seen["query"] = query
-        return payload
-
-    monkeypatch.setattr(server_module, "_broker_get", fake_get)
-    res = await client.get("/api/local/lmstudio-local/spills?limit=5")
-    assert res.status_code == 200
-    assert res.json() == payload
-    assert seen["path"] == "/spills"
-    assert seen["query"] == "limit=5"
-
-
-@pytest.mark.asyncio
-async def test_spills_limit_clamped(client, monkeypatch):
-    seen = {}
-
-    def fake_get(path, query="", base_url=None):
-        seen["query"] = query
-        return {"spills": []}
-
-    monkeypatch.setattr(server_module, "_broker_get", fake_get)
-    res = await client.get("/api/local/lmstudio-local/spills?limit=9999")
-    assert res.status_code == 200
-    assert seen["query"] == "limit=100"
-
-
-@pytest.mark.asyncio
-async def test_spills_capability_missing_404(client, monkeypatch):
-    # lmstudio-local doesn't declare "spill" absent -- swap capabilities to
-    # simulate a provider without it, then restore.
-    provider = server_module._PROVIDERS["lmstudio-local"]
-    original = provider["capabilities"]
-    provider["capabilities"] = [c for c in original if c != "spill"]
-    try:
-        res = await client.get("/api/local/lmstudio-local/spills")
-        assert res.status_code == 404
-    finally:
-        provider["capabilities"] = original
 
 
 @pytest.mark.asyncio

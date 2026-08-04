@@ -10,7 +10,7 @@
  *
  * Instead these tests assert the structural CSS properties that are what
  * actually PRODUCE the no-overflow behavior in a real browser: the fixed
- * elements (pressure meter, + New chip) refuse to shrink so they never lose
+ * elements (lane meter, + New chip) refuse to shrink so they never lose
  * their controls, and the variable elements (session chips) are allowed to
  * shrink and truncate so the fixed elements always have room, while the
  * container itself never masks overflow via `overflow: hidden` (which would
@@ -72,15 +72,14 @@ describe("LaneStrip layout invariants (structural, not a fake scrollWidth check)
     expect(newChip.style.flexShrink).toBe("0");
   });
 
-  it("the pressure meter refuses to shrink (flexShrink:0) — the spill controls must stay fully visible/clickable", () => {
+  it("the lane meter refuses to shrink (flexShrink:0) — the readout must stay fully visible", () => {
     const lane = {
       inFlight: 1,
       queued: 2,
       predictedWaitSeconds: 10,
-      thresholdSeconds: 30,
       estimatedClearSeconds: 15,
     };
-    const { getByRole } = render(
+    const { getByTestId } = render(
       <LaneStrip
         sessions={sessions}
         paneSlotById={new Map()}
@@ -89,11 +88,9 @@ describe("LaneStrip layout invariants (structural, not a fake scrollWidth check)
         onSelectSession={() => {}}
         onNew={() => {}}
         lane={lane}
-        spillEnabled
       />
     );
-    const toggle = getByRole("switch", { name: "Toggle spill" });
-    const meter = toggle.closest("div[title]"); // the outer LanePressureMeter wrapper carries the sentence title
+    const meter = getByTestId("lane-meter");
     expect(meter.style.flexShrink).toBe("0");
   });
 });

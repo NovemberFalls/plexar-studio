@@ -30,10 +30,10 @@ const PROVIDER = {
   label: "LM Studio (local)",
   kind: "lmstudio",
   scope: "local",
-  capabilities: ["queue", "metrics", "spill", "models", "traces", "health"],
+  capabilities: ["queue", "metrics", "models", "traces", "health"],
 };
 
-/** vLLM: served direct, so no queue/spill/traces capability at all. Plexar Studio owns
+/** vLLM: served direct, so no queue/traces capability at all. Plexar Studio owns
  *  the container here (`managed`), which is what makes restart offerable. */
 const VLLM = {
   id: "vllm-local",
@@ -70,7 +70,6 @@ const PAYLOADS = {
     served_model: "qwen3-coder-30b-awq",
   },
   "/models": { reachable: true, models: [{ id: "qwen3-coder-30b-awq", state: "loaded", arch: "qwen3", quantization: "AWQ" }] },
-  "/spill": { spill_thresholds_s: { interactive: 30, worker: 600, batch: null }, spilled_total: 3, spilled_by_class: {}, persisted: false },
   "/traces": { reachable: true, traces: [] },
   "/health": { broker: { reachable: true }, provider: { reachable: true, models_loaded: 1 }, ok: true },
 };
@@ -222,7 +221,6 @@ describe("EngineView frame", () => {
     expect(called.some((u) => u.includes("/models"))).toBe(false);
     expect(called.some((u) => u.includes("/metrics"))).toBe(true);
     expect(called.some((u) => u.includes("/queue"))).toBe(false);
-    expect(called.some((u) => u.includes("/spill"))).toBe(false);
     expect(called.some((u) => u.includes("/traces"))).toBe(false);
   });
 
@@ -242,14 +240,13 @@ describe("EngineView frame", () => {
   });
 
   it("renders offline state rather than zeros when the broker does not answer", async () => {
-    globalThis.fetch = mockFetch({ "/queue": "reject", "/metrics": "reject", "/spill": "reject", "/health": "reject" });
+    globalThis.fetch = mockFetch({ "/queue": "reject", "/metrics": "reject", "/health": "reject" });
     render(<EngineView provider={PROVIDER} onNavigate={vi.fn()} />);
 
-    // The fast (queue/metrics) and slow (spill/health) polls settle
+    // The fast (queue/metrics) and slow (traces/health) polls settle
     // independently, so each offline state is awaited on its own.
     await waitFor(() => expect(screen.getByTestId("lane-offline")).toBeInTheDocument());
     expect(screen.getByTestId("lane-offline")).toHaveTextContent(/unread/i);
-    await waitFor(() => expect(screen.getByTestId("spill-offline")).toBeInTheDocument());
     expect(screen.getByTestId("queue-offline")).toHaveTextContent(/not.*nothing running/i);
     // No fabricated zeros: the four lane stats are absent entirely, not zeroed.
     expect(screen.queryByTestId("lane-inflight")).not.toBeInTheDocument();
@@ -270,7 +267,7 @@ describe("EngineView frame", () => {
     expect(screen.getByTestId("lane-queued")).toHaveTextContent("2");
     expect(screen.getByTestId("lane-tps")).toHaveTextContent("68.2");
     expect(screen.getByTestId("count-rejected")).toHaveTextContent("—");
-    expect(screen.getByTestId("spill-counter-window")).toHaveTextContent(/since the broker started/i);
+    expect(screen.getByTestId("routing-counter-window")).toHaveTextContent(/since the broker started/i);
     expect(screen.getByTestId("engine-live-footer")).toHaveTextContent("requests served");
   });
 
@@ -381,7 +378,6 @@ describe("EngineView frame", () => {
     render(<EngineView provider={VLLM} onNavigate={vi.fn()} />);
     await waitFor(() => expect(screen.getByTestId("queue-not-offered")).toBeInTheDocument());
     expect(screen.getByTestId("queue-not-offered")).toHaveTextContent(/does not expose a lane queue/i);
-    expect(screen.getByTestId("spill-not-offered")).toBeInTheDocument();
   });
 
   it("treats a 404 from load as not-offered and retracts the row buttons", async () => {
@@ -425,7 +421,6 @@ describe("EngineView frame", () => {
     // assert "not answering" about an endpoint they have not called.
     render(<EngineView provider={PROVIDER} onNavigate={vi.fn()} />);
     expect(screen.getByTestId("lane-loading")).toBeInTheDocument();
-    expect(screen.getByTestId("spill-loading")).toBeInTheDocument();
     expect(screen.getByTestId("queue-loading")).toBeInTheDocument();
     expect(screen.queryByTestId("lane-offline")).not.toBeInTheDocument();
     await settle();

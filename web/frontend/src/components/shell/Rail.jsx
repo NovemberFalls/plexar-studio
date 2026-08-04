@@ -9,9 +9,12 @@ const SECTIONS = [
   { id: "reports", label: "REPORTS", icon: ChartColumn },
 ];
 
+/** `pressure` was removed 2026-08-03 with the spill policy that defined it --
+ *  it meant "predicted wait has reached the spill trigger", and there is no
+ *  trigger any more. The map is left as the ONLY list of states this dot can
+ *  show, so an unknown status renders no dot rather than a stale colour. */
 const ENGINE_STATUS_COLOR = {
   serving: "var(--cc-ok)",
-  pressure: "var(--cc-waiting)",
   down: "var(--cc-error)",
 };
 

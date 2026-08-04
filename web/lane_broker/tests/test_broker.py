@@ -227,30 +227,97 @@ def test_eta_from_seeded_history_and_queue_endpoint(env):
         t.join()
 
 
-@pytest.mark.parametrize("env", [{"delay": 2.0, "seed": [40_000] * 5}], indirect=True)
-def test_spill_trigger(env):
+@pytest.mark.parametrize("env", [{"delay": 0.5, "seed": [40_000] * 5}], indirect=True)
+def test_a_formerly_spillable_request_QUEUES_AND_COMPLETES(env):
+    """SPILL REMOVED 2026-08-03 (owner's ruling). This is the replacement gate.
+
+    THE SHAPE OF THE CLAIM MATTERS (R19). Removal is absence-shaped, so this
+    does NOT assert "no 503 was seen" -- an absence assertion passes on a broker
+    that answered nothing at all, and it would also pass on one that hung. It
+    asserts a DECLARED EXPECTED TOTAL and a CEILING:
+
+      * every one of DECLARED_TOTAL requests completes with 200 -- the exact
+        count, not "at least one";
+      * no response body anywhere carries the string "spill", so the refusal is
+        gone at the WIRE and not merely unreachable through some flag;
+      * the observed queue depth never exceeds DECLARED_TOTAL, which is the
+        containment claim: work waits, it does not multiply.
+
+    The FIRST of these requests is precisely the one that used to be refused.
+    The seeded 40s history plus an occupied slot puts the predicted wait far
+    above the old 30s interactive trigger; before this change it received
+    503 {"spill": true}. It now waits and is served.
+
+    WHAT THIS DELIBERATELY DOES NOT CLAIM: that anything bounds the wait. It
+    does not. `_queued_forward`'s docstring says so in as many words -- there is
+    no depth limit and no wait ceiling, and the client's timeout is the only
+    backpressure left. That is the stated consequence of the removal, not an
+    oversight, and a test asserting a bound would be asserting a feature that
+    does not exist.
+    """
     up, port, _ = env
-    # occupy the single slot (predicted 40s wall from seed)
-    t = threading.Thread(target=post_chat, args=(port, "worker", "long"))
-    t.start()
-    time.sleep(0.4)
-    status, body = post_chat(port, "interactive", "spillme", timeout=5)
-    assert status == 503
-    payload = json.loads(body)
-    assert payload["spill"] is True
-    assert payload["hint"] == "escalate-to-api"
-    assert payload["predicted_wait_s"] > 30
-    # batch has no threshold: must NOT spill (it queues; don't wait for it)
-    q_status_holder = {}
+    DECLARED_TOTAL = 3
 
-    def batch_call():
-        q_status_holder["s"] = post_chat(port, "batch", "b")[0]
+    results = {}
 
-    tb = threading.Thread(target=batch_call)
-    tb.start()
-    t.join()
-    tb.join()
-    assert q_status_holder["s"] == 200
+    def fire(i):
+        results[i] = post_chat(port, "interactive", f"formerly-spillable-{i}", timeout=30)
+
+    threads = [threading.Thread(target=fire, args=(i,)) for i in range(DECLARED_TOTAL)]
+    for t in threads:
+        t.start()
+
+    # Ceiling: sample the live depth while they are in flight.
+    peak = 0
+    for _ in range(20):
+        time.sleep(0.1)
+        try:
+            q = json.loads(http_req(port, "GET", "/queue")[1])
+        except Exception:
+            continue
+        depth = (1 if q.get("in_flight") else 0) + len(q.get("queued") or [])
+        peak = max(peak, depth)
+    for t in threads:
+        t.join()
+
+    assert len(results) == DECLARED_TOTAL
+    statuses = [results[i][0] for i in range(DECLARED_TOTAL)]
+    assert statuses == [200] * DECLARED_TOTAL, f"declared {DECLARED_TOTAL} served, got {statuses}"
+    for i in range(DECLARED_TOTAL):
+        assert b"spill" not in results[i][1].lower(), results[i][1][:200]
+    assert 0 < peak <= DECLARED_TOTAL, f"queue depth ceiling breached: peak={peak}"
+
+
+@pytest.mark.parametrize("env", [{"delay": 0.1}], indirect=True)
+def test_the_spill_ROUTES_are_gone_not_merely_disabled(env):
+    """A capability that answers 200 with an empty policy still advertises it.
+
+    PREDICTED 404 AND MEASURED 200, AND THE 200 IS CORRECT -- the prediction was
+    wrong about this broker, not about the removal. There is no 404 branch in
+    the dispatcher at all: any path it does not handle is FORWARDED UPSTREAM
+    verbatim, which is the whole point of a transparent gateway. So a removed
+    route does not become a 404, it becomes an ordinary proxied path and the
+    upstream decides. Asserting 404 here would have pinned a behaviour this
+    broker has never had.
+
+    The claim that IS testable, and the one that matters: nothing the broker
+    itself produces carries a spill shape any more. `_serve_spill_config` and
+    `_serve_spills` are gone, so `spill_thresholds_s`, `spilled_total` and the
+    `spills` array cannot appear in any response it authors.
+    """
+    _up, port, _ = env
+    for method, path, body in (("GET", "/config/spill", None),
+                               ("PUT", "/config/spill", b'{"interactive": 10}'),
+                               ("GET", "/spills", None)):
+        _st, data = http_req(port, method, path, body)
+        low = data.lower()
+        assert b"spill_thresholds_s" not in low, (path, data[:200])
+        assert b"spilled_total" not in low, (path, data[:200])
+        assert b"spilled_by_class" not in low, (path, data[:200])
+    # ...and the surfaces the broker DOES author still answer with their real
+    # shapes, so this is not a broker that has stopped serving.
+    assert b"estimated_clear_seconds" in http_req(port, "GET", "/queue")[1]
+    assert b"runs_total" in http_req(port, "GET", "/metrics")[1]
 
 
 @pytest.mark.parametrize("env", [{"delay": 0.1}], indirect=True)
@@ -427,40 +494,6 @@ def http_req(port: int, method: str, path: str, body: bytes | None = None):
     data = r.read()
     conn.close()
     return r.status, data
-
-
-@pytest.mark.parametrize("env", [{"delay": 2.0, "seed": [40_000] * 5}], indirect=True)
-def test_spill_config_endpoint(env):
-    up, port, _ = env
-    # defaults
-    status, data = http_req(port, "GET", "/config/spill")
-    cfg = json.loads(data)
-    assert status == 200
-    assert cfg["spill_thresholds_s"] == {"interactive": 30.0, "worker": 300.0, "batch": None}
-    assert cfg["spilled_total"] == 0 and cfg["persisted"] is False
-    # invalid class / invalid value -> 400, config untouched
-    assert http_req(port, "PUT", "/config/spill", b'{"vip": 10}')[0] == 400
-    assert http_req(port, "PUT", "/config/spill", b'{"worker": -1}')[0] == 400
-    # occupy the slot (predicted 40s from seed), interactive spills and counts
-    t = threading.Thread(target=post_chat, args=(port, "worker", "long"))
-    t.start()
-    time.sleep(0.4)
-    assert post_chat(port, "interactive", "s1", timeout=5)[0] == 503
-    cfg = json.loads(http_req(port, "GET", "/config/spill")[1])
-    assert cfg["spilled_total"] == 1 and cfg["spilled_by_class"] == {"interactive": 1}
-    # disable interactive spill -> same request now queues instead
-    status, data = http_req(port, "PUT", "/config/spill", b'{"interactive": null}')
-    assert status == 200
-    assert json.loads(data)["spill_thresholds_s"]["interactive"] is None
-    ok = {}
-    t2 = threading.Thread(target=lambda: ok.setdefault(
-        "s", post_chat(port, "interactive", "s2")[0]))
-    t2.start()
-    t.join()
-    t2.join()
-    assert ok["s"] == 200
-    t3_status, _ = http_req(port, "PUT", "/config/spill", b'{"interactive": 45}')
-    assert t3_status == 200  # restore a numeric threshold round-trips
 
 
 def lmstudio_up() -> bool:

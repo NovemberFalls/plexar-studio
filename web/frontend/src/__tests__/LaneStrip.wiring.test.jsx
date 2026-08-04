@@ -42,7 +42,7 @@ const THRESHOLD = 30;
 /** Payload -> mapping -> component. The chain under test, with nothing faked. */
 function renderFromPayload(payload) {
   const lane = laneStripFrom(payload, null, THRESHOLD);
-  return { lane, ...render(<LaneStrip sessions={sessions} lane={lane} spillEnabled={true} />) };
+  return { lane, ...render(<LaneStrip sessions={sessions} lane={lane} />) };
 }
 
 describe("S10 wiring: the real /queue payload reaches the strip with its meaning intact", () => {

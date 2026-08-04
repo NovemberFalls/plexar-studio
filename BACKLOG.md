@@ -5,12 +5,12 @@ Outstanding work, most-actionable first. Delete items as they land.
 ## Local Model Broker (branch `feat/local-broker-panel`)
 
 Foundation shipped on the branch (commits `0d9ed3b`, `ec5e759`): read-only queue +
-metrics panels and per-class spill control, all against the confirmed broker
+metrics panels, all against the confirmed broker
 contract. Everything below is *not yet done*.
 
 ### Ship / release
 - [x] **Verify against a LIVE broker** — done 2026-07-24: identity green
-  (`lane-broker` via /queue shape), queue/spill/metrics all answering through
+  (`lane-broker` via /queue shape), queue/metrics all answering through
   the cockpit proxy. (First attempt hit LM Studio directly → spawned the
   identity middleware. Broker now runs detached + Startup-folder supervised,
   broker-team side.)
@@ -18,7 +18,7 @@ contract. Everything below is *not yet done*.
   `{shadow, in_flight: {class, elapsed_s, predicted_remaining_s, model,
   client_id} | null, queued: [{class, position, predicted_wall_s, waiting_s,
   model, client_id}], estimated_clear_seconds}`. Defensive alias-guessing
-  removed; spill counters read from `/config/spill` (`spilled_total`), not
+  removed; (spill counters went with the feature, 2026-08-03) not
   `/queue`.
 - [x] **Vitest cache corruption after Tauri/PyInstaller builds** — automated:
   `/build-cockpit` (step 6) now clears `node_modules/.vite` after every build.
@@ -61,20 +61,20 @@ contract. Everything below is *not yet done*.
 - [x] **Surface broker config in the UI.** `ProviderPicker.jsx` in the drawer
   (shows all registered providers, remote-scope entries tagged). Capability gating
   via `GET /api/local/providers` — panels render only when their cap exists.
-  Spill sliders only when cap `spill` AND `scope=="local"`. Shipped 2026-07-24.
+  Spill sliders shipped 2026-07-24; REMOVED WITH THE FEATURE 2026-08-03.
 - [ ] **Remote sharing (the expansion target):** Cloudflare Tunnel + Access
   (owner-controlled auth — Access policies/service tokens; cockpit proxies with
   `CF-Access-Client-Id`/`CF-Access-Client-Secret` headers via registry
   `auth: {type: 'cf-access'}`, secrets server-side only). Registry
   `scope:"remote"` entry + broker `--readonly-remote` flag; writes stay
   owner-only regardless of auth.
-- [ ] **Decouple metrics polling cadence.** Queue + metrics + spill all poll at 3s;
+- [ ] **Decouple metrics polling cadence.** Queue + metrics both poll at 3s;
   metrics change slowly and could poll less often.
 - [ ] (Optional) **FleetView integration** — surface local queue depth / tps
   alongside the per-session usage tiles.
 
 ### Team-side (no Cockpit work — panels populate automatically when these land)
-- [x] Spill-control endpoint (`PUT /config/spill`) — shipped; Cockpit wired.
+- [x] ~~Spill-control endpoint (`PUT /config/spill`)~~ — shipped 2026-07, REMOVED 2026-08-03 (owner's ruling; see CLAUDE.md "Spill — REMOVED ENTIRELY").
 - [x] `/queue` contract pinned; broker supervised; lane-broker branch merged to
   team master (upstream source of truth for the vendored copy).
 - [x] `local-lanes.json` endpoint flip to `:1235` — done 2026-07-24 (both lanes

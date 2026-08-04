@@ -60,7 +60,7 @@ FIXTURE = os.path.join(
 # miss would have passed silently and the artefact would have under-pinned the
 # payload forever.
 # `predicted_wait_s_by_class` is NOT an unread field -- checked before claiming
-# it: `SpillPolicy.jsx:637` consumes it and `test_metrics_v2.py:200` pins it.
+# it: the queue payload carries it and `test_metrics_v2.py` pins it.
 EXPECTED_QUEUE_KEYS = {
     "shadow",
     "in_flight",

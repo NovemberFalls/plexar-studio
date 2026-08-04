@@ -101,7 +101,7 @@ line at a null and draws a baseline tick at a measured zero.
 ## What Studio does NOT read
 
 Stated so the contract test is not made larger than it needs to be: we read no
-planner verdict, no `capacity_caveat`, no queue or spill shape from Plexar (it
+planner verdict, no `capacity_caveat`, no queue shape from Plexar (it
 declares no `queue` capability and is never probed for one), and nothing under
 `/api/instances/{id}` beyond the control POSTs.
 

@@ -8,6 +8,12 @@
  * OpenRouter"*, *"Spill policy … is not the full page width"*. Six blocks, three
  * rows of two.
  *
+ * SPILL POLICY WAS REMOVED 2026-08-03 and its half of the first row is now the
+ * Queueing card. THE GATE WAS UPDATED, NOT LOOSENED: the row is still asserted
+ * to be two equal tracks holding two named cards, and the last test still says
+ * every card on the page is paired. A removal that left Lane broker alone would
+ * have failed this file, which is the point of it.
+ *
  * The load-bearing test is the LAST one, and it is why this file exists rather
  * than three assertions bolted onto the existing suite. Pinning "these two are
  * in a row together" three times still passes the moment somebody adds a
@@ -28,7 +34,7 @@ const PROVIDERS = {
       label: "LM Studio (local)",
       kind: "lmstudio",
       scope: "local",
-      capabilities: ["models", "health", "queue", "metrics", "spill"],
+      capabilities: ["models", "health", "queue", "metrics"],
     },
   ],
 };
@@ -59,7 +65,7 @@ function harness() {
 
 /** The three rows, as the owner described them. */
 const ROWS = [
-  ["row-broker-spill", ["card-lane-broker", "card-spill-policy"]],
+  ["row-broker-queueing", ["card-lane-broker", "card-queueing"]],
   ["row-lmstudio-vllm", ["card-lmstudio", "card-vllm"]],
   ["row-ollama-openrouter", ["card-ollama", "card-openrouter"]],
 ];
@@ -97,7 +103,7 @@ describe("Providers page layout — three half-width pairs", () => {
   it("every card on the page is inside a pair — nothing is full width", async () => {
     const h = harness();
     const { container } = render(<ProvidersSettings {...h} />);
-    await screen.findByTestId("row-broker-spill");
+    await screen.findByTestId("row-broker-queueing");
 
     const rows = ROWS.map(([id]) => screen.getByTestId(id));
     const cards = Array.from(container.querySelectorAll('[data-testid^="card-"]'));

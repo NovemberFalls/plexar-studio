@@ -18,7 +18,7 @@
  * terminals plus a background poll loop is real load, and a section nobody is
  * looking at has no business spending it. Fast reads (queue, metrics) run at 3s
  * because Live's sparkline is a 60s window of 3s samples; slow reads (models,
- * spill, traces, health) run at 10s.
+ * traces, health) run at 10s.
  *
  * Props:
  *   active            — Engine is the visible section; false tears down polling
@@ -101,13 +101,12 @@ function useEngineData(providerId, capabilities, active, fastTab) {
     // same read for the model-load busy marker — two owners meant two identical
     // requests every 10s whenever Engine was open.
     const slow = async () => {
-      const [spill, traces, health] = await Promise.all([
-        ask("spill", "/spill"),
+      const [traces, health] = await Promise.all([
         ask("traces", "/traces?limit=20"),
         ask("health", "/health"),
       ]);
       if (cancelled) return;
-      setData((prev) => ({ ...prev, spill, traces, health }));
+      setData((prev) => ({ ...prev, traces, health }));
     };
 
     fast();

@@ -14,11 +14,13 @@ import TracesPanel from "../TracesPanel.jsx";
 import { Card, CardTitle, Btn, Note, OfflinePanel, UNKNOWN, fmtElapsed, tint } from "./ui.jsx";
 import { Layers, ListTree } from "lucide-react";
 
-/** State chip tokens, pinned to the design's lane vocabulary. */
+/** State chip tokens, pinned to the design's lane vocabulary.
+ *  `spilled` was removed 2026-08-03 with the spill policy. It was already
+ *  unreachable -- the broker never wrote that status to jobs.jsonl -- so this
+ *  is a dead entry going, not a live state losing its colour. */
 const STATE_TOKEN = {
   decode: "var(--cc-working)",
   queued: "var(--cc-waiting)",
-  spilled: "var(--cc-macro)",
   done: "var(--cc-idle)",
 };
 
