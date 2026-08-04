@@ -78,7 +78,7 @@ def _no_disk_scan(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_models_auth_fixture(monkeypatch):
     transport = ASGITransport(app=app)
-    client = AsyncClient(transport=transport, base_url="http://test")
+    client = AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
 
     captured = {}
     for name, fn in CASES.items():
@@ -146,7 +146,7 @@ async def test_fixture_on_disk_matches_the_live_handler(monkeypatch):
         on_disk = json.load(f)
 
     transport = ASGITransport(app=app)
-    client = AsyncClient(transport=transport, base_url="http://test")
+    client = AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
     for name, fn in CASES.items():
         monkeypatch.setattr(server_module, "_mgmt_get", fn)
         res = await client.get(f"/api/local/{PROVIDER}/models")

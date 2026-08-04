@@ -34,7 +34,7 @@ from server import app
 @pytest.fixture()
 def client():
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test")
+    return AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
 
 
 def _mk_git_dir(root, name, head_content):

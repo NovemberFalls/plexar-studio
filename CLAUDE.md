@@ -100,6 +100,65 @@ Two independent DnD systems share the same drop targets — be careful not to le
 
 **Critical rule:** The terminal-area file-drop handlers (`handleDrop`, `handleDragOver` in `TerminalPane.jsx`) MUST check whether the drag contains actual files BEFORE calling `stopPropagation()`. If `stopPropagation()` runs unconditionally, pane-swap drags are silently swallowed and the overlay never appears. Check `e.dataTransfer.types.includes("Files")` in `handleDragOver` and `e.dataTransfer.files.length` in `handleDrop` before intercepting.
 
+## Browser-origin guard (`origin_guard.py`) — TWO clauses, neither optional
+
+Studio binds a listener on `127.0.0.1` and authenticates none of its 104 routes.
+**Loopback is not a trust boundary against a browser** — any page the user visits can open
+a connection to it. `origin_guard` is the guard; it is wired in exactly **two** places
+(the `@app.middleware("http")` in `server.py`, and an explicit check in the
+`/ws/terminal/{id}` handler) and it enforces two independent clauses:
+
+- **Origin allowlist** — stops the drive-by/CSRF case. A cross-origin `fetch` always
+  carries `Origin`; a same-origin one does not, so **absent Origin is ALLOWED on HTTP**.
+  CORS never prevented this class: it stops a foreign page *reading* the reply, not
+  *causing* the side effect (a process spawn, a credential overwrite, `/api/shutdown`).
+- **Loopback `Host` clause** — stops DNS rebinding, and it is the ONLY thing that does.
+  Under rebinding the browser believes it is same-origin and therefore **sends no `Origin`
+  header at all**, exactly like the real UI. The allowlist cannot see the attack. This was
+  measured the hard way: the gate's first draft asserted rebinding with
+  `Origin: http://evil.example`, which the allowlist rejects on its own, so deleting the
+  Host clause reddened nothing — a watch-to-fail arm that was passing for the wrong reason.
+  **An `Origin == Host` equality check also passes rebinding**, since the two agree; that
+  is why this is not the shape `csrf.py` uses elsewhere.
+
+**The WebSocket uses a DIFFERENT rule and that difference is deliberate.** A handshake is
+not subject to CORS at all, and a browser **always** sends `Origin` on one — so on `/ws/*`
+an absent Origin means "not the UI" and is **REFUSED**. The only clients that exist are
+xterm.js in `TerminalPane.jsx` and `PopoutTerminal.jsx`; nothing in `tests/` connects.
+The check runs **before `accept()` and before the terminal lookup** — completing the
+upgrade and closing afterwards hands out a free id oracle (`101`-then-`4004` for a miss vs.
+`101`-and-silence for a hit), and `active_consumer`'s "latest connection wins" means a
+second socket **supersedes the real pane** on a terminal already in use.
+
+**A refused WebSocket gets an HTTP `403` on the handshake, NOT a `101` then close `4403`**
+— measured at the wire, and the opposite of what this section first claimed. Starlette
+converts a `close()` before `accept()` into a handshake rejection, so the `4403` code and
+its reason are **discarded, never delivered**. That is the stronger outcome and is kept on
+purpose: a refused origin never holds a live socket, not even for an instant. **The cost is
+real and is not fixed:** a browser reports a failed handshake as `onerror` + `onclose(1006)`,
+so the client cannot tell "origin refused" from "server down" and a stale bundle silently
+retries instead of saying "reload the app". Surfacing that is a frontend change (probe
+`/api/version` on a `1006` and read the `403`) and it is **open work, not shipped**.
+
+- **`Origin: null` is refused, never treated as absent.** A sandboxed iframe or `data:`
+  document is a real browser origin that is definitively not ours.
+- **`/shim/*` and `/v1/*` get NO exemption, and need none.** The `claude` CLI reaches them
+  via `ANTHROPIC_BASE_URL` at `127.0.0.1` with no Origin — it satisfies both clauses
+  already. An exemption would be a hole a page could aim at.
+- **`localhost` and `127.0.0.1` normalise to one string.** `PopoutTerminal.jsx` connects
+  **direct** to `ws://localhost:8420` from a `:5174` dev page — the one legitimately
+  cross-origin caller in the codebase, covered by the `COCKPIT_DEV_ORIGINS` default
+  (`http://localhost:5174,http://127.0.0.1:5174`). Defaulted, not hardcoded: the Vite port
+  drifts, and hardcoding means the next port change is a code change.
+- **`HOST=0.0.0.0` stands the Host clause down**, deliberately — binding the LAN is an
+  explicit operator choice (`main()` already logs a loud warning) and refusing every
+  request would refuse what they just asked for. The Origin allowlist still applies.
+- **Tests must present a loopback `base_url`.** `http://test` sends `Host: test` and 403s
+  every route; all 44 client constructions use `http://127.0.0.1:8420`.
+- Every negative arm in `tests/test_origin_guard.py` has a **positive twin**, and
+  `test_allowlist_is_actually_read` exists so a hardcoded refuse-everything build cannot
+  pass the gate — the failure shape this repo keeps hitting.
+
 ## Key Constraints
 
 - **Windows primary PTY:** ConPTY/winpty backend for Windows; `unix_pty.py` via ptyprocess for Linux/macOS.

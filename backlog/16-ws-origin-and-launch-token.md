@@ -1,6 +1,26 @@
 # 16 — The WebSocket has no Origin check, and `bypassPermissions` is settable over the wire
 
-**Status:** PLAN WITH ROLLBACK. **NOTHING IS APPLIED.** No production file is modified by
+**Status: SUPERSEDED BY AN APPLIED CHANGE — 2026-08-04.** Len reversed his earlier decline
+(*"we are trying to protect ourselves from a localhost attack on the tool. I dont care how
+we do it as long as everything works. This should be a feature branch as well."*). Fix (a)
+was implemented **and widened beyond this row's scope**: the guard covers `/api/*` as well
+as the WebSocket, because §2 of this row shows the WS check alone leaves 20 drive-by POST
+routes and all 65 GETs readable under rebinding. Branch `lane/studio-origin-guard`, rollback
+tag `pre-s14-origin-guard`. See `web/origin_guard.py` and the "Browser-origin guard" section
+of `CLAUDE.md`.
+
+**Two things this row got wrong, corrected by the implementation rather than inherited:**
+(1) §6 arm 5 tests rebinding with `Host: evil.example` **and** `Origin: http://evil.example`
+— but under real rebinding the browser believes it is same-origin and sends **no Origin at
+all**. Written that way, the arm passes on the allowlist and never exercises the Host clause;
+watch-to-fail caught it. (2) The **launch token (§4) was NOT built**, on this row's own
+reasoning in §5 — it turns every un-reloaded tab into a failure. The `bypassPermissions`
+de-wiring (§4, second half) is also **not** built and remains open; it is a behaviour change
+and still deserves its own row.
+
+**The text below is the original plan, left unedited as the record.**
+
+**Original status:** PLAN WITH ROLLBACK. **NOTHING IS APPLIED.** No production file is modified by
 this row. `server.py`, `pty_manager.py` and every runtime path are untouched.
 **Auth-touching work is destructive-interlock work: Len approves it, not the lane and not
 the coordinator.**

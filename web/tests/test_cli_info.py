@@ -28,7 +28,7 @@ import pty_manager as pty_manager_module
 @pytest.fixture()
 def client():
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test")
+    return AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
 
 
 @pytest.fixture(autouse=True)
@@ -194,7 +194,7 @@ async def test_cli_version_is_cached(client, tmp_path, monkeypatch):
     monkeypatch.setattr(server_module, "_probe_cli_version", probe)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8420") as c:
         await c.get("/api/cli")
         await c.get("/api/cli")
 

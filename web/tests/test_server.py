@@ -14,7 +14,11 @@ import server as server_module
 @pytest.fixture
 def client():
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test")
+    # Loopback base_url, not "http://test": the origin guard's anti-rebinding
+    # clause refuses a non-loopback Host, so a test client presenting an
+    # imaginary hostname would 403 on every route. Presenting as the app is
+    # really reached is also the more honest fixture.
+    return AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
 
 
 @pytest.mark.asyncio
