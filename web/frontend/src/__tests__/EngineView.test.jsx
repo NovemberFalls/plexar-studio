@@ -119,12 +119,19 @@ describe("EngineView frame", () => {
     __resetLocalModelsStore();
   });
 
-  it("renders the header, the serving pill and all five tabs", async () => {
+  // S26: Engine is three tabs. `requests` and `logs` moved to Reports; the
+  // absence assertions below are the half that matters — a stale Engine tab
+  // beside its new Reports home is two doors to one room, which is the
+  // two-product illusion S22 counted.
+  it("renders the header, the serving pill and exactly the three Engine tabs", async () => {
     render(<EngineView provider={PROVIDER} onNavigate={vi.fn()} />);
     expect(screen.getByText("Engine")).toBeInTheDocument();
     expect(screen.getByTestId("engine-serving-pill")).toBeInTheDocument();
-    for (const id of ["live", "models", "requests", "api", "logs"]) {
+    for (const id of ["live", "models", "api"]) {
       expect(screen.getByTestId(`engine-tab-${id}`)).toBeInTheDocument();
+    }
+    for (const id of ["requests", "logs"]) {
+      expect(screen.queryByTestId(`engine-tab-${id}`)).not.toBeInTheDocument();
     }
     await waitFor(() => expect(screen.getByTestId("engine-serving-pill")).toHaveTextContent("serving"));
   });
@@ -142,14 +149,8 @@ describe("EngineView frame", () => {
     await waitFor(() => expect(screen.getByTestId("engine-models-card")).toBeInTheDocument());
     expect(screen.queryByTestId("engine-lane-card")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByTestId("engine-tab-requests"));
-    await waitFor(() => expect(screen.getByTestId("engine-queue-table")).toBeInTheDocument());
-
     fireEvent.click(screen.getByTestId("engine-tab-api"));
     await waitFor(() => expect(screen.getByTestId("api-response-pane")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByTestId("engine-tab-logs"));
-    await waitFor(() => expect(screen.getByTestId("engine-logs-empty")).toBeInTheDocument());
 
     fireEvent.click(screen.getByTestId("engine-tab-live"));
     await waitFor(() => expect(screen.getByTestId("engine-lane-card")).toBeInTheDocument());
@@ -157,8 +158,8 @@ describe("EngineView frame", () => {
 
   it("honours a controlled tab and reports selection upward", async () => {
     const onSelectTab = vi.fn();
-    render(<EngineView provider={PROVIDER} tab="logs" onSelectTab={onSelectTab} onNavigate={vi.fn()} />);
-    expect(screen.getByTestId("engine-logs-empty")).toBeInTheDocument();
+    render(<EngineView provider={PROVIDER} tab="models" onSelectTab={onSelectTab} onNavigate={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("engine-models-card")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("engine-tab-api"));
     expect(onSelectTab).toHaveBeenCalledWith("api");
     await settle();
@@ -407,12 +408,15 @@ describe("EngineView frame", () => {
     await waitFor(() => expect(onToast).toHaveBeenCalledWith(REFUSAL, "error"));
   });
 
-  it("renders an honest empty state on the Logs tab and no fabricated lines", async () => {
+  // S26: an unknown tab id falls back to the DEFAULT tab rather than rendering
+  // blank. This matters on upgrade: Len's installed copy may have "logs" or
+  // "requests" persisted as its last Engine tab, and a blank Engine on first
+  // launch of 1.30.0 would read as the release having broken the section.
+  // The Logs empty-state assertions moved WITH the panel — see
+  // ReportsView.consolidation.test.jsx, which now owns them.
+  it("falls back to Live when handed a tab id that no longer exists", async () => {
     render(<EngineView provider={PROVIDER} tab="logs" onNavigate={vi.fn()} />);
-    const empty = screen.getByTestId("engine-logs-empty");
-    expect(empty).toHaveTextContent(/no log stream yet/i);
-    expect(empty).toHaveTextContent(/cockpit\.server/);
-    expect(empty).toHaveTextContent(/docker logs/);
+    await waitFor(() => expect(screen.getByTestId("engine-lane-card")).toBeInTheDocument());
     await settle();
   });
 

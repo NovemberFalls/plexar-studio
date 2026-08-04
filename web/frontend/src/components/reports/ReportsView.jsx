@@ -94,6 +94,8 @@ const CARD = {
 };
 
 import { NOT_BUILT_TABS as NOT_BUILT } from "./notBuilt.js";
+import TracesTab from "./TracesTab.jsx";
+import EngineLogs from "../engine/EngineLogs.jsx";
 
 /**
  * The one thing Reports still has to say about tool calls, or null when the
@@ -715,7 +717,16 @@ export default function ReportsView({
     tab === "overview" || tab === "sessions" || tab === "models" || tab === "tools";
 
   let body;
-  if (tab === "local-engine") {
+  if (tab === "traces") {
+    // S26: the real trace renderer, moved here from Engine ▸ Requests. Sourced
+    // independently of /api/usage/report for the same reason Local engine is:
+    // no Claude usage this range does not mean no traces.
+    body = <TracesTab />;
+  } else if (tab === "logs") {
+    // S26: moved verbatim from Engine ▸ Logs. It is still an honest empty state
+    // until a log route exists; moving it did not invent a log stream.
+    body = <EngineLogs />;
+  } else if (tab === "local-engine") {
     // Sourced from Plexar, not from /api/usage/report — so it must NOT be
     // gated on that request's loading/error/empty state. A user with no Claude
     // usage this range can still have engine history, and vice versa.

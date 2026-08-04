@@ -41,12 +41,14 @@ export const LABEL = {
 export const UNKNOWN = "—";
 
 /** The Engine tab vocabulary. Ids are deep-link values — renaming one is breaking. */
+/* S26 (2026-08-03): Engine keeps Live / Models / API and nothing else.
+   `requests` and `logs` moved to Reports ▸ Traces and Reports ▸ Logs. Engine owns
+   NOW; a completed request tree and a log tail are both the PAST, which is
+   Reports' job. NOTHING WAS DELETED — both panels render, at their new address. */
 export const ENGINE_TABS = [
   { id: "live", label: "Live" },
   { id: "models", label: "Models" },
-  { id: "requests", label: "Requests" },
   { id: "api", label: "API" },
-  { id: "logs", label: "Logs" },
 ];
 
 export const DEFAULT_ENGINE_TAB = "live";

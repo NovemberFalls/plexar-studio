@@ -3,7 +3,9 @@
  *
  * SCOPE (the organising rule for the whole facelift): Settings owns INTENT,
  * Reports owns the PAST, Engine owns NOW. So this view holds engine lifecycle,
- * the loaded model, the live lane, the request list, the HTTP surface, and logs.
+ * the loaded model, the live lane and the HTTP surface. S26 moved the request
+ * tree to Reports ▸ Traces and the log tab to Reports ▸ Logs — both are the
+ * PAST, and Reports owns the past. Neither was deleted.
  * It holds no configuration form and no history chart — the two header links
  * hand those off to their real owners rather than duplicating them here.
  *
@@ -35,9 +37,7 @@ import { OctagonX, SlidersHorizontal, History } from "lucide-react";
 
 import EngineLive from "./EngineLive.jsx";
 import EngineModels from "./EngineModels.jsx";
-import EngineRequests from "./EngineRequests.jsx";
 import EngineApi from "./EngineApi.jsx";
-import EngineLogs from "./EngineLogs.jsx";
 import { Btn, ENGINE_TABS, DEFAULT_ENGINE_TAB, Pill, safeGet, tint } from "./ui.jsx";
 import useLocalModels from "../../hooks/useLocalModels.js";
 
@@ -366,12 +366,8 @@ export default function EngineView({
           />
         ) : current === "models" ? (
           <EngineModels {...shared} />
-        ) : current === "requests" ? (
-          <EngineRequests {...shared} />
-        ) : current === "api" ? (
-          <EngineApi {...shared} active={active} />
         ) : (
-          <EngineLogs {...shared} />
+          <EngineApi {...shared} active={active} />
         )}
       </div>
     </div>

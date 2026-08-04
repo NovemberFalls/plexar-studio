@@ -231,28 +231,50 @@ export function QueueTable({ queue, caps, metrics, style, compact }) {
   );
 }
 
+/**
+ * The trace card. S26 moved it to Reports ▸ Traces — Reports owns the PAST and a
+ * completed request tree is the past. It is EXPORTED rather than copied so the
+ * two call sites can never disagree about what a trace looks like.
+ *
+ * `emptyNote` is the honesty half and it is not optional decoration. This panel
+ * is EMPTY on this machine, and moving it does not change that: the lane broker
+ * ships in shadow mode so no job is ever queued, and a trace is written per
+ * queued job. Consolidation must not be allowed to look like it fixed a recorder
+ * that is still off, so whatever explains the emptiness travels WITH the panel.
+ */
+export function TracesCard({ traces, providerId, hasTraces, emptyNote }) {
+  const isEmpty = Array.isArray(traces) && traces.length === 0;
+  return (
+    <Card title={<CardTitle icon={ListTree} token="var(--cc-type)">Traces</CardTitle>}>
+      {!hasTraces ? (
+        <OfflinePanel
+          testId="traces-not-offered"
+          title="This backend does not expose traces"
+          body="Traces come from the lane broker's /traces endpoint. The selected provider does not declare the traces capability, so there is nothing to read."
+        />
+      ) : traces === null ? (
+        <Note testId="traces-offline">
+          The broker is not answering /traces. Recent requests may still have run — Plexar Studio simply
+          cannot read them right now.
+        </Note>
+      ) : (
+        <TracesPanel traces={traces} providerId={providerId} />
+      )}
+      {isEmpty && emptyNote ? <Note testId="traces-empty-why">{emptyNote}</Note> : null}
+    </Card>
+  );
+}
+
 export default function EngineRequests({ provider, caps, data, onNavigate }) {
-  const hasTraces = caps?.has("traces");
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "16px 18px", minWidth: 0 }}>
       <QueueTable queue={data?.queue} caps={caps} metrics={data?.metrics} />
 
-      <Card title={<CardTitle icon={ListTree} token="var(--cc-type)">Traces</CardTitle>}>
-        {!hasTraces ? (
-          <OfflinePanel
-            testId="traces-not-offered"
-            title="This backend does not expose traces"
-            body="Traces come from the lane broker's /traces endpoint. The selected provider does not declare the traces capability, so there is nothing to read."
-          />
-        ) : data?.traces === null ? (
-          <Note testId="traces-offline">
-            The broker is not answering /traces. Recent requests may still have run — Plexar Studio simply
-            cannot read them right now.
-          </Note>
-        ) : (
-          <TracesPanel traces={data?.traces} providerId={provider?.id} />
-        )}
-      </Card>
+      <TracesCard
+        traces={data?.traces}
+        providerId={provider?.id}
+        hasTraces={caps?.has("traces")}
+      />
 
       {typeof onNavigate === "function" && (
         <Note>
