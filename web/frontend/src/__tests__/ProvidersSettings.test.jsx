@@ -3,7 +3,7 @@
  *
  * The contract under test is the Settings-shell prop contract
  * ({get, setField, isDirty}) plus the honesty rules the spec pins:
- *   - all five provider cards render even when live probes fail
+ *   - all four provider cards render even when live probes fail
  *   - every edit flows through setField with the exact dotted path
  *   - a dirty field is highlighted with --cc-waiting (not just tracked)
  *   - capability chips DIM for undeclared capabilities instead of vanishing
@@ -116,15 +116,14 @@ describe("ProvidersSettings", () => {
     delete globalThis.fetch;
   });
 
-  it("renders all five provider cards — the Claude CLI card moved to its own page", async () => {
+  it("renders all four provider cards — Lane broker deleted (T9), Claude CLI moved", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
 
     // Wait for the mount probes to settle so no act() warning leaks.
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     for (const id of [
-      "card-lane-broker",
       "card-lmstudio",
       "card-vllm",
       "card-ollama",
@@ -141,7 +140,7 @@ describe("ProvidersSettings", () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
 
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/unknown/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url-unknown")).toBeInTheDocument());
     expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument();
     expect(screen.getByTestId("card-vllm")).toBeInTheDocument();
     expect(screen.getByTestId("card-ollama")).toBeInTheDocument();
@@ -152,7 +151,7 @@ describe("ProvidersSettings", () => {
   it("routes a base-URL edit through setField with the exact dotted path", async () => {
     const shell = makeShell({ draft: { "providers.lmstudio.base_url": "http://127.0.0.1:1234" } });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     fireEvent.change(screen.getByTestId("field-providers.lmstudio.base_url"), {
       target: { value: "http://127.0.0.1:9999" },
@@ -164,20 +163,16 @@ describe("ProvidersSettings", () => {
     );
   });
 
-  it("routes the concurrency slider and the autostart toggle through setField", async () => {
-    const shell = makeShell({ draft: { "providers.lane_broker.concurrency": 1 } });
-    render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
-
-    fireEvent.change(screen.getByTestId("field-providers.lane_broker.concurrency"), {
-      target: { value: "4" },
-    });
-    expect(shell.setField).toHaveBeenCalledWith("providers.lane_broker.concurrency", 4);
-
-    // Toggle is a radiogroup of two segments; clicking "On" records `true`.
-    fireEvent.click(screen.getByRole("radio", { name: /Autostart with Plexar Studio: On/i }));
-    expect(shell.setField).toHaveBeenCalledWith("providers.lane_broker.autostart", true);
-  });
+  /* REMOVED T9: "routes the concurrency slider and the autostart toggle
+     through setField". Both controls lived on the Lane broker card and both
+     were declared not-enforced against their own values -- the server reads
+     COCKPIT_MANAGED_BROKER for autostart and nothing at all reads concurrency.
+     The card is gone, so there is no longer a control for setField to route.
+     Deleted rather than re-pointed at another card: the assertion was about
+     THOSE two paths, and pointing it at a different one would keep a green
+     test whose subject no longer exists. The surviving guard is
+     ProvidersSettings.laneBrokerHonesty.test.jsx, which now fails if any
+     providers.lane_broker.* control comes back. */
 
   it("highlights a dirty field with --cc-waiting on both border and value text", async () => {
     const path = "providers.vllm.base_url";
@@ -186,7 +181,7 @@ describe("ProvidersSettings", () => {
       dirtyPaths: [path],
     });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     // jsdom's cssstyle drops var() out of the typed properties, so the inline
     // style attribute is the honest place to assert the token landed.
@@ -208,7 +203,7 @@ describe("ProvidersSettings", () => {
   it("dims capability chips for capabilities a backend does not declare", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     // LM Studio declares queue but not traces; vLLM declares neither.
     const lmCard = screen.getByTestId("card-lmstudio");
@@ -274,7 +269,7 @@ describe("ProvidersSettings", () => {
   it("keeps the inert controls inert (Browse, Start engine, overflow) with an explanatory title", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     const browse = screen.getByTestId("browse-providers.lmstudio.models_dir");
     expect(browse).toBeDisabled();
@@ -368,7 +363,7 @@ describe("ProvidersSettings", () => {
     const onBrowse = vi.fn();
     const shell = makeShell();
     render(<ProvidersSettings {...shell} onBrowse={onBrowse} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     // Repointed from claude_cli.binary_path to a SURVIVING Browse field when the
     // Claude CLI card was removed. The mechanism under test is Browse itself —
@@ -399,12 +394,12 @@ describe("ProvidersSettings", () => {
     // Checked before any waitFor — waitFor itself installs a polling interval.
     expect(intervalSpy).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
     const afterMount = fetchMock.mock.calls.filter((c) => c[0] === "/api/local/status").length;
     expect(afterMount).toBe(1);
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId("test-lane-broker"));
+      fireEvent.click(screen.getByTestId("test-lmstudio"));
     });
     expect(fetchMock.mock.calls.filter((c) => c[0] === "/api/local/status").length).toBe(2);
   });
@@ -425,45 +420,50 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
     delete globalThis.fetch;
   });
 
+  /* THE EXEMPLAR CARD FOR THIS RULE MOVED, T9. Every test below used the Lane
+     broker card as its dirty subject; that card is deleted, so they now use LM
+     Studio, which has a real base-URL control the server also does not read
+     from settings. The RULE is unchanged and so are the assertions - only the
+     card the rule is demonstrated on. Deleting them instead would have left the
+     stale-URL rule with no coverage at all. */
   it("disables that card's Test and shows the qualifying note when its base URL is dirty", async () => {
-    const shell = makeShell({ dirtyPaths: ["providers.lane_broker.base_url"] });
+    const shell = makeShell({ dirtyPaths: ["providers.lmstudio.base_url"] });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
-    const test = screen.getByTestId("test-lane-broker");
+    const test = screen.getByTestId("test-lmstudio");
     expect(test).toBeDisabled();
     expect(test.getAttribute("title")).toBe(
       "Save changes first — Test probes the URL the server is currently using, not the edited value."
     );
-    expect(screen.getByTestId("stale-url-lane-broker")).toBeInTheDocument();
+    expect(screen.getByTestId("stale-url-lmstudio")).toBeInTheDocument();
   });
 
   it("qualifies the stale pill rather than blanking it", async () => {
-    const shell = makeShell({ dirtyPaths: ["providers.lane_broker.base_url"] });
+    const shell = makeShell({ dirtyPaths: ["providers.lmstudio.base_url"] });
     render(<ProvidersSettings {...shell} />);
 
-    // The reading still appears (online), but it is explicitly attributed to
-    // the saved URL and recolored to the waiting token.
+    // The reading still appears, but it is explicitly attributed to the saved
+    // URL and recolored to the waiting token. Blanking it would be the other
+    // lie: no pill reads as "not checked yet".
     await waitFor(() =>
-      // "online · <latency>ms · saved URL"
-      expect(screen.getByTestId("broker-health")).toHaveTextContent(/online.*saved URL/i)
+      expect(screen.getByTestId("lmstudio-health")).toHaveTextContent(/saved URL/i)
     );
-    expect(screen.getByTestId("broker-health").getAttribute("style")).toMatch(/--cc-waiting/);
-    expect(screen.getByTestId("broker-health").getAttribute("title")).toMatch(/not your edit/i);
+    expect(screen.getByTestId("lmstudio-health").getAttribute("style")).toMatch(/--cc-waiting/);
+    expect(screen.getByTestId("lmstudio-health").getAttribute("title")).toMatch(/not your edit/i);
   });
 
   it("leaves clean sibling cards fully testable", async () => {
-    const shell = makeShell({ dirtyPaths: ["providers.lane_broker.base_url"] });
+    const shell = makeShell({ dirtyPaths: ["providers.lmstudio.base_url"] });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
-    // Only the lane-broker card is gated.
-    expect(screen.getByTestId("test-lane-broker")).toBeDisabled();
-    expect(screen.getByTestId("test-lmstudio")).toBeEnabled();
+    // Only the LM Studio card is gated.
+    expect(screen.getByTestId("test-lmstudio")).toBeDisabled();
     expect(screen.getByTestId("test-vllm")).toBeEnabled();
     expect(screen.getByTestId("test-ollama")).toBeEnabled();
-    expect(screen.queryByTestId("stale-url-lmstudio")).not.toBeInTheDocument();
     expect(screen.queryByTestId("stale-url-vllm")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("stale-url-ollama")).not.toBeInTheDocument();
   });
 
   it("gates each backend card independently and qualifies its own health pill", async () => {
@@ -477,9 +477,9 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
     expect(screen.getByTestId("stale-url-vllm")).toBeInTheDocument();
     // The vLLM Managed/External lifecycle pill depends on the same URL.
     expect(screen.getByTestId("vllm-managed-pill")).toHaveTextContent(/saved URL/i);
-    // Lane broker is untouched.
-    expect(screen.getByTestId("test-lane-broker")).toBeEnabled();
-    expect(screen.getByTestId("broker-health")).not.toHaveTextContent(/saved URL/i);
+    // LM Studio is untouched.
+    expect(screen.getByTestId("test-lmstudio")).toBeEnabled();
+    expect(screen.getByTestId("lmstudio-health")).not.toHaveTextContent(/saved URL/i);
   });
 
   it("drops the note and re-enables Test once the field is no longer dirty", async () => {
@@ -500,17 +500,16 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("says plainly which saved values the server does not enforce yet", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
-    // Lane concurrency and GPU utilisation persist but are still env-driven —
-    // a slider that saves cleanly and changes nothing is a trap.
-    // testid gained a per-control suffix in S8: the lane-broker card now marks
-    // ALL THREE of its controls, not just concurrency, so one shared id could
-    // no longer address them. See ProvidersSettings.laneBrokerHonesty.test.jsx
-    // for the structural guard that fails when a fourth control is added.
-    expect(screen.getByTestId("not-enforced-lane-broker-concurrency")).toHaveTextContent(
-      /Lane concurrency is saved, but Plexar Studio does not apply it yet/i
-    );
+    // GPU utilisation persists but is still env-driven — a slider that saves
+    // cleanly and changes nothing is a trap.
+    //
+    // The three lane-broker notes this test also asserted are gone WITH their
+    // controls (T9): the strongest resolution of the defect they annotated,
+    // since a control that cannot mislead beats one that apologises.
+    // ProvidersSettings.laneBrokerHonesty.test.jsx fails if any of them returns.
+    expect(screen.queryByTestId("not-enforced-lane-broker-concurrency")).toBeNull();
     expect(screen.getByTestId("not-enforced-vllm")).toHaveTextContent(
       /GPU memory utilisation is saved, but Plexar Studio does not apply it yet/i
     );
@@ -519,7 +518,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("explains why Default backend is LM Studio only", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     expect(screen.getByTestId("field-providers.lmstudio.default").getAttribute("title")).toMatch(
       /only backend/i
@@ -550,11 +549,16 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
 
-    const pill = await screen.findByTestId("broker-health");
-    await waitFor(() => expect(pill).toHaveTextContent(/wrong service/i));
-    // The failure mode this guards: a compatible:false probe rendering as green.
-    expect(pill).not.toHaveTextContent(/online/i);
-    expect(pill.getAttribute("style")).not.toMatch(/--cc-idle/);
+    // THE PILL IS GONE WITH THE CARD; THE STATEMENT IS NOT. It moved into the
+    // LM Studio transport note, which is the only place left that names the
+    // address — so it is also the only place a wrong occupant of that address
+    // can be reported.
+    const note = await screen.findByTestId("broker-wrong-service");
+    expect(note).toHaveTextContent(/not.*transport/i);
+    expect(note).toHaveTextContent(/lmstudio/i);
+    // The failure mode this guards: a compatible:false probe still rendering
+    // the healthy "requests reach LM Studio through ..." sentence.
+    expect(screen.queryByTestId("broker-effective-url")).toBeNull();
   });
 
   /**
@@ -571,7 +575,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("routes a models-folder edit through setField with the exact dotted path", async () => {
     const shell = makeShell({ draft: { "providers.lmstudio.models_dir": "~/.lmstudio/models" } });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     const field = screen.getByTestId("field-providers.lmstudio.models_dir");
     expect(field).toHaveValue("~/.lmstudio/models");
@@ -584,7 +588,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
     const fetchMock = installFetch();
     const shell = makeShell({ draft: { "providers.lmstudio.models_dir": "/models" } });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toHaveTextContent(/online/i));
+    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
 
     fireEvent.change(screen.getByTestId("field-providers.lmstudio.models_dir"), {
       target: { value: "/mnt/models" },

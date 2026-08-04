@@ -45,7 +45,6 @@ import {
   EyeOff,
   FolderOpen,
   Layers,
-  Route,
   Terminal,
   TriangleAlert,
 } from "lucide-react";
@@ -63,8 +62,10 @@ const CARD = {
 };
 
 /**
- * The half-width pair. Three rows on this page are two blocks side by side:
- * lane broker + queueing, LM Studio + vLLM, Ollama + OpenRouter.
+ * The half-width pair. Two rows on this page are two blocks side by side:
+ * vLLM + LM Studio, OpenRouter + Ollama. It was three rows until T9 deleted the
+ * `Lane broker` + `Queueing` pair; four cards is still an even count, so no card
+ * was orphaned and none was invented to fill a slot.
  *
  * It is one constant rather than three inline objects because the owner's
  * instruction was about the PAGE, not about one row: nothing here earns the
@@ -1106,27 +1107,40 @@ function OpenRouterCard({ get, setField, isDirty }) {
 // ── page ──────────────────────────────────────────────────
 
 /**
- * Queueing — the lane broker's own operating mode, read from the wire.
+ * The LM Studio transport — NOT a card, and that is the whole point of it.
  *
- * THIS CARD IS WHY THE SPILL BLOCK'S REMOVAL DID NOT SILENTLY REFLOW THE PAGE.
- * Spill policy paired with Lane broker on the owner's explicit instruction
- * (S22). Deleting it left Lane broker orphaned and the "every card is inside a
- * pair" gate red. It also would have deleted the ONLY place in Settings that
- * states whether queueing is actually running -- and S10's ruling is that
- * hiding that state is its own lie: absence reads as "this build has no
- * queueing", which is a different claim from "queueing exists and is switched
- * off".
+ * T9 / 2026-08-04. The page used to draw a top-level `Lane broker` card and a
+ * `Queueing` card beside it, as PEERS of the five provider cards. The owner
+ * read that layout and said so, verbatim: *"if lane broker is unique to
+ * lmstudio then its not doing the right job, and I would remove it or merge it
+ * into the lmstudio card."* He is structurally right. The broker is Studio's
+ * own in-process transport in front of ONE backend -- `lmstudio_proxy.py`
+ * POSTs every LM Studio session's `/v1/messages` at its address and nothing
+ * else ever calls it -- so it is a PROPERTY of LM Studio, not a sibling of it.
+ * A rename would have made the label honest and left the misdescription
+ * standing; the position was the defect.
  *
- * So the partner is not decoration. It is the statement the deleted card was
- * carrying, moved to a card of its own and read from `GET /queue`'s `shadow`
- * field rather than restated as prose (the same rule LaneStrip follows: read
- * the flag, never infer it from a depth of zero -- an idle queueing broker
- * reports 0/0 too).
+ * So this renders INSIDE the LM Studio card, and it is a note rather than a
+ * card because nothing here is configurable. The three controls the old card
+ * offered (base URL, autostart, concurrency) were ALL declared not-enforced
+ * against their own values -- the server reads the environment for the first
+ * two and nothing at all reads the third -- so deleting the card removed three
+ * controls that could not move anything, and zero that could.
  *
- * There is nothing to configure here, and it says so. `--shadow` is start-time
- * only on the broker, so a control would be a switch that cannot move.
+ * TWO THINGS ARE STILL WORTH STATING TO A HUMAN, AND BOTH ARE READ FROM THE
+ * WIRE RATHER THAN RESTATED AS PROSE:
+ *
+ *   1. WHERE the traffic actually goes (`GET /api/local/status` -> `url`,
+ *      `managed`), because the address in use and the address in the settings
+ *      file were demonstrably allowed to disagree.
+ *   2. WHETHER requests are queued (`GET /queue` -> `shadow`). S10's ruling
+ *      survives the card's deletion intact: hiding this is its own lie, since
+ *      absence reads as "this build has no queueing" and that is a DIFFERENT
+ *      claim from "queueing exists and is switched off". Three states, never
+ *      collapsed -- and never inferred from a depth of zero, because a healthy
+ *      idle queueing broker reports 0/0 too.
  */
-function QueueingCard({ provider, loading }) {
+function LmStudioTransport({ provider, status, loading }) {
   const [queue, setQueue] = useState(undefined); // undefined = not asked yet
 
   // No synchronous setState in the effect body (react-hooks/set-state-in-effect,
@@ -1151,42 +1165,75 @@ function QueueingCard({ provider, loading }) {
   const shadow = queue && queue.reachable !== false ? queue.shadow : undefined;
 
   return (
-    <div style={CARD} data-testid="card-queueing">
-      <CardHeader icon={Layers} token="var(--cc-accent)" name="Queueing">
-        {shadow === true && <Badge token="var(--cc-waiting)">shadow — not queueing</Badge>}
-        {shadow === false && <Badge token="var(--cc-accent)">queueing</Badge>}
-        <span style={{ marginLeft: "auto" }} />
-        <OverflowButton name="queueing" />
-      </CardHeader>
+    <div
+      data-testid="lmstudio-transport"
+      role="note"
+      style={{
+        fontSize: 11,
+        lineHeight: 1.6,
+        color: "var(--cc-muted)",
+        borderTop: "1px solid var(--cc-line)",
+        marginTop: 10,
+        paddingTop: 8,
+      }}
+    >
+      {/* WHERE. `status.url` is the address the transport actually binds; the
+          settings field that used to sit beside it was never read, so showing
+          the real one is the only honest half of that pair that survived.
 
-      <div style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-fg)", paddingTop: 6 }}>
+          SERVICE IDENTITY IS CARRIED HERE TOO, and deleting the card must not
+          delete it. LM Studio's dev server answers unknown paths with "200
+          anyway" plus an error body, so REACHABLE IS NOT EVIDENCE OF THE RIGHT
+          SERVICE -- `/api/local/status` fingerprints what is actually
+          listening. Three outcomes, and collapsing any two of them tells the
+          user the transport is fine while something else holds the port. */}
+      {!status?.url ? (
+        <div data-testid="broker-effective-url-unknown">
+          Plexar Studio could not reach its local transport, so the address it uses for
+          LM Studio is unknown.
+        </div>
+      ) : status.compatible === false ? (
+        <div data-testid="broker-wrong-service" style={{ color: "var(--cc-error)" }}>
+          Something that is <strong>not</strong> Plexar Studio&rsquo;s transport is
+          answering at <code>{status.url}</code>
+          {status.service ? ` — it identifies as ${status.service}.` : "."}{" "}
+          LM Studio sessions will not work until whatever holds that address is stopped.
+        </div>
+      ) : (
+        <div data-testid="broker-effective-url">
+          Requests reach LM Studio through Plexar Studio&rsquo;s own local transport at{" "}
+          <code>{status.url}</code>
+          {status.managed === true
+            ? " — started by Plexar Studio."
+            : status.reachable
+              ? " — an external process holds this address."
+              : " — nothing is answering there right now."}
+        </div>
+      )}
+
+      {/* WHETHER IT QUEUES. Three states, never collapsed (S10). */}
+      <div style={{ paddingTop: 4 }}>
         {loading || shadow === undefined ? (
-          <span data-testid="queueing-unknown" style={{ color: "var(--cc-muted)" }}>
-            The broker did not report its mode, so whether requests are being queued is
-            unknown. This is not the same as &ldquo;queueing is off&rdquo;.
+          <span data-testid="queueing-unknown">
+            It did not report whether it queues, so that is unknown. This is not the same
+            as &ldquo;queueing is off&rdquo;.
           </span>
         ) : shadow ? (
           <span data-testid="queueing-shadow">
-            The lane broker is running in <strong>shadow mode</strong>: it forwards and
-            logs every request but never queues one. Requests are not ordered by lane
-            class and nothing waits. Set <code>COCKPIT_BROKER_SHADOW=0</code> and restart
-            Plexar Studio to enable queueing.
+            It is running in <strong>shadow mode</strong>: it forwards and logs every
+            request but never queues one. Nothing waits. Set{" "}
+            <code>COCKPIT_BROKER_SHADOW=0</code> and restart Plexar Studio to enable
+            queueing.
           </span>
         ) : (
           <span data-testid="queueing-on">
-            The lane broker is queueing: one request is forwarded at a time and the rest
-            wait their turn, ordered interactive &rsaquo; worker &rsaquo; batch.
+            It is queueing: one request is forwarded at a time and the rest wait their
+            turn.
             <strong> The queue has no depth limit and no wait ceiling</strong> — a request
             waits as long as the lane takes.
           </span>
         )}
       </div>
-
-      <NotEnforcedNote
-        name="queueing-mode"
-        what="Queueing mode"
-        why="the broker reads --shadow once at start-up, so this cannot be a switch. It is reported here, not set here."
-      />
     </div>
   );
 }
@@ -1194,7 +1241,6 @@ function QueueingCard({ provider, loading }) {
 export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) {
   const [providers, setProviders] = useState(null); // null = not yet read
   const [status, setStatus] = useState(undefined); // undefined = checking, null = unknown
-  const [latencyMs, setLatencyMs] = useState(null);
   const [health, setHealth] = useState({}); // providerId -> payload | null
   const [ownership, setOwnership] = useState(null); // vLLM ownership; null = unknown
   const [testing, setTesting] = useState(false);
@@ -1204,7 +1250,6 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   // renders (react-hooks/set-state-in-effect). The in-flight flag is owned by
   // handleTest, which is only ever reached from a user click.
   const probe = useCallback(async () => {
-    const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
     const [list, st, own] = await Promise.all([
       safeGet("/api/local/providers"),
       safeGet("/api/local/status"),
@@ -1213,12 +1258,12 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
       // that — it is intent, and the container is launched at startup.
       safeGet("/api/local/vllm/ownership"),
     ]);
-    const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
+    // The probe stopwatch (t0/t1) went with `latencyMs` — it was timed on every
+    // probe purely to fill the deleted broker pill's "online · <n>ms".
     const rows = Array.isArray(list?.providers) ? list.providers : [];
     setProviders(rows);
     setStatus(st ?? null);
     setOwnership(own ?? null);
-    setLatencyMs(st ? Math.max(0, Math.round(t1 - t0)) : null);
 
     const results = await Promise.all(
       rows
@@ -1254,33 +1299,21 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   const ollama = byKind("ollama");
   const healthFor = (p) => (p ? health[p.id] : null);
 
-  // Lane-broker health. /api/local/status returns
-  // {reachable, compatible, service, detail, url, managed} — version/pid are
-  // not in that contract today, so they render only if the server starts
-  // sending them.
-  const brokerToken =
-    status === undefined
-      ? "var(--cc-muted)"
-      : status && status.reachable && status.compatible
-        ? "var(--cc-idle)"
-        : status && status.reachable
-          ? DIRTY
-          : "var(--cc-error)";
-  const brokerText =
-    status === undefined
-      ? "checking"
-      : status === null
-        ? "unknown"
-        : !status.reachable
-          ? "offline"
-          : status.compatible
-            ? `online · ${latencyMs ?? "?"}ms`
-            : "wrong service";
+  // The lane-broker health pill, its `checking/offline/wrong service` text and
+  // its stale-URL qualifier went with the card, T9. `status` itself is still
+  // read — LmStudioTransport shows the address actually in use — but there is
+  // no longer a broker BASE URL control for a probe to be stale against, which
+  // is what `brokerStale` existed to qualify.
+  //
+  // The `latencyMs` state went too. Its ONLY renderer was the broker pill's
+  // "online · <n>ms", so once the pill went it was a value measured on every
+  // probe and shown to nobody. Removed rather than kept for a future surface:
+  // whether Providers should show a latency figure at all is a question for
+  // ASK-STUDIO-ENDPOINTS, and leaving dead state behind pre-answers it.
 
   // A probe can only ever hit the SAVED url — so any card whose base URL is
   // dirty must disable its Test button and qualify its pill.
   const staleUrl = (path) => Boolean(isDirty?.(path));
-  const brokerStale = staleUrl("providers.lane_broker.base_url");
   const lmStudioStale = staleUrl("providers.lmstudio.base_url");
   const vllmStale = staleUrl("providers.vllm.base_url");
 
@@ -1313,185 +1346,28 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
-      {/* ── Lane broker + queueing — half-width pair ──── */}
-      <div style={PAIR} data-testid="row-broker-queueing">
-      <div style={CARD} data-testid="card-lane-broker">
-        <CardHeader icon={Route} token="var(--cc-accent)" name="Lane broker">
-          <Pill
-            token={brokerStale ? DIRTY : brokerToken}
-            testId="broker-health"
-            title={
-              brokerStale
-                ? `Reflects the saved URL, not your edit. ${status?.detail || ""}`.trim()
-                : status?.detail || undefined
-            }
-          >
-            {brokerStale ? `${brokerText} · saved URL` : brokerText}
-          </Pill>
-          {status?.managed === true && <Badge token="var(--cc-accent)">managed by Plexar Studio</Badge>}
-          {status?.managed === false && status?.reachable && <Badge>external process</Badge>}
-          <span style={{ marginLeft: "auto" }} />
-          <OverflowButton name="lane broker" />
-        </CardHeader>
-
-        <div style={{ fontSize: 11, color: "var(--cc-dim)", padding: "6px 0 2px" }}>
-          {status?.service ? `service: ${status.service}` : "service: unknown"}
-          {status?.version ? ` · version ${status.version}` : ""}
-          {status?.pid ? ` · pid ${status.pid}` : ""}
-          {status?.detail ? ` — ${status.detail}` : ""}
-        </div>
-
-        <SettingText
-          label="Base URL"
-          path="providers.lane_broker.base_url"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          placeholder="http://127.0.0.1:1235"
-          mono
-          action={
-            <TestButton
-              name="lane-broker"
-              staleUrl={brokerStale}
-              testing={testing}
-              onTest={handleTest}
-            />
-          }
-        />
-        {brokerStale && <StaleUrlNote name="lane-broker" />}
-        {/* THE ADDRESS THE BROKER ACTUALLY BINDS. `GET /api/local/status`
-            already returns it as `url` and this card already has the payload --
-            it was on the wire and unread, which is the same defect as the
-            field's wrong default. Shown next to the control it contradicts, so
-            a user who edits the box can see what is really in use. */}
-        {status?.url && (
-          <div
-            data-testid="broker-effective-url"
-            role="note"
-            style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
-          >
-            In use right now: <code>{status.url}</code>
-            {status.managed === true
-              ? " — started by Plexar Studio."
-              : status.reachable
-                ? " — an external process holds this address."
-                : ""}
-          </div>
-        )}
-        <NotEnforcedNote
-          name="lane-broker-base-url"
-          what="Base URL"
-          why="Plexar Studio reads the broker address from the COCKPIT_BROKER_URL environment variable, not from this field. The address actually in use is shown above."
-        />
-        <SettingToggle
-          label="Autostart with Plexar Studio"
-          path="providers.lane_broker.autostart"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          hint="Plexar Studio runs the broker unless one is already listening"
-        />
-        <NotEnforcedNote
-          name="lane-broker-autostart"
-          what="Autostart with Plexar Studio"
-          why="whether Plexar Studio starts the broker is governed by the COCKPIT_MANAGED_BROKER environment variable (default on), not by this toggle."
-        />
-        <SettingSlider
-          label="Lane concurrency"
-          path="providers.lane_broker.concurrency"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          min={1}
-          max={8}
-          step={1}
-          fallback={1}
-          hint="1 keeps decode fastest"
-        />
-        <NotEnforcedNote
-          name="lane-broker-concurrency"
-          what="Lane concurrency"
-          why="no code path reads it — not the server, and not an environment variable either. It is validated on save and then ignored."
-        />
-      </div>
-
-      {/* ── Queueing ──────────────────────────────────── */}
-      <QueueingCard provider={queueProvider} loading={providers === null} />
-      </div>
+      {/* THE `Lane broker` AND `Queueing` CARDS WERE DELETED HERE, T9 /
+          2026-08-04, on the owner's ruling — see LmStudioTransport's header for
+          the reasoning and for where the two statements worth keeping went.
+          Nothing was hidden and no surface was invented to replace them: the
+          three controls the Lane broker card offered were all declared
+          not-enforced against their own values, so what went is three controls
+          that could not move anything. The transport itself is UNTOUCHED. */}
 
       {/* ── Backends ──────────────────────────────────── */}
-      <SectionTitle note="each backend sits behind the broker unless noted">
-        Backends behind the broker
+      {/* The note used to read "each backend sits behind the broker unless
+          noted", which is the same peer-shaped claim the deleted card made and
+          it was not even true — only LM Studio sits behind it. */}
+      <SectionTitle note="where Plexar Studio can send work">
+        Backends
       </SectionTitle>
 
-      {/* LM Studio + vLLM — half-width pair */}
-      <div style={PAIR} data-testid="row-lmstudio-vllm">
-      <div style={CARD} data-testid="card-lmstudio">
-        <CardHeader icon={Boxes} token="var(--cc-type)" name="LM Studio">
-          {reachabilityPill(
-            providers === null ? undefined : healthFor(lmStudio),
-            "lmstudio-health",
-            lmStudioStale
-          )}
-          {get("providers.lmstudio.default", false) === true && (
-            <Badge token="var(--cc-accent)">Default</Badge>
-          )}
-          <Badge>{modelCountText(healthFor(lmStudio))}</Badge>
-          <span style={{ marginLeft: "auto" }} />
-          <OverflowButton name="LM Studio" />
-        </CardHeader>
-
-        <SettingText
-          label="Base URL"
-          path="providers.lmstudio.base_url"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          placeholder="http://127.0.0.1:1234"
-          mono
-          action={
-            <TestButton
-              name="lmstudio"
-              staleUrl={lmStudioStale}
-              testing={testing}
-              onTest={handleTest}
-            />
-          }
-        />
-        {lmStudioStale && <StaleUrlNote name="lmstudio" />}
-        <SettingText
-          label="lms CLI binary"
-          path="providers.lmstudio.cli_path"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          placeholder="lms"
-          mono
-          action={<BrowseButton path="providers.lmstudio.cli_path" onBrowse={onBrowse} />}
-        />
-        <SettingText
-          label="Models folder"
-          path="providers.lmstudio.models_dir"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          placeholder="~/.lmstudio/models"
-          mono
-          action={<BrowseButton path="providers.lmstudio.models_dir" onBrowse={onBrowse} />}
-        />
-        <SettingToggle
-          label="Default backend"
-          path="providers.lmstudio.default"
-          get={get}
-          setField={setField}
-          isDirty={isDirty}
-          hint="New sessions target this backend"
-          title="LM Studio is currently the only backend the settings schema lets you mark as default."
-        />
-        <CapabilityChips capabilities={lmStudio?.capabilities} />
-      </div>
-
-      {/* vLLM */}
+      {/* vLLM + LM Studio — half-width pair.
+          ORDER IS THE OWNER'S: he asked for Lane Broker, vLLM, LM Studio,
+          OpenRouter, Ollama. Lane Broker is gone, so the remaining four are
+          applied in his order and the count is EVEN — four cards, two pairs,
+          nothing orphaned and nothing invented to fill a slot. */}
+      <div style={PAIR} data-testid="row-vllm-lmstudio">
       <div style={CARD} data-testid="card-vllm">
         <CardHeader icon={Cpu} token="var(--cc-fn)" name="vLLM">
           {reachabilityPill(
@@ -1629,10 +1505,79 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
             deliberately bypasses the draft store. */}
         <VllmModelsFolderSection provider={vllm} />
       </div>
+
+      {/* LM Studio */}
+      <div style={CARD} data-testid="card-lmstudio">
+        <CardHeader icon={Boxes} token="var(--cc-type)" name="LM Studio">
+          {reachabilityPill(
+            providers === null ? undefined : healthFor(lmStudio),
+            "lmstudio-health",
+            lmStudioStale
+          )}
+          {get("providers.lmstudio.default", false) === true && (
+            <Badge token="var(--cc-accent)">Default</Badge>
+          )}
+          <Badge>{modelCountText(healthFor(lmStudio))}</Badge>
+          <span style={{ marginLeft: "auto" }} />
+          <OverflowButton name="LM Studio" />
+        </CardHeader>
+
+        <SettingText
+          label="Base URL"
+          path="providers.lmstudio.base_url"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="http://127.0.0.1:1234"
+          mono
+          action={
+            <TestButton
+              name="lmstudio"
+              staleUrl={lmStudioStale}
+              testing={testing}
+              onTest={handleTest}
+            />
+          }
+        />
+        {lmStudioStale && <StaleUrlNote name="lmstudio" />}
+        <SettingText
+          label="lms CLI binary"
+          path="providers.lmstudio.cli_path"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="lms"
+          mono
+          action={<BrowseButton path="providers.lmstudio.cli_path" onBrowse={onBrowse} />}
+        />
+        <SettingText
+          label="Models folder"
+          path="providers.lmstudio.models_dir"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          placeholder="~/.lmstudio/models"
+          mono
+          action={<BrowseButton path="providers.lmstudio.models_dir" onBrowse={onBrowse} />}
+        />
+        <SettingToggle
+          label="Default backend"
+          path="providers.lmstudio.default"
+          get={get}
+          setField={setField}
+          isDirty={isDirty}
+          hint="New sessions target this backend"
+          title="LM Studio is currently the only backend the settings schema lets you mark as default."
+        />
+        <CapabilityChips capabilities={lmStudio?.capabilities} />
+        <LmStudioTransport provider={queueProvider} status={status} loading={providers === null} />
+      </div>
       </div>
 
-      {/* Ollama + OpenRouter — half-width pair */}
-      <div style={PAIR} data-testid="row-ollama-openrouter">
+      {/* OpenRouter + Ollama — half-width pair (the owner's order) */}
+      <div style={PAIR} data-testid="row-openrouter-ollama">
+        <OpenRouterCard get={get} setField={setField} isDirty={isDirty} />
+
         <div style={CARD} data-testid="card-ollama">
           <CardHeader icon={Layers} token="var(--cc-num)" name="Ollama">
             {reachabilityPill(
@@ -1669,8 +1614,6 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
             isDirty={isDirty}
           />
         </div>
-
-        <OpenRouterCard get={get} setField={setField} isDirty={isDirty} />
       </div>
 
       {/* The Claude CLI card that used to live here has been REMOVED, not moved.

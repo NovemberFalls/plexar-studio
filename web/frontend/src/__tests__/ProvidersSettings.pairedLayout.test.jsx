@@ -1,6 +1,19 @@
 /**
- * Settings ▸ Providers — the page is THREE half-width pairs, and nothing is
+ * Settings ▸ Providers — the page is TWO half-width pairs, and nothing is
  * full width.
+ *
+ * IT WAS THREE UNTIL T9 / 2026-08-04. The owner ruled the `Lane broker` card
+ * off the page entirely — *"if lane broker is unique to lmstudio then its not
+ * doing the right job, and I would remove it or merge it into the lmstudio
+ * card"* — and its partner, `Queueing`, was a property of the same component so
+ * it went with it. THE GATE WAS UPDATED, NOT LOOSENED, for the second time: the
+ * row count changed, every other assertion is unchanged, and the last test
+ * still says every card on the page is paired. Four cards is an EVEN count, so
+ * nothing was orphaned and nothing was invented to fill a slot.
+ *
+ * The card ORDER is the owner's too: he asked for Lane Broker, vLLM, LM Studio,
+ * OpenRouter, Ollama. With the first gone the remaining four are applied in his
+ * order, and the ROWS table below is the assertion that they stay in it.
  *
  * The owner walked this page on 1.29 and read the widths as a claim about
  * importance: *"Lane Broker has no business being that wide"*, *"LM Studio and
@@ -63,14 +76,18 @@ function harness() {
   };
 }
 
-/** The three rows, as the owner described them. */
+/** The two rows, in the owner's order. */
 const ROWS = [
-  ["row-broker-queueing", ["card-lane-broker", "card-queueing"]],
-  ["row-lmstudio-vllm", ["card-lmstudio", "card-vllm"]],
-  ["row-ollama-openrouter", ["card-ollama", "card-openrouter"]],
+  ["row-vllm-lmstudio", ["card-vllm", "card-lmstudio"]],
+  ["row-openrouter-ollama", ["card-openrouter", "card-ollama"]],
 ];
 
-describe("Providers page layout — three half-width pairs", () => {
+/** The owner's order, flattened. Asserted as a SEQUENCE against document
+ *  order, because the ROWS table above pins which cards share a row and would
+ *  pass just as happily with the two swapped inside it. */
+const OWNER_ORDER = ["card-vllm", "card-lmstudio", "card-openrouter", "card-ollama"];
+
+describe("Providers page layout — two half-width pairs", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((url) => {
       const u = String(url);
@@ -100,10 +117,35 @@ describe("Providers page layout — three half-width pairs", () => {
     });
   }
 
+  it("the four cards appear in the owner's order", async () => {
+    const h = harness();
+    const { container } = render(<ProvidersSettings {...h} />);
+    await screen.findByTestId("row-vllm-lmstudio");
+    await waitFor(() => expect(screen.getByTestId("card-ollama")).toBeInTheDocument());
+
+    const order = Array.from(container.querySelectorAll('[data-testid^="card-"]')).map((el) =>
+      el.getAttribute("data-testid")
+    );
+    expect(order).toEqual(OWNER_ORDER);
+  });
+
+  it("the deleted Lane broker and Queueing cards are GONE, not hidden", async () => {
+    const h = harness();
+    const { container } = render(<ProvidersSettings {...h} />);
+    await screen.findByTestId("row-vllm-lmstudio");
+
+    // A removal, not a deprecation: no stub, no disabled card, no display:none
+    // wrapper keeping the markup alive for a future revival.
+    expect(screen.queryByTestId("card-lane-broker")).toBeNull();
+    expect(screen.queryByTestId("card-queueing")).toBeNull();
+    expect(screen.queryByTestId("row-broker-queueing")).toBeNull();
+    expect(container.innerHTML).not.toMatch(/Lane broker/i);
+  });
+
   it("every card on the page is inside a pair — nothing is full width", async () => {
     const h = harness();
     const { container } = render(<ProvidersSettings {...h} />);
-    await screen.findByTestId("row-broker-queueing");
+    await screen.findByTestId("row-vllm-lmstudio");
 
     const rows = ROWS.map(([id]) => screen.getByTestId(id));
     const cards = Array.from(container.querySelectorAll('[data-testid^="card-"]'));

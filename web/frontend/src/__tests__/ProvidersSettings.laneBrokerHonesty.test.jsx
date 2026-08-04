@@ -1,19 +1,35 @@
 /**
- * S8 — a setting that silently does nothing is worse than an absent one,
- * because the user believes they have configured something.
+ * S8 -> T9. THE CONTROLS THIS FILE GUARDED ARE GONE, AND THE GUARD SURVIVES
+ * INVERTED RATHER THAN DELETED.
  *
- * The lane-broker card offers three controls and the server reads NONE of them:
- *   base_url    — the truth is GET /api/local/status -> `url`
- *                 (COCKPIT_BROKER_URL / _LOCAL_BROKER_URL)
- *   autostart   — governed by COCKPIT_MANAGED_BROKER
- *   concurrency — read by nothing at all; validated on save, then ignored
+ * S8's finding was that the lane-broker card offered three controls the server
+ * read NONE of -- base_url (the truth is COCKPIT_BROKER_URL), autostart
+ * (COCKPIT_MANAGED_BROKER), concurrency (nothing at all reads it) -- and that a
+ * setting which silently does nothing is worse than an absent one. The fix at
+ * the time was a not-enforced note per control, structurally discovered from
+ * the component's own source so a FOURTH control could not be added without
+ * one.
  *
- * THE STRUCTURAL TEST IS THE POINT. Asserting "these three notes exist" would
- * pass forever while a FOURTH control was added beside them with no note --
- * which is exactly how the first three got here. So the guard reads the
- * component's own source, extracts every `providers.lane_broker.*` path it
- * binds, and requires a rendered not-enforced note for each. Add a control
- * without a note and this goes red on the control you added, naming it.
+ * T9 / 2026-08-04 deleted the card on the owner's ruling. That resolves S8's
+ * defect in the strongest available direction: the three controls that could
+ * not move anything are not annotated, they are removed. It also DESTROYS the
+ * old guard, and silently -- the discovery regex would match nothing, and "all
+ * zero controls have a note" is trivially true. That is exactly the vacuous
+ * pass the old file's own comment (R19 / NOTE-17) warned about, arriving by the
+ * one route it did not anticipate: the whole set going at once.
+ *
+ * SO THE PROPERTY IS RESTATED, NOT DROPPED. The old file asserted "every
+ * lane_broker control has a note"; this one asserts "the page binds NO
+ * lane_broker control at all". Both forbid the same thing -- a control on this
+ * page that claims an effect it does not have -- and the new form cannot pass
+ * vacuously, because the thing it counts must be ZERO rather than merely
+ * matching a set it discovered itself. Re-adding any of the three fails here on
+ * the control that was added, naming it.
+ *
+ * The two effective-address tests are KEPT and re-pointed. `status.url` vs. a
+ * disagreeing stored value was the sharpest live defect S8 found, and the
+ * statement still ships -- it moved into the LM Studio card, which is where the
+ * owner said a property of LM Studio belongs.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -83,92 +99,80 @@ afterEach(() => {
   delete globalThis.fetch;
 });
 
-describe("lane-broker card: no control may claim an effect it does not have", () => {
-  it("EVERY providers.lane_broker.* control the card binds has a not-enforced note", async () => {
+describe("the lane-broker controls are gone, and nothing may quietly re-add them", () => {
+  it("the page binds NO providers.lane_broker.* control at all", async () => {
     const src = fs.readFileSync(SOURCE, "utf8");
     const bound = [...src.matchAll(/path="providers\.lane_broker\.([a-z_]+)"/g)].map((m) => m[1]);
 
-    // R19 / NOTE-17, applied retroactively by the R26 re-audit (2026-08-02).
-    //
-    // This used to read `expect(bound.length).toBeGreaterThan(0)`, with a
-    // comment saying a zero would mean the regex had drifted and the test would
-    // pass vacuously. The instinct was right and THE GUARD WAS THE WEAKER FORM
-    // OF IT: a floor catches the total collapse to zero and is blind to the
-    // partial drop from three to two, which is the same failure arriving slowly
-    // (L7 hardening #2, and R19's absence-shape -- a control that stops matching
-    // the regex is not caught, it VANISHES FROM THE SET the guard iterates, and
-    // a smaller set is trivially all-noted).
-    //
-    // The discovery regex is the ONLY thing defining the set, so anything that
-    // changes a control's textual form silently shrinks it: a dynamically built
-    // path, a capital or a digit in the key (`[a-z_]+`), different quoting, or
-    // the control moving to a sub-component in another file. The row's gate
-    // claims "a test that fails if a control is added without a note"; that is
-    // only true for a control written in the shape the regex already knows.
-    //
-    // So the SET is declared, not counted. A new control must be added here
-    // deliberately -- which is the point, because that is the moment someone
-    // decides whether it is enforced or needs a note.
-    const EXPECTED_BOUND = ["base_url", "autostart", "concurrency"];
-    expect(new Set(bound)).toEqual(new Set(EXPECTED_BOUND));
+    // The inversion of S8's guard. A zero here is the ASSERTION, not a
+    // discovery failure that makes the check vacuous -- which is what the same
+    // zero meant in the previous form of this file.
+    expect(bound, `providers.lane_broker.* controls are back: ${bound.join(", ")}`).toEqual([]);
 
+    // Not merely unbound: not drawn either. The card, its pair wrapper and its
+    // three not-enforced notes must all be absent from the render.
     render(<ProvidersSettings {...makeShell()} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
-
-    const missing = bound.filter((key) => {
-      const id = `not-enforced-lane-broker-${key.replace(/_/g, "-")}`;
-      return screen.queryByTestId(id) === null;
-    });
-    expect(missing, `lane_broker controls with no not-enforced note: ${missing.join(", ")}`)
-      .toEqual([]);
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
+    for (const id of [
+      "card-lane-broker",
+      "row-broker-queueing",
+      "card-queueing",
+      "broker-health",
+      "test-lane-broker",
+      "not-enforced-lane-broker-base-url",
+      "not-enforced-lane-broker-autostart",
+      "not-enforced-lane-broker-concurrency",
+    ]) {
+      expect(screen.queryByTestId(id), `${id} should be gone`).toBeNull();
+    }
   });
 
-  it("shows the address the broker ACTUALLY binds, from status.url", async () => {
+  it("shows the address the transport ACTUALLY binds, from status.url", async () => {
     render(<ProvidersSettings {...makeShell()} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
-    const note = screen.getByTestId("broker-effective-url");
+    const note = await screen.findByTestId("broker-effective-url");
     expect(note).toHaveTextContent("127.0.0.1:1235");
     expect(note).toHaveTextContent(/started by Plexar Studio/i);
   });
 
-  it("the effective address survives a field value that disagrees with it", async () => {
+  it("the effective address survives a stored field value that disagrees with it", async () => {
     // The sharpest case, and the one that was actually broken: the stored
     // setting said :8431, nothing has ever listened there, and the card showed
-    // it as though it were the address in use. The displayed truth must come
-    // from the server, not from the box.
+    // it as though it were the address in use. The control is gone now, but a
+    // stale value can still sit in settings.json -- the displayed truth must
+    // come from the server, and must not track that value.
     const shell = makeShell({
       get: (p, fallback) =>
         p === "providers.lane_broker.base_url" ? "http://127.0.0.1:8431" : fallback,
     });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
-    expect(screen.getByTestId("broker-effective-url")).toHaveTextContent("127.0.0.1:1235");
+    const note = await screen.findByTestId("broker-effective-url");
+    expect(note).toHaveTextContent("127.0.0.1:1235");
+    expect(note).not.toHaveTextContent("8431");
   });
 
-  it("each note gives a reason TRUE OF THAT CONTROL, not one blanket sentence", async () => {
-    // Lane concurrency is read by no code path AND no env var. Telling that
-    // user to go look at an environment variable sends them somewhere that does
-    // not exist -- a second wrong turn on top of the first.
+  it("the transport note lives INSIDE the LM Studio card, not beside it", async () => {
+    // The owner's ruling was structural, not cosmetic: the broker is a property
+    // of LM Studio, so its statement must be contained by LM Studio's card. A
+    // note rendered as a sibling would read on screen as the same peer block
+    // under a smaller heading.
     render(<ProvidersSettings {...makeShell()} />);
-    await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
+    const card = await screen.findByTestId("card-lmstudio");
+    const note = await screen.findByTestId("lmstudio-transport");
+    expect(card).toContainElement(note);
+    expect(card).toContainElement(screen.getByTestId("broker-effective-url"));
+  });
 
-    expect(screen.getByTestId("not-enforced-lane-broker-concurrency")).toHaveTextContent(
-      /no code path reads it/i
-    );
-    expect(screen.getByTestId("not-enforced-lane-broker-base-url")).toHaveTextContent(
-      /COCKPIT_BROKER_URL/
-    );
-    expect(screen.getByTestId("not-enforced-lane-broker-autostart")).toHaveTextContent(
-      /COCKPIT_MANAGED_BROKER/
-    );
-
-    // Pairwise: the three reasons must not collapse into the same sentence.
-    const text = (id) => screen.getByTestId(id).textContent;
-    const a = text("not-enforced-lane-broker-concurrency");
-    const b = text("not-enforced-lane-broker-base-url");
-    const c = text("not-enforced-lane-broker-autostart");
-    expect(a).not.toBe(b);
-    expect(b).not.toBe(c);
-    expect(a).not.toBe(c);
+  it("says WHETHER it queues, and never infers that from a depth of zero", async () => {
+    // S10's ruling outlived the card that carried it. Three states, never
+    // collapsed -- and the flag is READ (`/queue` -> shadow), because a healthy
+    // idle queueing broker also reports an empty queue.
+    render(<ProvidersSettings {...makeShell()} />);
+    await screen.findByTestId("lmstudio-transport");
+    await waitFor(() => {
+      const states = ["queueing-shadow", "queueing-on", "queueing-unknown"]
+        .map((id) => screen.queryByTestId(id))
+        .filter(Boolean);
+      expect(states).toHaveLength(1);
+    });
   });
 });
