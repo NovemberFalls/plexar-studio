@@ -93,15 +93,7 @@ const CARD = {
   minWidth: 0,
 };
 
-/** Why a tab is not built, and where that information lives today. */
-const NOT_BUILT = {
-  traces: {
-    will:
-      "One row per prompt, expandable into the runs it fanned out into, with tokens and wall time per node.",
-    today:
-      "Engine ▸ Traces, which reads the lane broker's own trace tree. Those traces cover local-engine runs only; there is no per-session trace endpoint for Claude API turns yet.",
-  },
-};
+import { NOT_BUILT_TABS as NOT_BUILT } from "./notBuilt.js";
 
 /**
  * The one thing Reports still has to say about tool calls, or null when the

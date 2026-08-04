@@ -202,7 +202,14 @@ describe("ReportsView — tabs", () => {
     const traces = screen.getByTestId("not-built-traces");
     expect(traces).toHaveTextContent("Traces is not built yet");
     expect(traces).toHaveTextContent(/Today this lives in/);
-    expect(traces).toHaveTextContent(/Engine ▸ Traces/);
+    /* CORRECTED 2026-08-03. This line used to pin `/Engine ▸ Traces/` --
+       a tab that has never existed (ENGINE_TABS is Live, Models, Requests,
+       API, Logs). The test was therefore holding the copy to a destination
+       the app does not have, and passing. The trace renderer lives in
+       Engine ▸ Requests; see ReportsView.tracesPointer.test.jsx, which
+       checks the pointer against ENGINE_TABS rather than against a string
+       someone typed twice. */
+    expect(traces).toHaveTextContent(/Engine ▸ Requests/);
 
     // Local engine is BUILT now, sourced from Plexar rather than from
     // /api/usage/report. With no Plexar answering (the fetch mock returns the
