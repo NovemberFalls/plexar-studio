@@ -6,7 +6,7 @@
 /**
  * TokensSettings — the Settings ▸ Design tokens page (Phase 5, spec §7).
  *
- * The raw `--cc-*` custom properties every surface in Cockpit is built from,
+ * The raw `--cc-*` custom properties every surface in Plexar Studio is built from,
  * editable by hand with a live-painting preview.
  *
  * TWO WRITES PER EDIT — the rule this whole file is organised around:
@@ -184,7 +184,7 @@ export function parseImportedTheme(text) {
   if (unknown.length > 0) {
     return {
       ok: false,
-      error: `Unknown token${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. Only Cockpit's --cc-* tokens can be imported.`,
+      error: `Unknown token${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. Only Plexar Studio's --cc-* tokens can be imported.`,
     };
   }
   const bad = Object.entries(raw).filter(([, v]) => typeof v !== "string" || v.length === 0);
@@ -622,7 +622,7 @@ function WhereUsed({ token }) {
       )}
       {token && !usage && (
         <div style={{ fontSize: 11, color: "var(--cc-muted)", lineHeight: 1.5 }}>
-          <code>{token}</code> is used broadly — Cockpit has no verified consumer list for it.
+          <code>{token}</code> is used broadly — Plexar Studio has no verified consumer list for it.
         </div>
       )}
       {token && usage && (

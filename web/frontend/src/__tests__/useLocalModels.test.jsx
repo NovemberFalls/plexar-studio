@@ -33,7 +33,7 @@ const PROVIDER = {
   capabilities: ["models", "model-control", "queue"],
 };
 
-/** An EXTERNAL vLLM: publishes a model list, but Cockpit does not own the
+/** An EXTERNAL vLLM: publishes a model list, but Plexar Studio does not own the
  *  container, so every load 404s and only the served model can be used. */
 const EXTERNAL_VLLM = {
   id: "vllm-local",

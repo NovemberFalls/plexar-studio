@@ -33,7 +33,7 @@ const PROVIDER = {
   capabilities: ["queue", "metrics", "spill", "models", "traces", "health"],
 };
 
-/** vLLM: served direct, so no queue/spill/traces capability at all. Cockpit owns
+/** vLLM: served direct, so no queue/spill/traces capability at all. Plexar Studio owns
  *  the container here (`managed`), which is what makes restart offerable. */
 const VLLM = {
   id: "vllm-local",
@@ -291,7 +291,7 @@ describe("EngineView frame", () => {
     expect(screen.queryByTestId("engine-restart")).not.toBeInTheDocument();
     const note = screen.getByTestId("engine-model-control-note");
     // The `managed: false` flag is what lets the note say something TRUE: no
-    // hot-swap API, and Cockpit does not own the process.
+    // hot-swap API, and Plexar Studio does not own the process.
     expect(note).toHaveTextContent(/no model hot-swap API/i);
     expect(note).toHaveTextContent(/COCKPIT_MANAGED_VLLM/);
     expect(note).toHaveTextContent(/Restart it where you started it/i);
@@ -333,7 +333,7 @@ describe("EngineView frame", () => {
 
   it("surfaces a 409 refusal verbatim, env var and all", async () => {
     const REFUSAL =
-      "vLLM is external — Cockpit can't restart it. Set COCKPIT_MANAGED_VLLM=1 and restart Cockpit " +
+      "vLLM is external — Plexar Studio can't restart it. Set COCKPIT_MANAGED_VLLM=1 and restart Plexar Studio " +
       "to let it own the container.";
     globalThis.fetch = mockFetch({ "/restart": { status: 409, body: { error: REFUSAL, managed: false, env: "COCKPIT_MANAGED_VLLM" } } });
     const onToast = vi.fn();

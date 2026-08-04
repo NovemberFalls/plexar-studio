@@ -6,7 +6,7 @@
  *     the DOM, and there is no reveal control for the stored value
  *   - Save POSTs and the card re-renders from the server's echo
  *   - Remove DELETEs
- *   - `source: "env"` disables Remove and names the variable Cockpit cannot unset
+ *   - `source: "env"` disables Remove and names the variable Plexar Studio cannot unset
  *   - the Anthropic "saved but not used yet" note is present, and is ABSENT on
  *     the OpenRouter card (that key genuinely is consumed)
  *   - a failed save surfaces the SERVER's message, not a generic one

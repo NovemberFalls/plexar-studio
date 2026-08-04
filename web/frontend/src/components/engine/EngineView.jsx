@@ -47,9 +47,9 @@ const FAST_MS = 3000;
 const SLOW_MS = 10000;
 
 /** There is no stop endpoint. `POST /api/local/{id}/restart` is the only
- *  lifecycle write Cockpit exposes, and it is vLLM-only. */
+ *  lifecycle write Plexar Studio exposes, and it is vLLM-only. */
 const STOP_DISABLED_TITLE =
-  "No stop endpoint exists yet — Cockpit exposes POST /api/local/{provider}/restart only. " +
+  "No stop endpoint exists yet — Plexar Studio exposes POST /api/local/{provider}/restart only. " +
   "Stop the engine from its own process/container until a stop route lands.";
 
 /**
@@ -352,7 +352,7 @@ export default function EngineView({
               </div>
               <p style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-muted)", margin: 0 }}>
                 Engine reads one backend at a time. Pick one in Settings ▸ Providers &amp; Endpoints —
-                Cockpit registers providers server-side, so the browser never learns their URLs.
+                Plexar Studio registers providers server-side, so the browser never learns their URLs.
               </p>
             </div>
           </div>

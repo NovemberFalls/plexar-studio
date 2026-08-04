@@ -74,7 +74,7 @@ function OverrideNote({ id, testId, lines, actions, onClear, error }) {
           }}
         >
           Could not clear the override on the server: {error} It is cleared in this
-          window only and will reappear when Cockpit restarts.
+          window only and will reappear when Plexar Studio restarts.
         </div>
       )}
     </div>

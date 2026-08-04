@@ -9,7 +9,7 @@
  *    some rows are missing it, the cell says so in its title rather than
  *    presenting a partial total as complete.
  *
- * The state dot describes whether the session is open in Cockpit RIGHT NOW,
+ * The state dot describes whether the session is open in Plexar Studio RIGHT NOW,
  * which is separate from the historical row: usage rows outlive their
  * terminals, so an unknown state is drawn muted and titled as unknown instead
  * of being guessed at.
@@ -74,7 +74,7 @@ function StateDot({ status }) {
   return (
     <span
       aria-hidden="true"
-      title={known ? `session is ${status}` : "not open in Cockpit right now"}
+      title={known ? `session is ${status}` : "not open in Plexar Studio right now"}
       style={{
         width: 6,
         height: 6,

@@ -1,7 +1,7 @@
 /**
- * keybindings.js — the single source of truth for Cockpit's keyboard shortcuts.
+ * keybindings.js — the single source of truth for Plexar Studio's keyboard shortcuts.
  *
- * WHY THIS FILE EXISTS: Cockpit has had these shortcuts since the facelift and
+ * WHY THIS FILE EXISTS: Plexar Studio has had these shortcuts since the facelift and
  * NONE of them were discoverable anywhere in the UI. The owner asked "do we have
  * key bindings???" — which is the whole problem in one question. This module is
  * the answer, and Settings ▸ Keybindings renders it.
@@ -164,7 +164,7 @@ export const KEYBINDINGS = [
     label: "Upload a clipboard image and paste its path",
     group: "terminal",
     scope: "Terminal",
-    note: "Claude Code's own image-paste chord. Cockpit intercepts it because the terminal process cannot reach the system clipboard.",
+    note: "Claude Code's own image-paste chord. Plexar Studio intercepts it because the terminal process cannot reach the system clipboard.",
   },
   {
     id: "dialog.close",

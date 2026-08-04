@@ -1,0 +1,12 @@
+{
+  "_comment": "S25 Tier-3 FREEZE. These identifiers are compatibility surface with Len's INSTALLED copy and the updater. The rename must NOT touch them. Captured 2026-08-03 on lane/studio before the S25 sweep.",
+  "COCKPIT_env": 204,
+  "cockpit_ls": 90,
+  "bundle_id": 1,
+  "sidecar": 4,
+  "names": {
+    "bundle_id": "com.claude-cockpit.app",
+    "sidecar": "cockpit-server",
+    "theme_id": "cockpit-blue"
+  }
+}

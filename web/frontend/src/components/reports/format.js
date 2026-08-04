@@ -218,7 +218,7 @@ export function toolCoverage({ range, generatedAt, byDay, toolEventsSince } = {}
  *
  * This is the CONTRADICTORY state, and it is the only one worth a hint: a
  * streaming client that omits `stream_options.include_usage` produces turns with
- * no usage block, so Cockpit records the turn and counts zero tokens for it. A
+ * no usage block, so Plexar Studio records the turn and counts zero tokens for it. A
  * zero shown without that explanation reads as "a quiet range".
  *
  * Deliberately false when turns are zero too — that IS a quiet range, and a

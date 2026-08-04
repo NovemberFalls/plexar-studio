@@ -5,7 +5,7 @@
    the DOM changes), and moving them to their own module would separate them
    from the ROUTES table they exist to interpret. */
 /**
- * EngineApi — Engine ▸ API (screen 3c). The broker/Cockpit HTTP surface, made
+ * EngineApi — Engine ▸ API (screen 3c). The broker/Plexar Studio HTTP surface, made
  * discoverable without reading server.py.
  *
  * THE HONESTY RULES ARE THE FEATURE. This screen invites the operator to fire
@@ -23,10 +23,10 @@
  *     Confirm click, and `POST /v1/chat/completions` is never runnable at all —
  *     it would spend real inference to satisfy curiosity.
  *  3. Routes gated on a provider capability render dimmed and unrunnable when the
- *     selected provider does not declare it, because Cockpit answers those with
+ *     selected provider does not declare it, because Plexar Studio answers those with
  *     404 "capability not available" and a 404 in the response pane would look
  *     like a missing route.
- *  4. Routes with a path parameter Cockpit cannot fill from live data are
+ *  4. Routes with a path parameter Plexar Studio cannot fill from live data are
  *     unrunnable and say which id they need.
  *  5. `Export OpenAPI` emits a real spec of the same-origin routes listed here —
  *     no invented paths, and the cross-origin group is excluded rather than
@@ -50,16 +50,16 @@ const GROUPS = [
   {
     id: "broker",
     label: "Lane broker · direct",
-    note: "A separate process on its own port. Cockpit proxies some of these; the browser can reach none of them.",
+    note: "A separate process on its own port. Plexar Studio proxies some of these; the browser can reach none of them.",
   },
   {
     id: "provider",
-    label: "Cockpit · per-provider",
+    label: "Plexar Studio · per-provider",
     note: "Same origin as this page. Provider URLs and auth never reach the browser.",
   },
   {
     id: "cockpit",
-    label: "Cockpit · usage & sessions",
+    label: "Plexar Studio · usage & sessions",
     note: "Same origin. Read-only reporting and session state.",
   },
 ];
@@ -70,7 +70,7 @@ const GROUPS = [
  *
  *   direct    — different origin; unreachable from the browser
  *   cap       — provider capability required (404 without it)
- *   needs     — path parameter Cockpit must fill from live data
+ *   needs     — path parameter Plexar Studio must fill from live data
  *   body      — requires a request body the explorer does not compose
  *   forbidden — reason this must never be fired from a UI
  */
@@ -91,7 +91,7 @@ const ROUTES = [
     path: "/v1/chat/completions",
     desc: "the lane itself — queued, then forwarded",
     direct: true,
-    forbidden: "This spends real inference. Cockpit will not fire it from a UI button.",
+    forbidden: "This spends real inference. Plexar Studio will not fire it from a UI button.",
   },
 
   // ── cockpit, per provider ──────────────────────────────
@@ -160,15 +160,15 @@ const ROUTES = [
   { group: "cockpit", method: "GET", path: "/api/usage/daily", desc: "per-day usage rows" },
   { group: "cockpit", method: "GET", path: "/api/reporting/models", desc: "per-model reporting rollup" },
   { group: "cockpit", method: "GET", path: "/api/pricing/models", desc: "reference $/Mtok table" },
-  { group: "cockpit", method: "GET", path: "/api/terminals", desc: "live sessions Cockpit is managing" },
+  { group: "cockpit", method: "GET", path: "/api/terminals", desc: "live sessions Plexar Studio is managing" },
   { group: "cockpit", method: "GET", path: "/api/terminals/{terminal_id}/usage", desc: "one session's token + cost totals", needs: "terminal_id" },
   { group: "cockpit", method: "GET", path: "/api/history", desc: "past Claude Code conversations on disk" },
   { group: "cockpit", method: "GET", path: "/api/tsdb/status", desc: "whether a metrics store is attached" },
   { group: "cockpit", method: "GET", path: "/api/system", desc: "host CPU / memory / GPU snapshot" },
   { group: "cockpit", method: "GET", path: "/api/platform", desc: "PTY backend + OS build detection" },
   { group: "cockpit", method: "GET", path: "/api/models", desc: "model catalogue offered to new sessions" },
-  { group: "cockpit", method: "GET", path: "/health", desc: "Cockpit liveness + its own uptime" },
-  { group: "cockpit", method: "GET", path: "/metrics", desc: "Cockpit's Prometheus exposition (text, not JSON)", text: true },
+  { group: "cockpit", method: "GET", path: "/health", desc: "Plexar Studio liveness + its own uptime" },
+  { group: "cockpit", method: "GET", path: "/metrics", desc: "Plexar Studio's Prometheus exposition (text, not JSON)", text: true },
 ];
 
 export function routeId(r) {
@@ -204,7 +204,7 @@ export function runBlockReason(route, ctx) {
   if (route.direct) {
     return (
       "Not runnable from here: this is the lane broker's own origin, which the browser cannot call " +
-      "(no CORS, and Cockpit does not proxy every broker path). Use the /api/local equivalent, or " +
+      "(no CORS, and Plexar Studio does not proxy every broker path). Use the /api/local equivalent, or " +
       "curl it from a shell."
     );
   }
@@ -212,11 +212,11 @@ export function runBlockReason(route, ctx) {
     return `Needs a request body (${route.body}). This explorer sends none, so the call would 400. Use the owning screen instead.`;
   }
   if (route.cap && !ctx.caps?.has(route.cap)) {
-    return `The selected provider does not declare the "${route.cap}" capability — Cockpit answers this with 404 "capability not available".`;
+    return `The selected provider does not declare the "${route.cap}" capability — Plexar Studio answers this with 404 "capability not available".`;
   }
   const { missing } = resolvePath(route, ctx);
   if (missing === "provider_id") return "Select a provider first — this path is provider-keyed.";
-  if (missing) return `Needs a {${missing}} Cockpit cannot fill from what is on screen right now.`;
+  if (missing) return `Needs a {${missing}} Plexar Studio cannot fill from what is on screen right now.`;
   return null;
 }
 
@@ -280,7 +280,7 @@ export function buildOpenApi(routes) {
       title: "Plexar — local engine HTTP surface",
       version: "1",
       description:
-        "Generated from Cockpit's Engine ▸ API route catalogue. Same-origin routes only: the lane " +
+        "Generated from Plexar Studio's Engine ▸ API route catalogue. Same-origin routes only: the lane " +
         "broker's own endpoints live on a different origin and are documented in the UI, not here.",
     },
     servers: [{ url: "/" }],
@@ -458,7 +458,7 @@ export default function EngineApi({ provider, caps, data, onToast, active = true
           status: null,
           ms: null,
           body: "",
-          error: "The request did not complete. Cockpit itself may be down, or the path is not same-origin.",
+          error: "The request did not complete. Plexar Studio itself may be down, or the path is not same-origin.",
         });
       } finally {
         runningRef.current = false;
@@ -555,7 +555,7 @@ export default function EngineApi({ provider, caps, data, onToast, active = true
             !selected
               ? "Select a route first"
               : !curl
-                ? "The broker's origin is server-side only, so Cockpit cannot write a correct URL for you."
+                ? "The broker's origin is server-side only, so Plexar Studio cannot write a correct URL for you."
                 : "Copy a curl command for the selected route"
           }
         />

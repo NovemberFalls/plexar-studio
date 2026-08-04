@@ -2,7 +2,7 @@
  * The picker used to conflate two different actions: "use this model for my
  * session" and "load this model into the engine". On LM Studio (model-control)
  * they are one click. On an EXTERNAL vLLM they are not — only the served model
- * can answer a request, and nothing in Cockpit can change which one that is.
+ * can answer a request, and nothing in Plexar Studio can change which one that is.
  *
  * The owner picked an unserved vLLM model, got a toast pointing at another
  * screen, and was left with a session default the engine cannot serve. These
@@ -131,7 +131,7 @@ describe("TopBar — local provider WITHOUT model-control", () => {
     expect(screen.getByRole("option", { name: /Qwen3-Coder-30B-A3B-AWQ/ })).toBeInTheDocument();
   });
 
-  it("offers no Load button — Cockpit cannot load into this engine", async () => {
+  it("offers no Load button — Plexar Studio cannot load into this engine", async () => {
     await openPicker();
     expect(screen.queryByRole("button", { name: /^Load / })).not.toBeInTheDocument();
   });

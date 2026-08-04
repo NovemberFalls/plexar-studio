@@ -453,7 +453,7 @@ export default function TopBar({
                       )}
                       {group.models.map((m) => {
                         // A local model the engine is not serving, on a provider
-                        // Cockpit cannot load into. Picking it would point the
+                        // Plexar Studio cannot load into. Picking it would point the
                         // session at something unservable — so it is not
                         // pickable at all. It stays VISIBLE (the list doubles as
                         // "what is on disk"), just never selectable.

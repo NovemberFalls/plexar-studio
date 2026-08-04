@@ -11,7 +11,7 @@
  * THE ONE IDEA THIS FILE IS BUILT AROUND: display and enforcement are different
  * things, and conflating them produces a guardrail that blocks free work.
  *
- * Cockpit reports API-EQUIVALENT cost — tokens multiplied by recorded prices.
+ * Plexar Studio reports API-EQUIVALENT cost — tokens multiplied by recorded prices.
  * That is the right number to SHOW in both billing modes. It is the wrong number
  * to ENFORCE on while the owner is on the Claude monthly subscription, because
  * the marginal cost of another Claude turn under a subscription is zero. A hard
@@ -202,7 +202,7 @@ export function usedFraction(spent, cap) {
  *   "nocap"   — cap is null / percent is null. There is no bar, because a 0%
  *               bar would claim headroom where the truth is "unbounded".
  *   "unknown" — a cap exists but the fraction cannot be computed. Hatched.
- *   "bar"     — a real fraction. Prefers the server's own `percent` so Cockpit
+ *   "bar"     — a real fraction. Prefers the server's own `percent` so Plexar Studio
  *               and the backend can never disagree on the same number.
  */
 export function meterRead(data) {
@@ -491,7 +491,7 @@ function CapRow({
         {notEnforcing && (
           <span
             data-testid={`cap-not-enforcing-${kind}`}
-            title="Saved, but not currently enforcing — Cockpit does not have trustworthy prices for this class yet, so this cap can only alert. See the notes in This period below."
+            title="Saved, but not currently enforcing — Plexar Studio does not have trustworthy prices for this class yet, so this cap can only alert. See the notes in This period below."
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -567,7 +567,7 @@ function StatusMeter({ kind, label, data, blockOn }) {
         {notEnforcing && (
           <span
             data-testid={`not-enforcing-${kind}`}
-            title="This hard stop is saved and will start working on its own once Cockpit has trustworthy prices for it. Right now it cannot fire, so it is not protecting you — see the notes below."
+            title="This hard stop is saved and will start working on its own once Plexar Studio has trustworthy prices for it. Right now it cannot fire, so it is not protecting you — see the notes below."
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -638,7 +638,7 @@ function StatusMeter({ kind, label, data, blockOn }) {
           role="note"
           style={{ fontSize: 10, color: DIRTY, marginTop: 5, lineHeight: 1.5 }}
         >
-          You have the hard stop switched on for this class, but Cockpit cannot enforce it at the
+          You have the hard stop switched on for this class, but Plexar Studio cannot enforce it at the
           moment, so it will alert instead of blocking. The reason is in the notes below. Leave the
           switch on — it starts enforcing by itself once the pricing behind it is trustworthy.
         </div>
@@ -894,7 +894,7 @@ export default function SpendGuardrails({ get, setField, isDirty }) {
           <CapRow
             kind="equivalent"
             title="API-equivalent cap"
-            scope="Everything Cockpit records, including Claude turns already covered by your subscription. Priced as if it had run on the API."
+            scope="Everything Plexar Studio records, including Claude turns already covered by your subscription. Priced as if it had run on the API."
             cap={capEquivalent}
             onCap={(raw) => commitCap(SPEND.capEquivalent, "capEquivalent", raw)}
             onCapEnabled={(next) =>
@@ -1080,7 +1080,7 @@ export default function SpendGuardrails({ get, setField, isDirty }) {
             {status.blocking === true && (
               <div style={{ marginTop: 12 }}>
                 <Callout token="var(--cc-error)" testId="status-blocking" icon>
-                  <strong>Cockpit is blocking new work right now.</strong>
+                  <strong>Plexar Studio is blocking new work right now.</strong>
                   {reasons.length > 0 ? (
                     <ul data-testid="status-reasons" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
                       {reasons.map((r, i) => (
@@ -1135,7 +1135,7 @@ export default function SpendGuardrails({ get, setField, isDirty }) {
 
       {/* ── the honesty note ─────────────────────────── */}
       <Callout testId="spend-honesty" token="var(--cc-muted)">
-        Every cost figure in Cockpit is <strong>API-equivalent</strong>: recorded tokens multiplied
+        Every cost figure in Plexar Studio is <strong>API-equivalent</strong>: recorded tokens multiplied
         by the prices in the pricing table, not an invoice. While you are on the subscription, the
         equivalent number is an estimate of what the same work <em>would</em> have cost on the API —
         it is not money you were charged, and your real bill is the flat monthly fee plus whatever

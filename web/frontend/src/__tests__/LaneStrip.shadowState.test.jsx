@@ -2,7 +2,7 @@
  * S10 — the lane strip must say WHICH state it is in and WHY.
  *
  * Measured in `lane_broker/tests/test_shadow_default_is_inert.py`: under
- * Cockpit's shipped default the broker forwards and logs but NEVER queues, and
+ * Plexar Studio's shipped default the broker forwards and logs but NEVER queues, and
  * a spill threshold of 0.0 seconds with seeded history still produces zero
  * spills. So the live meter's "0 in flight, 0 queued" is not a measurement —
  * it is a structural constant.

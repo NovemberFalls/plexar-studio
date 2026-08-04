@@ -19,7 +19,7 @@
  * every figure renders under its source with its own `window_exact` flag. A
  * merged single column would be indefensible, which is why there isn't one.
  *
- * This does NOT replace Cockpit's own reporting. Cockpit knows sessions,
+ * This does NOT replace Plexar Studio's own reporting. Plexar Studio knows sessions,
  * tokens and cost; Plexar knows the gateway and the GPU. They sit side by side
  * in the same view, each labelled.
  *

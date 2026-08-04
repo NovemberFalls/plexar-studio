@@ -2,9 +2,9 @@
  * Tests for Settings ▸ Claude CLI.
  *
  * These are honesty tests, not layout tests. The page reports which binary
- * Cockpit will spawn, and each assertion pins a claim it must not get wrong:
+ * Plexar Studio will spawn, and each assertion pins a claim it must not get wrong:
  *   - the resolved path AND the reason it was chosen, for both `env` and `search`
- *   - `not_found` is an alert with instructions, because in that state Cockpit
+ *   - `not_found` is an alert with instructions, because in that state Plexar Studio
  *     cannot start a single session
  *   - `version: null` renders an em dash and never a fabricated version string
  *   - `name_matches: false` warns, naming the resolved file

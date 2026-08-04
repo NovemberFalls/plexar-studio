@@ -83,7 +83,7 @@ describe("TerminalSettings — paths", () => {
     expect(shell.setField).toHaveBeenCalledWith("terminal.cursor_blink", true);
   });
 
-  it("offers Cockpit's real mono stack as the default preset", () => {
+  it("offers Plexar Studio's real mono stack as the default preset", () => {
     expect(FONT_PRESETS[0].value).toBe(DEFAULT_MONO_STACK);
     expect(DEFAULT_MONO_STACK).toContain("JetBrains Mono");
     expect(DEFAULT_MONO_STACK).toContain("monospace");
@@ -195,7 +195,7 @@ describe("TerminalSettings — honesty", () => {
     expect(note.textContent).toMatch(/nothing at all is written/i);
   });
 
-  it("says these options belong to Cockpit's emulator, not to Claude Code", () => {
+  it("says these options belong to Plexar Studio's emulator, not to Claude Code", () => {
     render(<TerminalSettings {...makeShell()} />);
     const note = screen.getByTestId("who-owns-this");
     expect(note.textContent).toMatch(/xterm\.js/);

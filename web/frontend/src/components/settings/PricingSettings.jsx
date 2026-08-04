@@ -97,12 +97,12 @@ const SOURCE_META = {
   pricing_models: {
     label: "bundled",
     token: "var(--cc-type)",
-    title: "From pricing_models.json, the table shipped with Cockpit",
+    title: "From pricing_models.json, the table shipped with Plexar Studio",
   },
   default: {
     label: "fallback",
     token: WARN,
-    title: "No published price for this model — Cockpit is using a built-in approximation",
+    title: "No published price for this model — Plexar Studio is using a built-in approximation",
   },
 };
 
@@ -113,7 +113,7 @@ function sourceMeta(source) {
     SOURCE_META[key] || {
       label: source || "unknown",
       token: "var(--cc-dim)",
-      title: "Cockpit does not recognise this price source",
+      title: "Plexar Studio does not recognise this price source",
     }
   );
 }
@@ -377,7 +377,7 @@ export default function PricingSettings() {
       const res = await fetch("/api/pricing");
       if (!res.ok) {
         setFetchError(
-          `Cockpit's server could not return the pricing table (HTTP ${res.status}). ` +
+          `Plexar Studio's server could not return the pricing table (HTTP ${res.status}). ` +
             "Nothing is shown below rather than an empty table, which would wrongly read as “no models are priced”."
         );
         return;
@@ -385,7 +385,7 @@ export default function PricingSettings() {
       setData(await res.json());
       setFetchError(null);
     } catch (err) {
-      setFetchError(`Could not reach Cockpit's server: ${err.message}`);
+      setFetchError(`Could not reach Plexar Studio's server: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -407,7 +407,7 @@ export default function PricingSettings() {
         // Never fake success — a failed refresh leaves the previous table in place.
         setRefreshError(
           (body && body.error) ||
-            `The refresh failed (HTTP ${res.status}). The prices below are the ones Cockpit already had.`
+            `The refresh failed (HTTP ${res.status}). The prices below are the ones Plexar Studio already had.`
         );
         return;
       }
@@ -415,7 +415,7 @@ export default function PricingSettings() {
       setFetchError(null);
     } catch (err) {
       setRefreshError(
-        `The refresh could not reach OpenRouter or Cockpit's server: ${err.message}. ` +
+        `The refresh could not reach OpenRouter or Plexar Studio's server: ${err.message}. ` +
           "The prices below are unchanged."
       );
     } finally {
@@ -461,7 +461,7 @@ export default function PricingSettings() {
         <Callout token="var(--cc-accent)" icon={RefreshCw} testId="pricing-auto-note">
           Prices refresh automatically
           {typeof refreshHours === "number" ? ` every ${refreshHours} hours` : " on a schedule"} from
-          OpenRouter, and fall back to the price table bundled with Cockpit. This page is read-only:
+          OpenRouter, and fall back to the price table bundled with Plexar Studio. This page is read-only:
           prices come from OpenRouter and the bundled table, so there is nothing to edit here.
         </Callout>
 
@@ -532,7 +532,7 @@ export default function PricingSettings() {
         {!fetchError && models.length > 0 && (
           <div role="note" data-testid="pricing-unknown-note" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-muted)", paddingTop: 10 }}>
             <strong>unknown</strong> means no price was published for that field — it is not the same
-            as <strong>free</strong>, which is a published rate of $0.00. Cockpit never treats an
+            as <strong>free</strong>, which is a published rate of $0.00. Plexar Studio never treats an
             unknown rate as zero when costing a turn.
           </div>
         )}
@@ -540,7 +540,7 @@ export default function PricingSettings() {
         {!fetchError && fallbackRows.length > 0 && (
           <Callout token={WARN} testId="pricing-fallback-note">
             {fallbackRows.length === 1 ? "One model is" : `${fallbackRows.length} models are`} priced
-            from Cockpit&rsquo;s built-in fallback rather than a published rate, so
+            from Plexar Studio&rsquo;s built-in fallback rather than a published rate, so
             {fallbackRows.length === 1 ? " its" : " their"} costs are approximate:{" "}
             <strong>{fallbackRows.map((r) => r.model).join(", ")}</strong>. Refreshing may replace
             {fallbackRows.length === 1 ? " it" : " them"} with a real figure.

@@ -1,7 +1,7 @@
 /**
  * KeybindingsSettings — the Settings ▸ Keybindings page.
  *
- * THE PROBLEM THIS SOLVES IS DISCOVERABILITY, NOT REMAPPING. Cockpit already
+ * THE PROBLEM THIS SOLVES IS DISCOVERABILITY, NOT REMAPPING. Plexar Studio already
  * ships 20+ shortcuts and not one of them appeared anywhere in the UI, which is
  * why the owner had to ask whether we have keybindings at all. So this page is
  * the reference card first: the real chords, grouped, with the honest caveats
@@ -243,7 +243,7 @@ export default function KeybindingsSettings() {
         }}
       >
         These shortcuts are fixed in this build and remapping is not available yet —
-        nothing in Cockpit reads a custom binding, so an editor here would let you
+        nothing in Plexar Studio reads a custom binding, so an editor here would let you
         change a chord and then watch the old one keep firing. This page is a
         reference card until remapping is wired.
       </div>

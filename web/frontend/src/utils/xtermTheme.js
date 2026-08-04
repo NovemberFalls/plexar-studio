@@ -1,12 +1,12 @@
 /**
- * xterm.js palette construction from Cockpit design tokens.
+ * xterm.js palette construction from Plexar Studio design tokens.
  *
  * History / why this file exists: the previous inline `buildXtermTheme` read
  * keys that DO NOT EXIST on any theme object (`theme.red`, `theme.green`,
  * `theme.yellow`, `theme.purple`, `theme.cyan`, `theme.bgSurface`,
  * `theme.fgMuted`). Twelve of the sixteen ANSI slots therefore resolved to
  * `undefined` and xterm silently used its own built-in defaults — so ANSI
- * colors never followed the Cockpit theme. Every slot below maps to a token
+ * colors never followed the Plexar Studio theme. Every slot below maps to a token
  * that actually exists, and resolution goes through the same `--cc-*` custom
  * properties the rest of the app uses, so per-token user overrides reach the
  * terminal too.
@@ -145,7 +145,7 @@ export function lighten(color, amount = BRIGHT_MIX, doc) {
 }
 
 /**
- * Builds the xterm theme for the current Cockpit theme.
+ * Builds the xterm theme for the current Plexar Studio theme.
  *
  * Resolution order per token, highest first:
  *  1. explicit `options.tokenOverrides[prop]` — passed in rather than only read

@@ -80,7 +80,7 @@ const KEY_PROVIDERS = [
     purpose: "Authenticates Claude sessions against Anthropic's API.",
     // null = the stored key is live. A string = it is not, and this is why.
     notConsumed:
-      "This key is saved, but Cockpit does not use it yet. Sessions are spawned as plain " +
+      "This key is saved, but Plexar Studio does not use it yet. Sessions are spawned as plain " +
       "`claude` processes that inherit their credentials from the environment, so they still " +
       "authenticate from ANTHROPIC_API_KEY (or whatever `claude` itself is logged in as) — " +
       "nothing reads the value stored here. Saving it will not change how a session " +
@@ -303,7 +303,7 @@ function KeyCard({ provider }) {
     try {
       const res = await fetch(route);
       if (!res.ok) {
-        setReadError(`Cockpit's server answered ${res.status} when asked about this key.`);
+        setReadError(`Plexar Studio's server answered ${res.status} when asked about this key.`);
       } else {
         const data = await res.json();
         setConfigured(Boolean(data?.configured));
@@ -312,7 +312,7 @@ function KeyCard({ provider }) {
         setReadError(null);
       }
     } catch (err) {
-      setReadError(`Could not reach Cockpit's server: ${err.message}`);
+      setReadError(`Could not reach Plexar Studio's server: ${err.message}`);
     }
     setLoaded(true);
   }, [route]);
@@ -350,7 +350,7 @@ function KeyCard({ provider }) {
         setNotice(data?.error || "The server rejected this key but gave no reason.");
       }
     } catch (err) {
-      setNotice(`Could not reach Cockpit's server: ${err.message}`);
+      setNotice(`Could not reach Plexar Studio's server: ${err.message}`);
     } finally {
       setBusy(false);
     }
@@ -375,7 +375,7 @@ function KeyCard({ provider }) {
         setNotice(data?.error || "The server could not remove this key.");
       }
     } catch (err) {
-      setNotice(`Could not reach Cockpit's server: ${err.message}`);
+      setNotice(`Could not reach Plexar Studio's server: ${err.message}`);
     } finally {
       setBusy(false);
     }
@@ -406,7 +406,7 @@ function KeyCard({ provider }) {
           different claims about the user's machine. */}
       {readError && (
         <Callout token="var(--cc-error)" role="alert" testId={`${id}-read-error`}>
-          {readError} Cockpit could not read whether a {label} key is configured — this is{" "}
+          {readError} Plexar Studio could not read whether a {label} key is configured — this is{" "}
           <strong>not</strong> the same as there being none.
         </Callout>
       )}
@@ -432,7 +432,7 @@ function KeyCard({ provider }) {
             disabled={busy}
             accent
             testId={`${id}-save`}
-            title={`Store this ${label} key on Cockpit's server`}
+            title={`Store this ${label} key on Plexar Studio's server`}
           />
         }
       >
@@ -466,7 +466,7 @@ function KeyCard({ provider }) {
 
       <FieldRow
         label="Remove key"
-        hint={fromEnv ? "Not possible from here" : "Deletes the key Cockpit stored"}
+        hint={fromEnv ? "Not possible from here" : "Deletes the key Plexar Studio stored"}
         action={
           <ActionButton
             label={busy ? "Removing…" : "Remove"}
@@ -476,7 +476,7 @@ function KeyCard({ provider }) {
             testId={`${id}-remove`}
             title={
               fromEnv
-                ? `This key comes from the ${envVar} environment variable, which Cockpit cannot unset.`
+                ? `This key comes from the ${envVar} environment variable, which Plexar Studio cannot unset.`
                 : configured
                   ? `Delete the stored ${label} key`
                   : "There is no stored key to remove"
@@ -486,19 +486,19 @@ function KeyCard({ provider }) {
       >
         <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>
           {fromEnv
-            ? `Cockpit cannot unset ${envVar}.`
+            ? `Plexar Studio cannot unset ${envVar}.`
             : configured
-              ? "Cockpit stops using this key."
+              ? "Plexar Studio stops using this key."
               : "Nothing stored."}
         </span>
       </FieldRow>
 
       {fromEnv && (
         <Callout token="var(--cc-accent)" icon={Lock} testId={`${id}-env-note`}>
-          This key comes from the <code>{envVar}</code> environment variable. Cockpit cannot
+          This key comes from the <code>{envVar}</code> environment variable. Plexar Studio cannot
           remove it here — the server does not own your environment. Unset{" "}
           <code>{envVar}</code> (in your shell, your system environment, or{" "}
-          <code>web/.env</code>) and restart Cockpit.
+          <code>web/.env</code>) and restart Plexar Studio.
         </Callout>
       )}
 
@@ -551,7 +551,7 @@ export default function KeysSettings() {
         <span>
           Keys are stored server-side in <code>config.json</code>, deliberately separate from{" "}
           <code>settings.json</code> — so a settings file you export or share carries no secrets.
-          Cockpit only ever shows you a masked value; the full key is never sent back to this
+          Plexar Studio only ever shows you a masked value; the full key is never sent back to this
           page.
           <br />
           <strong>These two cards do not use “Save changes”.</strong> Unlike the rest of Settings

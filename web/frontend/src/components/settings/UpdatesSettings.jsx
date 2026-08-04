@@ -19,7 +19,7 @@
  *     would be a self-inflicted lie.
  *
  * WHERE THE UPDATE CHECK COMES FROM:
- *   - NOT from Cockpit's server. `/api/version` contacts nothing external; there
+ *   - NOT from Plexar Studio's server. `/api/version` contacts nothing external; there
  *     is no backend update route. The check is Tauri's updater plugin
  *     (`@tauri-apps/plugin-updater`, registered with `updater:default`), reached
  *     through the same dynamic `import(...)` + `check()` pattern App.jsx uses for
@@ -69,7 +69,7 @@ const UNAVAILABLE = "unavailable"; // plugin absent / not a desktop build
 
 const DISABLED_REASON =
   "Update checks need the desktop app — the browser build has no updater. " +
-  "Cockpit's server does not check for updates; the check is the desktop " +
+  "Plexar Studio's server does not check for updates; the check is the desktop " +
   "updater talking to GitHub Releases.";
 
 /** sys.platform values → what a human calls them. Unknown values pass through. */
@@ -321,7 +321,7 @@ export default function UpdatesSettings() {
         <FactRow
           label="Python"
           testId="fact-python"
-          hint="running Cockpit's server"
+          hint="running Plexar Studio's server"
           value={info === undefined ? "reading…" : fact(info?.python)}
         />
         <FactRow
@@ -341,7 +341,7 @@ export default function UpdatesSettings() {
 
         {info === null && (
           <Callout testId="version-unreachable">
-            Cockpit&apos;s server did not answer, so the CLI, Python and platform facts above are
+            Plexar Studio&apos;s server did not answer, so the CLI, Python and platform facts above are
             unknown. The version on this page is a build-time constant and is still correct.
           </Callout>
         )}
@@ -397,7 +397,7 @@ export default function UpdatesSettings() {
             <strong data-testid="update-available-version">
               {result.version ? `v${result.version}` : "a newer build (version not reported)"}
             </strong>
-            . Cockpit shows an install prompt with an{" "}
+            . Plexar Studio shows an install prompt with an{" "}
             <em>Install &amp; Restart</em> action when it finds one — restart the app to get that
             prompt, or wait for the next launch check.
           </Callout>
@@ -405,14 +405,14 @@ export default function UpdatesSettings() {
 
         {result.kind === FAILED && (
           <Callout token="var(--cc-error)" testId="update-failed" alert>
-            The update check failed, so Cockpit does <strong>not</strong> know whether a newer
+            The update check failed, so Plexar Studio does <strong>not</strong> know whether a newer
             build exists: {result.error}
           </Callout>
         )}
 
         {result.kind === UNAVAILABLE && (
           <Callout testId="update-unavailable">
-            Cockpit could not run an update check, so it cannot say whether a newer build exists.{" "}
+            Plexar Studio could not run an update check, so it cannot say whether a newer build exists.{" "}
             {result.reason}
           </Callout>
         )}
@@ -424,7 +424,7 @@ export default function UpdatesSettings() {
         >
           The desktop app checks GitHub Releases automatically every time it launches, and offers an{" "}
           <em>Install &amp; Restart</em> action if a newer signed build is published. There is no
-          release-channel setting and no way to switch the launch check off yet — Cockpit stores no
+          release-channel setting and no way to switch the launch check off yet — Plexar Studio stores no
           update preferences, so this page shows no controls for them rather than offering switches
           that would save nothing.
         </div>
@@ -434,7 +434,7 @@ export default function UpdatesSettings() {
           data-testid="updates-server-note"
           style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 6 }}
         >
-          Cockpit&apos;s own server never contacts the internet for versions — the check above is
+          Plexar Studio&apos;s own server never contacts the internet for versions — the check above is
           the desktop updater, which is why it is unavailable in a browser.
         </div>
       </div>

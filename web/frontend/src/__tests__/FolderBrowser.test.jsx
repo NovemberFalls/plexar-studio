@@ -492,7 +492,7 @@ describe("NewSessionDialog", () => {
   it("lists models from the shared catalog, not the stale local copy", async () => {
     await renderDialog();
     fireEvent.click(screen.getByRole("button", { name: "Model" }));
-    // The stale list named models that are not in Cockpit's catalog at all.
+    // The stale list named models that are not in Plexar Studio's catalog at all.
     expect(screen.queryByRole("button", { name: "Sonnet 4.6" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Opus 4.6" })).not.toBeInTheDocument();
     // A real catalog entry renders instead.

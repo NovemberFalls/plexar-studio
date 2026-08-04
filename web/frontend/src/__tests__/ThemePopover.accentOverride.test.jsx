@@ -116,6 +116,6 @@ describe("ThemePopover accent supersession", () => {
     expect(alert).toHaveAttribute("role", "alert");
     expect(alert).toHaveTextContent("disk is read-only.");
     // The user must be told the override is coming back, not left believing it is gone.
-    expect(alert).toHaveTextContent(/reappear when Cockpit restarts/i);
+    expect(alert).toHaveTextContent(/reappear when Plexar Studio restarts/i);
   });
 });

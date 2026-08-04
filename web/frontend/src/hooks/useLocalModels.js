@@ -71,9 +71,9 @@ export function offersModels(provider) {
   return Array.isArray(provider?.capabilities) && provider.capabilities.includes("models");
 }
 
-/** True when Cockpit can load/unload/restart models on this provider. Without
+/** True when Plexar Studio can load/unload/restart models on this provider. Without
  *  it the provider is browse-only: only the model it is already serving can be
- *  used, and Cockpit cannot change which one that is. */
+ *  used, and Plexar Studio cannot change which one that is. */
 export function offersModelControl(provider) {
   return Array.isArray(provider?.capabilities) && provider.capabilities.includes("model-control");
 }
@@ -144,7 +144,7 @@ export function setLocalModelBusy(modelId) {
 }
 
 /**
- * What to say when a provider answers 404 to a load — i.e. Cockpit does not own
+ * What to say when a provider answers 404 to a load — i.e. Plexar Studio does not own
  * it and cannot switch its model. vLLM is named when the provider is one,
  * because "restart vLLM with --model X" is a command the user can actually run;
  * for anything else we state the same shape without inventing a flag.
@@ -152,12 +152,12 @@ export function setLocalModelBusy(modelId) {
 export function unswitchableModelMessage(providerId) {
   if (/vllm/i.test(String(providerId || ""))) {
     return (
-      "vLLM serves one model, fixed by --model when it starts, and this one runs outside Cockpit. " +
+      "vLLM serves one model, fixed by --model when it starts, and this one runs outside Plexar Studio. " +
       "To use a different model, restart vLLM with it."
     );
   }
   return (
-    "This engine serves one model, fixed when it starts, and runs outside Cockpit. " +
+    "This engine serves one model, fixed when it starts, and runs outside Plexar Studio. " +
     "To use a different model, restart the engine with it."
   );
 }
@@ -171,7 +171,7 @@ export function unswitchableModelMessage(providerId) {
  *         through to /restart, which is the only mechanism that works.
  *   404 — the provider does not declare `model-control` at all, so this control
  *         should not have been offered. That is NOT a failure: an EXTERNAL vLLM
- *         answers 404 here because Cockpit does not own its container. Report it
+ *         answers 404 here because Plexar Studio does not own its container. Report it
  *         as information and point at the surface that explains it in full,
  *         rather than a red "doesn't support loading models" alarm about a
  *         perfectly healthy backend.
@@ -238,7 +238,7 @@ export async function writeLocalModel(providerId, modelId, action, onToast) {
       say(`${action === "load" ? "Loading" : "Unloading"} ${modelId}…`, "info");
     }
   } catch (_) {
-    say(`Could not reach Cockpit to ${action} the model`, "error");
+    say(`Could not reach Plexar Studio to ${action} the model`, "error");
   } finally {
     setLocalModelBusy(null);
   }

@@ -300,7 +300,7 @@ function SupersessionNote({ accentOverride, workingOverride, onClear, error }) {
           }}
         >
           Could not clear the override on the server: {error} It is cleared in this
-          window only and will reappear when Cockpit restarts.
+          window only and will reappear when Plexar Studio restarts.
         </div>
       )}
     </div>
@@ -392,7 +392,7 @@ export default function ThemeSettings({ get, setField, isDirty }) {
           icon={Palette}
           label="Base palette"
           dirty={paletteDirty}
-          note="Cockpit ships two palettes and both of them are dark — there is no light variant to switch to, so this page does not offer one. Everything else on this page layers on top of whichever base you pick."
+          note="Plexar Studio ships two palettes and both of them are dark — there is no light variant to switch to, so this page does not offer one. Everything else on this page layers on top of whichever base you pick."
         />
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {themes.map((t) => (

@@ -233,7 +233,7 @@ export default function OpenRouterModal({ open, onClose, onToast }) {
                     className="text-xs mb-4"
                     style={{ color: "var(--text-muted)", lineHeight: 1.6 }}
                 >
-                    Save an OpenRouter API key so Cockpit can route requests through
+                    Save an OpenRouter API key so Plexar Studio can route requests through
                     OpenRouter on your behalf.{" "}
                     <a
                         href="https://openrouter.ai/settings/keys"

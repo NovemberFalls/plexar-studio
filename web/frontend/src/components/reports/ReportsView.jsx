@@ -38,7 +38,7 @@
  * It reads Plexar (the vLLM face) via /api/local/plexar-vllm/*, so it renders
  * independently of this view's loading/error/empty state — a user with no
  * Claude usage this range can still have engine history, and vice versa.
- * Cockpit's reporting and Plexar's sit side by side, each labelled; they are
+ * Plexar Studio's reporting and Plexar's sit side by side, each labelled; they are
  * never merged, because a Prometheus counter and a gateway request record mean
  * different things by the same number.
  *
@@ -367,7 +367,7 @@ function EmptyStatePanel({ range }) {
         No usage recorded yet
       </div>
       <p style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-dim)", margin: 0 }}>
-        Cockpit has no usage rows for this range
+        Plexar Studio has no usage rows for this range
         {range === "all" ? "" : " — try a wider range, or"}
         {range === "all" ? "." : " start a session."}{" "}
         Token and cost accounting begins the first time a session produces a turn.
@@ -605,7 +605,7 @@ export default function ReportsView({
           const detail = await res.json().catch(() => null);
           throw new Error(
             detail && detail.reachable === false
-              ? "Cockpit could not reach the usage tracker, so this range could not be measured."
+              ? "Plexar Studio could not reach the usage tracker, so this range could not be measured."
               : `The server returned ${res.status}.`
           );
         }
@@ -771,7 +771,7 @@ export default function ReportsView({
               No period-over-period change is shown:{" "}
               {reportRange === "all"
                 ? "the range covers all recorded history, so there is no earlier window to compare it against."
-                : "the report has no comparable previous window for this range yet — Cockpit needs history reaching back a further period before a change means anything."}{" "}
+                : "the report has no comparable previous window for this range yet — Plexar Studio needs history reaching back a further period before a change means anything."}{" "}
               A neutral zero would look like a finding.
             </div>
           )}
@@ -786,7 +786,7 @@ export default function ReportsView({
               Turns were recorded in this range but the token totals came back as zero, so these
               tokens were <strong>not reported</strong> rather than not used. A streaming client has
               to send <code>stream_options.include_usage</code> for the usage block to arrive with
-              the response; without it Cockpit sees the turn, counts no tokens for it, and the cost
+              the response; without it Plexar Studio sees the turn, counts no tokens for it, and the cost
               below is understated for the same reason.
             </div>
           ) : null}

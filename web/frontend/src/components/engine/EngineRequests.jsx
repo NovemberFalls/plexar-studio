@@ -165,7 +165,7 @@ export function QueueTable({ queue, caps, metrics, style, compact }) {
         </>
       ) : rows === null ? (
         <Note testId="queue-offline">
-          The lane broker is not answering, so Cockpit cannot say what is in flight. This is
+          The lane broker is not answering, so Plexar Studio cannot say what is in flight. This is
           &ldquo;unknown&rdquo;, not &ldquo;nothing running&rdquo;.
         </Note>
       ) : (
@@ -246,7 +246,7 @@ export default function EngineRequests({ provider, caps, data, onNavigate }) {
           />
         ) : data?.traces === null ? (
           <Note testId="traces-offline">
-            The broker is not answering /traces. Recent requests may still have run — Cockpit simply
+            The broker is not answering /traces. Recent requests may still have run — Plexar Studio simply
             cannot read them right now.
           </Note>
         ) : (

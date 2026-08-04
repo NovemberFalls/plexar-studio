@@ -9,7 +9,7 @@
  * READ-ONLY BY DESIGN. There is no path input here, and that is a deliberate
  * refusal rather than an omission:
  *
- *   - The only override Cockpit honours is the `CLAUDE_CLI_PATH` **environment
+ *   - The only override Plexar Studio honours is the `CLAUDE_CLI_PATH` **environment
  *     variable**, read inside `resolve_claude_cli` at spawn time. A browser
  *     cannot set an environment variable for the server process.
  *   - `settings.json` does carry `claude_cli.binary_path` (see
@@ -82,12 +82,12 @@ function sourceExplanation(info) {
       return `Found via the ${envName} environment variable — that override wins over anything on your PATH.`;
     case "search":
       return info?.override_set
-        ? `Found by searching your PATH and the known install locations. ${envName} is set but did not resolve to a usable file, so Cockpit fell back to a search.`
+        ? `Found by searching your PATH and the known install locations. ${envName} is set but did not resolve to a usable file, so Plexar Studio fell back to a search.`
         : "Found by searching your PATH and the known install locations. No override is set.";
     case "not_found":
-      return "Cockpit could not find a Claude CLI anywhere on your PATH or in the known install locations.";
+      return "Plexar Studio could not find a Claude CLI anywhere on your PATH or in the known install locations.";
     default:
-      return "Cockpit did not report how this path was found.";
+      return "Plexar Studio did not report how this path was found.";
   }
 }
 
@@ -258,12 +258,12 @@ export default function ClaudeCliSettings() {
     try {
       const res = await fetch("/api/cli");
       if (!res.ok) {
-        cliError = `Cockpit's server answered ${res.status} for /api/cli.`;
+        cliError = `Plexar Studio's server answered ${res.status} for /api/cli.`;
       } else {
         cliPayload = await res.json();
       }
     } catch (err) {
-      cliError = `Could not reach Cockpit's server: ${err.message}`;
+      cliError = `Could not reach Plexar Studio's server: ${err.message}`;
     }
 
     let versionPayload = null;
@@ -325,7 +325,7 @@ export default function ClaudeCliSettings() {
       );
     }
     return (
-      <Pill token="var(--cc-idle)" testId="cli-status" title="Cockpit can spawn sessions">
+      <Pill token="var(--cc-idle)" testId="cli-status" title="Plexar Studio can spawn sessions">
         resolved
       </Pill>
     );
@@ -348,7 +348,7 @@ export default function ClaudeCliSettings() {
         </CardHeader>
 
         <div style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-dim)", padding: "6px 0 2px" }}>
-          Every session Cockpit starts is a <code>claude</code> process. This is the exact
+          Every session Plexar Studio starts is a <code>claude</code> process. This is the exact
           executable it spawns, and how it was located.
         </div>
 
@@ -360,7 +360,7 @@ export default function ClaudeCliSettings() {
             role="alert"
             testId="cli-fetch-error"
           >
-            {error} Cockpit could not read which Claude CLI it would spawn, so nothing below is
+            {error} Plexar Studio could not read which Claude CLI it would spawn, so nothing below is
             known — this is <strong>not</strong> the same as no CLI being installed. Use
             Re-check once the server is reachable.
           </Callout>
@@ -412,7 +412,7 @@ export default function ClaudeCliSettings() {
                   style={{ fontSize: 11, color: "var(--cc-muted)", marginLeft: 8 }}
                 >
                   not reported — the version probe timed out or the binary printed nothing
-                  Cockpit could parse
+                  Plexar Studio could parse
                 </span>
               )}
             </ReadRow>
@@ -423,19 +423,19 @@ export default function ClaudeCliSettings() {
             every "New session" fails. It gets an alert and instructions. */}
         {notFound && !error && (
           <Callout token="var(--cc-error)" role="alert" testId="cli-not-found">
-            <strong>Cockpit cannot start any session.</strong> No <code>{expected}</code>{" "}
+            <strong>Plexar Studio cannot start any session.</strong> No <code>{expected}</code>{" "}
             executable was found on your PATH or in the known install locations, so every attempt
             to open a pane will fail. Either install Claude Code (
             <code>npm i -g @anthropic-ai/claude-code</code>), or set the{" "}
             <code>{envName}</code> environment variable to the full path of the executable and
-            restart Cockpit. Then press Re-check.
+            restart Plexar Studio. Then press Re-check.
           </Callout>
         )}
 
         {nameMismatch && !error && (
           <Callout token={WAITING} testId="cli-name-mismatch">
             The resolved file is <code>{resolvedFile}</code>, which is not named{" "}
-            <code>{expected}</code> — it may not be the Claude CLI. Cockpit spawns whatever this
+            <code>{expected}</code> — it may not be the Claude CLI. Plexar Studio spawns whatever this
             path points at, so if it is the wrong program every new session will fail or behave
             strangely. Set <code>{envName}</code> to the correct executable if this looks wrong.
             (An npm shim such as <code>{expected}.cmd</code> is fine and would not appear here.)
@@ -444,10 +444,10 @@ export default function ClaudeCliSettings() {
 
         {/* The honesty note that replaces the path input someone would expect. */}
         <Callout token="var(--cc-accent)" icon={Terminal} testId="cli-override-note">
-          The path is not editable here. Cockpit&apos;s only override is the{" "}
+          The path is not editable here. Plexar Studio&apos;s only override is the{" "}
           <code>{envName}</code> <strong>environment variable</strong>, which a web page cannot
           set for the server process — set it in your shell, your{" "}
-          <code>web/.env</code>, or your system environment, then restart Cockpit and press
+          <code>web/.env</code>, or your system environment, then restart Plexar Studio and press
           Re-check. {loaded && info?.override_set
             ? `It is currently set.`
             : `It is currently not set.`}
@@ -458,7 +458,7 @@ export default function ClaudeCliSettings() {
           about which CLI runs — it is context for a bug report. */}
       <div style={CARD} data-testid="card-environment">
         <CardHeader icon={CircleCheck} token="var(--cc-ok)" name="Environment" />
-        <ReadRow label="Cockpit version" testId="env-app-row">
+        <ReadRow label="Plexar Studio version" testId="env-app-row">
           <span
             data-testid="env-app"
             style={{ fontSize: 12, fontFamily: MONO, color: "var(--cc-fg)" }}
@@ -466,7 +466,7 @@ export default function ClaudeCliSettings() {
             {version?.app || NOT_REPORTED}
           </span>
         </ReadRow>
-        <ReadRow label="Python" hint="Runs Cockpit's server" testId="env-python-row">
+        <ReadRow label="Python" hint="Runs Plexar Studio's server" testId="env-python-row">
           <span
             data-testid="env-python"
             style={{ fontSize: 12, fontFamily: MONO, color: "var(--cc-fg)" }}
@@ -488,7 +488,7 @@ export default function ClaudeCliSettings() {
             data-testid="env-unavailable"
             style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
           >
-            Cockpit could not read its environment details just now. These are informational
+            Plexar Studio could not read its environment details just now. These are informational
             only — nothing on this page depends on them.
           </div>
         )}

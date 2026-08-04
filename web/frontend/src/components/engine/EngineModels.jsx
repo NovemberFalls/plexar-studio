@@ -14,22 +14,22 @@ import useLocalModels, { setLocalModelBusy } from "../../hooks/useLocalModels.js
 import { Card, CardTitle, Note, OfflinePanel, Badge } from "./ui.jsx";
 
 /**
- * `model-discovery` WITHOUT `model-control` is browse-only: Cockpit can enumerate
+ * `model-discovery` WITHOUT `model-control` is browse-only: Plexar Studio can enumerate
  * what is on disk but cannot switch to any of it. Saying so is the difference
  * between an honest inventory and a picker that leads nowhere.
  */
 function browseOnlyReason(provider) {
   if (provider?.kind === "vllm") {
     return (
-      "Browse only. Cockpit can list the models it can see on disk, but it cannot switch to one: " +
+      "Browse only. Plexar Studio can list the models it can see on disk, but it cannot switch to one: " +
       "vLLM serves the single model given to --model at launch, and this vLLM is not managed by " +
-      "Cockpit (COCKPIT_MANAGED_VLLM is off), so Cockpit cannot restart it onto a different model. " +
+      "Plexar Studio (COCKPIT_MANAGED_VLLM is off), so Plexar Studio cannot restart it onto a different model. " +
       "Pick one from this list and start vLLM with it yourself."
     );
   }
   return (
     "Browse only. This backend publishes a model list but does not declare model-control, so " +
-    "Cockpit can show you what exists and cannot load or unload any of it."
+    "Plexar Studio can show you what exists and cannot load or unload any of it."
   );
 }
 
@@ -76,7 +76,7 @@ export default function EngineModels({ provider, caps, data, onToast, onNavigate
       }
       onToast?.(`${action === "load" ? "Loading" : "Unloading"} ${modelId}…`, "info");
     } catch {
-      onToast?.(`Could not reach Cockpit to ${action} the model`, "error");
+      onToast?.(`Could not reach Plexar Studio to ${action} the model`, "error");
     } finally {
       setLocalModelBusy(null);
     }
@@ -88,7 +88,7 @@ export default function EngineModels({ provider, caps, data, onToast, onNavigate
         <OfflinePanel
           testId="models-not-offered"
           title="This backend does not expose a model list"
-          body="The models capability is not declared for the selected provider, so Cockpit has no /models endpoint to read. Nothing is hidden — there is nothing to ask."
+          body="The models capability is not declared for the selected provider, so Plexar Studio has no /models endpoint to read. Nothing is hidden — there is nothing to ask."
         />
       </div>
     );
@@ -125,7 +125,7 @@ export default function EngineModels({ provider, caps, data, onToast, onNavigate
           </Note>
         ) : !controlEnabled ? (
           <Note testId="models-readonly-note">
-            This backend does not declare model-control, so Cockpit cannot load or unload for you.
+            This backend does not declare model-control, so Plexar Studio cannot load or unload for you.
             For LM Studio that usually means the <code>lms</code> CLI is not on the server&rsquo;s PATH.
           </Note>
         ) : null}

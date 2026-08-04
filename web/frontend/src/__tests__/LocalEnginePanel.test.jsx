@@ -1,5 +1,5 @@
 /**
- * Reports ▸ Local engine — Cockpit's reporting married to Plexar's.
+ * Reports ▸ Local engine — Plexar Studio's reporting married to Plexar's.
  *
  * The rules under test are the ones that make two reports into one defensible
  * view rather than one indefensible number:

@@ -9,7 +9,7 @@
  * ANSWERS THE OWNER'S QUESTION ON SCREEN ("Does Claude Code permit us to change
  * this?"): yes, entirely. Font, size, scrollback, cursor and the copy/paste key
  * handling are **xterm.js** options owned by TerminalPane.jsx. They are a
- * property of the emulator Cockpit draws in the browser, not of the `claude`
+ * property of the emulator Plexar Studio draws in the browser, not of the `claude`
  * CLI — Claude Code neither knows nor controls them, and there is no permission
  * to ask. The card copy says so.
  *
@@ -85,7 +85,7 @@ export const DEFAULT_MONO_STACK =
 
 /** Presets offered by the font dropdown. "custom" hands over to the text field. */
 export const FONT_PRESETS = [
-  { value: DEFAULT_MONO_STACK, label: "Cockpit default (JetBrains Mono → Fira Code → …)" },
+  { value: DEFAULT_MONO_STACK, label: "Plexar Studio default (JetBrains Mono → Fira Code → …)" },
   { value: "'Cascadia Code', 'Consolas', monospace", label: "Cascadia Code" },
   { value: "'Consolas', monospace", label: "Consolas" },
   { value: "'Fira Code', monospace", label: "Fira Code" },
@@ -95,7 +95,7 @@ export const FONT_PRESETS = [
 ];
 
 export const CURSOR_STYLES = [
-  { value: "bar", label: "Bar (Cockpit default)" },
+  { value: "bar", label: "Bar (Plexar Studio default)" },
   { value: "block", label: "Block" },
   { value: "underline", label: "Underline" },
 ];
@@ -480,13 +480,13 @@ export default function TerminalSettings({ get, setField, isDirty }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
-      <SectionTitle note="xterm.js options, owned by Cockpit">Terminal</SectionTitle>
+      <SectionTitle note="xterm.js options, owned by Plexar Studio">Terminal</SectionTitle>
 
       {/* Answers "does Claude Code permit this?" before any control. */}
       <Callout token="var(--cc-accent)" icon={Info} testId="who-owns-this">
-        Everything on this page belongs to <strong>Cockpit&apos;s terminal emulator</strong>{" "}
+        Everything on this page belongs to <strong>Plexar Studio&apos;s terminal emulator</strong>{" "}
         (xterm.js), not to Claude Code. Font, size, scrollback, cursor and the copy/paste key
-        handling are options Cockpit passes when it builds each pane. The <code>claude</code> CLI
+        handling are options Plexar Studio passes when it builds each pane. The <code>claude</code> CLI
         never sees them and cannot restrict them — there is no permission to ask for.
       </Callout>
 
@@ -505,7 +505,7 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           fallback=""
           hint="Falls back left to right"
           options={[
-            { value: "", label: "Not set — use Cockpit's built-in stack" },
+            { value: "", label: "Not set — use Plexar Studio's built-in stack" },
             ...FONT_PRESETS,
             ...(isPreset || !family ? [] : [{ value: family, label: `Custom… (${family})` }]),
           ]}
@@ -527,9 +527,9 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 2 }}
         >
           The dropdown and the text field are the <strong>same value</strong> — the field is there
-          so you can type a stack Cockpit does not list. A font the machine does not have installed
+          so you can type a stack Plexar Studio does not list. A font the machine does not have installed
           is skipped, and the next one in the list is used; end with <code>monospace</code> so
-          there is always something left. Cockpit&apos;s built-in stack is{" "}
+          there is always something left. Plexar Studio&apos;s built-in stack is{" "}
           <code>{DEFAULT_MONO_STACK}</code>.
         </div>
 
@@ -550,7 +550,7 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           data-testid="zoom-relation"
           style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 2 }}
         >
-          Cockpit also has a live zoom stepper (Ctrl + / Ctrl −) that changes the font size of the
+          Plexar Studio also has a live zoom stepper (Ctrl + / Ctrl −) that changes the font size of the
           panes on screen straight away and remembers it for this workspace. The two are the same
           number with different lifetimes: the stepper is the size you are looking at now, this
           field is the size a pane should <em>start</em> at. They share the same
@@ -582,10 +582,10 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           data-testid="scrollback-cost"
           style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-muted)", paddingTop: 2 }}
         >
-          Every retained line is held <strong>in memory, per pane</strong>. Cockpit runs up to 8
+          Every retained line is held <strong>in memory, per pane</strong>. Plexar Studio runs up to 8
           sessions at once, so this number is paid eight times over: {scrollbackValue.toLocaleString()}{" "}
           lines works out around <strong>{estMb} MB</strong> of terminal history with all 8 panes
-          full — roughly, at about a kilobyte per styled line. Cockpit&apos;s built-in value is{" "}
+          full — roughly, at about a kilobyte per styled line. Plexar Studio&apos;s built-in value is{" "}
           {SCROLLBACK_DEFAULT.toLocaleString()} lines. Pushing it toward{" "}
           {SCROLLBACK_MAX.toLocaleString()} is a real memory decision, not a free one.
         </div>
@@ -599,7 +599,7 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           fallback=""
           hint="Shape of the caret"
           options={[
-            { value: "", label: "Not set — use Cockpit's default (bar)" },
+            { value: "", label: "Not set — use Plexar Studio's default (bar)" },
             ...CURSOR_STYLES,
           ]}
         />
@@ -609,7 +609,7 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           get={get}
           setField={setField}
           isDirty={isDirty}
-          hint="Cockpit's default is on"
+          hint="Plexar Studio's default is on"
         />
       </div>
 
@@ -624,7 +624,7 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           data-testid="clipboard-readonly-note"
           style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-dim)", padding: "6px 0 4px" }}
         >
-          These are <strong>not settings</strong> — there is no switch behind them. Cockpit
+          These are <strong>not settings</strong> — there is no switch behind them. Plexar Studio
           hard-codes this key handling in the terminal pane, so the honest thing to show is what it
           actually does today rather than a toggle that would change nothing:
         </div>
@@ -640,12 +640,12 @@ export default function TerminalSettings({ get, setField, isDirty }) {
           terminal convention.
         </BehaviourRow>
         <BehaviourRow keys="Ctrl+V" testId="behaviour-ctrl-v">
-          Cockpit handles the paste itself, before xterm sees it, so text arrives once rather than
+          Plexar Studio handles the paste itself, before xterm sees it, so text arrives once rather than
           twice and is not auto-submitted. Pasted text is wrapped as a bracketed paste, which is
           what stops a multi-line paste from being read as a series of Enter presses.
         </BehaviourRow>
         <BehaviourRow keys="Paste an image" testId="behaviour-paste-image">
-          An image on the clipboard is uploaded to Cockpit (<code>/api/upload</code>) and the saved
+          An image on the clipboard is uploaded to Plexar Studio (<code>/api/upload</code>) and the saved
           file&apos;s path is pasted into the prompt for you, so Claude can read it.
         </BehaviourRow>
         <BehaviourRow keys="Drop a file" testId="behaviour-drop-file">
@@ -661,7 +661,7 @@ export default function TerminalSettings({ get, setField, isDirty }) {
 
       {/* ── The two honesty notes ─────────────────────── */}
       <Callout token={DIRTY} icon={Info} testId="not-read-terminal">
-        Saved, but <strong>not in force yet</strong>. Each pane is still built with Cockpit&apos;s
+        Saved, but <strong>not in force yet</strong>. Each pane is still built with Plexar Studio&apos;s
         built-in values — the font stack above, {SCROLLBACK_DEFAULT.toLocaleString()} lines of
         scrollback, a blinking bar cursor, and a font size that comes from the live zoom stepper.
         The terminal does not read these stored values yet, so changing them here does not change
@@ -669,7 +669,7 @@ export default function TerminalSettings({ get, setField, isDirty }) {
       </Callout>
 
       <Callout token={DIRTY} icon={TriangleAlert} testId="terminal-section-new">
-        Cockpit&apos;s settings file does not have a <code>terminal</code> section yet, and the
+        Plexar Studio&apos;s settings file does not have a <code>terminal</code> section yet, and the
         server rejects a whole save if it contains a section it does not recognise. Until that
         section is added, pressing <em>Save changes</em> with edits on this page will fail with
         &ldquo;unknown settings section&rdquo; and <strong>nothing at all is written</strong> —

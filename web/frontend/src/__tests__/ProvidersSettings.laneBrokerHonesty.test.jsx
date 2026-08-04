@@ -128,7 +128,7 @@ describe("lane-broker card: no control may claim an effect it does not have", ()
     await waitFor(() => expect(screen.getByTestId("broker-health")).toBeInTheDocument());
     const note = screen.getByTestId("broker-effective-url");
     expect(note).toHaveTextContent("127.0.0.1:1235");
-    expect(note).toHaveTextContent(/started by Cockpit/i);
+    expect(note).toHaveTextContent(/started by Plexar Studio/i);
   });
 
   it("the effective address survives a field value that disagrees with it", async () => {

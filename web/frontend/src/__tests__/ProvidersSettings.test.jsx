@@ -53,7 +53,7 @@ const OWNERSHIP_EXTERNAL = {
 const OWNERSHIP_PENDING = {
   effective: false, configured: true, external: false, source: "settings",
   pending_restart: true, requires_restart: true, env_set: false,
-  reason: "Saved. Cockpit starts the vLLM container during startup…",
+  reason: "Saved. Plexar Studio starts the vLLM container during startup…",
 };
 const OWNERSHIP_PORT_HELD = {
   effective: false, configured: true, external: true, source: "external",
@@ -63,7 +63,7 @@ const OWNERSHIP_PORT_HELD = {
 const OWNERSHIP_MANAGED = {
   effective: true, configured: true, external: false, source: "settings",
   pending_restart: false, requires_restart: false, env_set: false,
-  reason: "Cockpit owns this vLLM container.",
+  reason: "Plexar Studio owns this vLLM container.",
 };
 
 const OPENROUTER = { configured: true, source: "ui", masked: "sk-or-v1…4f21" };
@@ -175,7 +175,7 @@ describe("ProvidersSettings", () => {
     expect(shell.setField).toHaveBeenCalledWith("providers.lane_broker.concurrency", 4);
 
     // Toggle is a radiogroup of two segments; clicking "On" records `true`.
-    fireEvent.click(screen.getByRole("radio", { name: /Autostart with Cockpit: On/i }));
+    fireEvent.click(screen.getByRole("radio", { name: /Autostart with Plexar Studio: On/i }));
     expect(shell.setField).toHaveBeenCalledWith("providers.lane_broker.autostart", true);
   });
 
@@ -282,7 +282,7 @@ describe("ProvidersSettings", () => {
 
     const start = screen.getByTestId("vllm-start");
     expect(start).toBeDisabled();
-    // The reason names OWNERSHIP, not a future phase: Cockpit must not start a
+    // The reason names OWNERSHIP, not a future phase: Plexar Studio must not start a
     // container it does not own, and there is no start-on-demand endpoint.
     expect(start.getAttribute("title")).toMatch(/does not own this vLLM/i);
     expect(screen.getByTestId("vllm-launch-command-note")).toHaveTextContent(
@@ -292,7 +292,7 @@ describe("ProvidersSettings", () => {
     expect(screen.getByTestId("overflow-vLLM")).toBeDisabled();
   });
 
-  // ── vLLM "Managed by Cockpit" — the toggle that used to lie ──
+  // ── vLLM "Managed by Plexar Studio" — the toggle that used to lie ──
   //
   // It writes providers.vllm.managed, which the server NOW reads, but only at
   // startup (the container is launched there). So the card must say what state
@@ -310,7 +310,7 @@ describe("ProvidersSettings", () => {
       // value has not reached the running container yet.
       await renderWith(OWNERSHIP_PENDING, makeShell({ draft: { "providers.vllm.managed": true } }));
       expect(screen.getByTestId("vllm-managed-pending-restart")).toHaveTextContent(
-        /takes effect the next time Cockpit restarts/i
+        /takes effect the next time Plexar Studio restarts/i
       );
       expect(screen.queryByTestId("vllm-managed-external")).not.toBeInTheDocument();
       // Ownership is server-reported, so the pill must NOT claim "Managed" yet.
@@ -331,7 +331,7 @@ describe("ProvidersSettings", () => {
       await renderWith(OWNERSHIP_PORT_HELD);
       const note = screen.getByTestId("vllm-managed-external");
       expect(note).toHaveTextContent(/already answering on this port/i);
-      expect(note).toHaveTextContent(/Restarting Cockpit will not change this/i);
+      expect(note).toHaveTextContent(/Restarting Plexar Studio will not change this/i);
       expect(screen.queryByTestId("vllm-managed-pending-restart")).not.toBeInTheDocument();
     });
 
@@ -413,7 +413,7 @@ describe("ProvidersSettings", () => {
 /**
  * The stale-URL rule. A probe can only ever hit the SAVED url the server is
  * using, so a green pill sitting next to an edited-but-unsaved URL field reads
- * as "Cockpit told me this URL was fine" — true about the system, a lie about
+ * as "Plexar Studio told me this URL was fine" — true about the system, a lie about
  * the screen. Test must refuse; the pill must be qualified, not blanked.
  */
 describe("ProvidersSettings — unsaved URL cannot be tested", () => {
@@ -509,10 +509,10 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
     // no longer address them. See ProvidersSettings.laneBrokerHonesty.test.jsx
     // for the structural guard that fails when a fourth control is added.
     expect(screen.getByTestId("not-enforced-lane-broker-concurrency")).toHaveTextContent(
-      /Lane concurrency is saved, but Cockpit does not apply it yet/i
+      /Lane concurrency is saved, but Plexar Studio does not apply it yet/i
     );
     expect(screen.getByTestId("not-enforced-vllm")).toHaveTextContent(
-      /GPU memory utilisation is saved, but Cockpit does not apply it yet/i
+      /GPU memory utilisation is saved, but Plexar Studio does not apply it yet/i
     );
   });
 

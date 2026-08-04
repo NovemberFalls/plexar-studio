@@ -6,7 +6,7 @@
  *
  * Every number here comes from an endpoint that exists. Where the platform does
  * not report a value the card says so in words — VRAM is the honest example: no
- * Cockpit or provider endpoint reports it, so its meter draws no fill and names
+ * Plexar Studio or provider endpoint reports it, so its meter draws no fill and names
  * the gap. Filling it with a plausible number would make the whole screen
  * untrustworthy, which defeats the point of a live view.
  *
@@ -37,7 +37,7 @@ import {
 
 const VRAM_UNKNOWN =
   "No endpoint reports VRAM. vLLM's /metrics exposes KV-cache utilisation but not device memory, " +
-  "and Cockpit has no GPU probe for the serving process.";
+  "and Plexar Studio has no GPU probe for the serving process.";
 
 const RESTART_ONLY_VLLM =
   "Restart is vLLM-only: POST /api/local/{provider}/restart recreates the managed container. " +
@@ -59,18 +59,18 @@ function controlUnavailableReason(provider) {
     return (
       "vLLM has no model hot-swap API — one process serves the single model given to --model at " +
       "launch, so changing model means restarting the process. This vLLM is running outside " +
-      "Cockpit (COCKPIT_MANAGED_VLLM is off), so Cockpit cannot restart it. Restart it where you " +
+      "Plexar Studio (COCKPIT_MANAGED_VLLM is off), so Plexar Studio cannot restart it. Restart it where you " +
       "started it, with the model you want."
     );
   }
   if (isVllm) {
     return (
-      "Cockpit owns this container, but the backend is not declaring the model-control capability " +
+      "Plexar Studio owns this container, but the backend is not declaring the model-control capability " +
       "right now, so there is no restart route to swap with."
     );
   }
   return (
-    "This backend does not declare the model-control capability, so Cockpit has no load/unload or " +
+    "This backend does not declare the model-control capability, so Plexar Studio has no load/unload or " +
     "restart route to swap with. For LM Studio that usually means the lms CLI is not on the " +
     "server's PATH."
   );
@@ -149,7 +149,7 @@ function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
       }
       return true;
     } catch {
-      onToast?.("Could not reach Cockpit to change the engine", "error");
+      onToast?.("Could not reach Plexar Studio to change the engine", "error");
       return false;
     } finally {
       setBusy(false);
@@ -371,7 +371,7 @@ function LaneCard({ queue, metrics, series }) {
         <Note testId="lane-loading">Reading the lane…</Note>
       ) : live == null ? (
         <Note testId="lane-offline">
-          Neither the lane queue nor the engine metrics are answering, so Cockpit cannot say what is
+          Neither the lane queue nor the engine metrics are answering, so Plexar Studio cannot say what is
           in flight. Nothing here is zero — it is unread.
         </Note>
       ) : (
@@ -508,7 +508,7 @@ function RoutingCard({ caps, spill, metrics, queue, localEnabled, setLocalEnable
               testId="count-rejected"
               label="Rejected"
               value={UNKNOWN}
-              title="Neither the broker nor Cockpit counts rejections today, so this cannot be reported."
+              title="Neither the broker nor Plexar Studio counts rejections today, so this cannot be reported."
             />
           </div>
           <Note testId="spill-counter-window">
@@ -566,10 +566,10 @@ function LaneFooter({ metrics }) {
         borderTop: "1px solid var(--cc-line, var(--cc-border))",
       }}
     >
-      {item("uptime", UNKNOWN, "No engine uptime is reported. Cockpit's own /health uptime is a different clock and would be misleading here.")}
+      {item("uptime", UNKNOWN, "No engine uptime is reported. Plexar Studio's own /health uptime is a different clock and would be misleading here.")}
       {item("requests served", fmtInt(runs), "runs_total from the engine metrics, since the engine started")}
-      {item("failures", UNKNOWN, "Neither the broker nor vLLM's adapter reports a failure count to Cockpit.")}
-      {item("last restart", UNKNOWN, "Cockpit does not record why or when the engine last restarted.")}
+      {item("failures", UNKNOWN, "Neither the broker nor vLLM's adapter reports a failure count to Plexar Studio.")}
+      {item("last restart", UNKNOWN, "Plexar Studio does not record why or when the engine last restarted.")}
     </div>
   );
 }

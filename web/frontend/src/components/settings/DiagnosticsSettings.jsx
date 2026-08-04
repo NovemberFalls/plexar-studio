@@ -407,7 +407,7 @@ export default function DiagnosticsSettings() {
       }
       setLogLevel(typeof data.level === "string" ? data.level : next);
     } catch (err) {
-      setLevelError(`Could not reach Cockpit's server: ${err.message}`);
+      setLevelError(`Could not reach Plexar Studio's server: ${err.message}`);
     } finally {
       setLevelBusy(false);
     }
@@ -418,9 +418,9 @@ export default function DiagnosticsSettings() {
     try {
       const res = await fetch("/api/logs/reveal", { method: "POST" });
       const data = await res.json().catch(() => ({}));
-      if (!data?.ok) setRevealError(data?.error || "Cockpit could not open the log folder.");
+      if (!data?.ok) setRevealError(data?.error || "Plexar Studio could not open the log folder.");
     } catch (err) {
-      setRevealError(`Could not reach Cockpit's server: ${err.message}`);
+      setRevealError(`Could not reach Plexar Studio's server: ${err.message}`);
     }
   }, []);
 
@@ -509,7 +509,7 @@ export default function DiagnosticsSettings() {
               ))}
             </select>
             <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>
-              {logLevel ? `Cockpit is logging at ${logLevel}.` : "Cockpit did not report its level."}
+              {logLevel ? `Plexar Studio is logging at ${logLevel}.` : "Plexar Studio did not report its level."}
             </span>
           </div>
         </div>
@@ -521,7 +521,7 @@ export default function DiagnosticsSettings() {
         >
           This is <strong>not</strong> a draft setting — changing it takes effect on the running
           server straight away and does not wait for <em>Save changes</em>. It is also not
-          persisted, so the level returns to its startup value when Cockpit restarts.
+          persisted, so the level returns to its startup value when Plexar Studio restarts.
         </div>
 
         {levelError && (
@@ -680,10 +680,10 @@ export default function DiagnosticsSettings() {
         {/* ── the viewer ───────────────────────────────── */}
         {!fileLogging ? (
           <Callout testId="logs-no-file-sink">
-            File logging is <strong>not active</strong>. Cockpit could not open its log file (most
+            File logging is <strong>not active</strong>. Plexar Studio could not open its log file (most
             often an unwritable home folder), so everything is going to standard error only and
             there is no file to show here. This is not an empty log — the messages exist, just not
-            on disk. Run Cockpit from a terminal to see them.
+            on disk. Run Plexar Studio from a terminal to see them.
           </Callout>
         ) : (
           <>
@@ -693,7 +693,7 @@ export default function DiagnosticsSettings() {
               data-testid="logs-body"
               tabIndex={0}
               role="log"
-              aria-label="Cockpit log tail"
+              aria-label="Plexar Studio log tail"
               style={{
                 marginTop: 4,
                 height: 420,
@@ -715,7 +715,7 @@ export default function DiagnosticsSettings() {
                   role="alert"
                   style={{ padding: "6px 10px", fontSize: 11, color: "var(--cc-error)" }}
                 >
-                  Cockpit&apos;s server did not answer, so the log could not be read. This says
+                  Plexar Studio&apos;s server did not answer, so the log could not be read. This says
                   nothing about what is in the file.
                 </div>
               ) : rawLines.length === 0 ? (
@@ -772,7 +772,7 @@ export default function DiagnosticsSettings() {
         >
           <ShieldCheck size={13} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
           <span>
-            Cockpit&apos;s server redacts key-shaped strings (Anthropic and OpenRouter keys, and{" "}
+            Plexar Studio&apos;s server redacts key-shaped strings (Anthropic and OpenRouter keys, and{" "}
             <code>Bearer</code> tokens) before these lines reach this page, so a screenshot of this
             view will not leak them. It cannot redact a secret that was never key-shaped — file
             paths, project names and prompts appear verbatim.

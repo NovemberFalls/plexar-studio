@@ -77,7 +77,7 @@ const TRIGGER_UNITS = [
 ];
 
 const EITHER_TITLE =
-  "Not available — the broker stores a single wait threshold per lane class. There is no way to express \"wait OR depth\" on the wire, so Cockpit will not pretend to write one.";
+  "Not available — the broker stores a single wait threshold per lane class. There is no way to express \"wait OR depth\" on the wire, so Plexar Studio will not pretend to write one.";
 
 const CARD = {
   borderRadius: 12,
@@ -251,7 +251,7 @@ function UnitSegments({ cls, unit, onUnit, depthDisabled, disabled }) {
               u.key === "either"
                 ? EITHER_TITLE
                 : u.key === "depth" && depthDisabled
-                  ? "Not available yet — no run has completed, so Cockpit cannot convert a queue depth into the seconds the broker stores."
+                  ? "Not available yet — no run has completed, so Plexar Studio cannot convert a queue depth into the seconds the broker stores."
                   : `Set the ${cls} trigger in ${u.label.toLowerCase()}`
             }
             style={{
@@ -770,7 +770,7 @@ export default function SpillPolicy({ provider, loading }) {
         setError(
           data?.error ||
             (res.status === 403
-              ? "This provider is remote — Cockpit will not write to it."
+              ? "This provider is remote — Plexar Studio will not write to it."
               : "The broker refused the change; nothing was applied.")
         );
         return;
@@ -783,7 +783,7 @@ export default function SpillPolicy({ provider, loading }) {
       setSpill(data);
       setDrafts({});
     } catch (err) {
-      setError(`Could not reach Cockpit: ${err.message}`);
+      setError(`Could not reach Plexar Studio: ${err.message}`);
     } finally {
       setBusy(false);
     }
@@ -841,7 +841,7 @@ export default function SpillPolicy({ provider, loading }) {
             testId="spill-state-pill"
             title={
               spill == null
-                ? "Cockpit could not read the broker's spill configuration"
+                ? "Plexar Studio could not read the broker's spill configuration"
                 : masterOn
                   ? "At least one lane class has a trigger set"
                   : "Every lane class has spill disabled"
@@ -868,7 +868,7 @@ export default function SpillPolicy({ provider, loading }) {
 
         {isRemote && (
           <Callout testId="spill-remote">
-            <strong>{provider.label || provider.id}</strong> is a remote backend. Cockpit refuses
+            <strong>{provider.label || provider.id}</strong> is a remote backend. Plexar Studio refuses
             spill writes to anything it does not own (the endpoint answers 403), so these controls
             are read-only here. Change the thresholds where that broker runs.
           </Callout>
@@ -1018,7 +1018,7 @@ export default function SpillPolicy({ provider, loading }) {
             {spilledSinceStart == null
               ? "Spill counts are unavailable while the broker is unreachable."
               : `${spilledSinceStart} since the broker started`}
-            {spilledLifetime == null ? "" : `, ${spilledLifetime} recorded in total`}. Cockpit does
+            {spilledLifetime == null ? "" : `, ${spilledLifetime} recorded in total`}. Plexar Studio does
             not track what those requests cost, so no dollar figure is shown.
           </span>
           <span style={{ marginLeft: "auto" }} />

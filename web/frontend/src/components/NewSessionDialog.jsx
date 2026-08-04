@@ -59,7 +59,7 @@ const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`
  * wrong. The effort list stopped at "high", offering four of the six levels, so
  * this dialog showed a menu claiming a session could not be set to `xhigh` or
  * `max`. The model list still named "Sonnet 4.6" / "Opus 4.6", which are not in
- * Cockpit's catalog at all. Both now come from the shared sources
+ * Plexar Studio's catalog at all. Both now come from the shared sources
  * (sessionVocabulary.js, modelCatalog.js) so a decorative select cannot go on
  * misdescribing what a session can be.
  *
@@ -632,7 +632,7 @@ export default function NewSessionDialog({
                 <span role="note" style={{ fontSize: 10, color: "var(--cc-muted)", lineHeight: 1.4 }}>
                   Can&apos;t find <code style={{ fontFamily: "var(--cc-mono, monospace)" }}>claude</code>? Set{" "}
                   <code style={{ fontFamily: "var(--cc-mono, monospace)", color: "var(--cc-dim)" }}>CLAUDE_CLI_PATH</code>{" "}
-                  before launching Cockpit.
+                  before launching Plexar Studio.
                 </span>
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">

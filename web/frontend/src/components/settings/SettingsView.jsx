@@ -71,15 +71,15 @@ const PAGES = {
 const PAGE_META = {
   general: {
     title: "General & startup",
-    description: "Workspace root, what Cockpit does on launch, and machine-wide behaviour.",
+    description: "Workspace root, what Plexar Studio does on launch, and machine-wide behaviour.",
   },
   providers: {
     title: "Providers & Endpoints",
-    description: "Every model endpoint Cockpit can reach, its scope, and its health.",
+    description: "Every model endpoint Plexar Studio can reach, its scope, and its health.",
   },
   "claude-cli": {
     title: "Claude CLI",
-    description: "How Cockpit invokes the claude harness for every session it spawns.",
+    description: "How Plexar Studio invokes the claude harness for every session it spawns.",
   },
   keys: {
     title: "Keys & secrets",
@@ -107,7 +107,7 @@ const PAGE_META = {
   },
   tokens: {
     title: "Design tokens",
-    description: "The raw --cc-* values every surface in Cockpit is built from.",
+    description: "The raw --cc-* values every surface in Plexar Studio is built from.",
   },
   reporting: {
     title: "Reporting & retention",
@@ -123,7 +123,7 @@ const PAGE_META = {
   },
   updates: {
     title: "Updates",
-    description: "Update channel and whether Cockpit checks GitHub Releases on launch.",
+    description: "Update channel and whether Plexar Studio checks GitHub Releases on launch.",
   },
   diagnostics: {
     title: "Diagnostics & logs",
@@ -154,7 +154,7 @@ const NOT_BUILT = {
          user-configurable". False: pty_manager has always honoured a
          CLAUDE_CLI_PATH override and searched known install locations. The path
          was simply never exposed. GET /api/cli exposes it now.
-       - `diagnostics` claimed logs lived in "log files under the Cockpit data
+       - `diagnostics` claimed logs lived in "log files under the Plexar Studio data
          directory". Also false: logging_config had NO FileHandler at all, so
          nothing was ever written to disk. It does now, bounded and rotated.
      A "not built yet" panel that misdescribes the current state is worse than a

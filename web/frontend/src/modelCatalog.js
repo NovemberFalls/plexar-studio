@@ -90,15 +90,15 @@ export function parseLocalModelId(id) {
 /** Shown instead of a model list for a provider that does not declare the
  *  `models` capability. Deliberately NOT an offline/unreachable message: such a
  *  provider may be perfectly healthy, it simply does not publish a list, and
- *  Cockpit never asks it (the route would 404 and a 404 rendered as
+ *  Plexar Studio never asks it (the route would 404 and a 404 rendered as
  *  reachable:false is a false claim about machine state). */
 export const NO_MODEL_LIST_NOTE = "Does not publish a model list";
 
 /** Suffix for a model that exists on disk but is NOT the one the engine is
- *  currently serving, on a provider Cockpit cannot load into (no
+ *  currently serving, on a provider Plexar Studio cannot load into (no
  *  `model-control`). Deliberately different from "· not loaded": on a
  *  controllable provider "not loaded" is a state you can change by clicking;
- *  here it is a state nothing in Cockpit can change, so it must not read as a
+ *  here it is a state nothing in Plexar Studio can change, so it must not read as a
  *  one-click-away option. */
 export const UNSERVED_MODEL_SUFFIX = "on disk, not served";
 
@@ -107,7 +107,7 @@ export const UNSERVED_ROW_TAG = "not selectable";
 
 /** Row-level reason (title + note text). Says what to DO, not where to look. */
 export const UNSERVED_MODEL_REASON =
-  "This engine serves one model, fixed when it starts, and runs outside Cockpit. " +
+  "This engine serves one model, fixed when it starts, and runs outside Plexar Studio. " +
   "Restart it with this model to use it.";
 
 /** Group-level note for a local provider that publishes a list but cannot be
@@ -172,10 +172,10 @@ export function buildLocalGroups(providers, modelsByProviderId) {
       continue;
     }
     if (!resp || resp.reachable === false || !Array.isArray(resp.models) || resp.models.length === 0) continue;
-    // Whether Cockpit can make an unserved model become the served one. Without
+    // Whether Plexar Studio can make an unserved model become the served one. Without
     // it, "pick this model for my session" and "load this model" come apart:
     // only the served model can actually answer a request, and nothing in
-    // Cockpit can change which one that is.
+    // Plexar Studio can change which one that is.
     const canLoad = offersModelControl(provider);
     const models = resp.models
       .filter((m) => m && typeof m.id === "string")

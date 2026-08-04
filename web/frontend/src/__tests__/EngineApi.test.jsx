@@ -58,8 +58,8 @@ describe("EngineApi route explorer", () => {
   it("renders grouped route rows and sends nothing on mount", () => {
     setup();
     expect(screen.getByText("Lane broker · direct")).toBeInTheDocument();
-    expect(screen.getByText("Cockpit · per-provider")).toBeInTheDocument();
-    expect(screen.getByText("Cockpit · usage & sessions")).toBeInTheDocument();
+    expect(screen.getByText("Plexar Studio · per-provider")).toBeInTheDocument();
+    expect(screen.getByText("Plexar Studio · usage & sessions")).toBeInTheDocument();
     expect(screen.getByTestId("api-no-selection")).toBeInTheDocument();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });

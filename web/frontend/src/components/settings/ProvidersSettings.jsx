@@ -12,7 +12,7 @@
  *   GET /api/local/status           → lane-broker identity fingerprint + managed
  *   GET /api/local/{id}/health      → per-backend reachability pill
  *   GET /api/local/vllm/ownership   → who owns vLLM, and whether a saved
- *                                     "Managed by Cockpit" is waiting on a restart
+ *                                     "Managed by Plexar Studio" is waiting on a restart
  *   GET|POST|DELETE /api/settings/openrouter → the OpenRouter key (masked only)
  *
  * The OpenRouter card ABSORBS OpenRouterModal.jsx: same three routes, same
@@ -22,8 +22,8 @@
  * Deliberately inert controls (honest gaps, not fake affordances):
  *   - every `Browse` button unless the caller passes `onBrowse` (native folder
  *     picker lands with Phase 9)
- *   - vLLM `Start engine` (there is no start-on-demand endpoint: Cockpit starts
- *     its own container during Cockpit startup, and must never start or stop one
+ *   - vLLM `Start engine` (there is no start-on-demand endpoint: Plexar Studio starts
+ *     its own container during Plexar Studio startup, and must never start or stop one
  *     it does not own. The card says so in prose, not only in a tooltip.)
  *   - each card's `Ellipsis` overflow button (no menu actions exist yet)
  *   - Claude CLI detected version (no detection endpoint; backlog 03)
@@ -111,7 +111,7 @@ const ALL_CAPABILITIES = [
   "models", "model-control", "model-discovery", "health", "queue", "metrics", "spill", "traces",
 ];
 
-/** Cockpit's expected Claude CLI binary name — anything else earns a warning callout. */
+/** Plexar Studio's expected Claude CLI binary name — anything else earns a warning callout. */
 const EXPECTED_CLI = "claude";
 
 // ── primitives ────────────────────────────────────────────
@@ -491,7 +491,7 @@ function BrowseButton({ path, onBrowse }) {
  * The one-line qualifier that must accompany any pill whose meaning depends on
  * a base URL the user has edited but not saved. Probing hits the SAVED url the
  * server is using, so an unqualified green pill next to an edited field reads as
- * "Cockpit told me this URL was fine" — a lie about the screen even when it is
+ * "Plexar Studio told me this URL was fine" — a lie about the screen even when it is
  * true about the system. We qualify the pill; we never blank it.
  */
 function StaleUrlNote({ name }) {
@@ -559,7 +559,7 @@ function NotEnforcedNote({ name, what, why }) {
       role="note"
       style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
     >
-      {what} is saved, but Cockpit does not apply it yet —{" "}
+      {what} is saved, but Plexar Studio does not apply it yet —{" "}
       {why || (
         <>
           the running services still read this from their environment variables. It takes
@@ -657,7 +657,7 @@ function VllmModelsFolderSection({ provider }) {
       const models = await safeGet(`/api/local/${encodeURIComponent(providerId)}/models`);
       if (models) setModelsRefreshed(true);
     } catch (err) {
-      setError(`Could not reach Cockpit's server: ${err.message}`);
+      setError(`Could not reach Plexar Studio's server: ${err.message}`);
     } finally {
       setSaving(false);
     }
@@ -687,7 +687,7 @@ function VllmModelsFolderSection({ provider }) {
             disabled={saving}
             accent
             testId="vllm-models-dir-save"
-            title="Writes straight to Cockpit's server and persists — this control does not use the page's Save changes button"
+            title="Writes straight to Plexar Studio's server and persists — this control does not use the page's Save changes button"
           />
         }
       >
@@ -750,7 +750,7 @@ function VllmModelsFolderSection({ provider }) {
         )}
         {scanPath && (
           <div data-testid="vllm-models-dir-scan">
-            <span style={{ color: "var(--cc-muted)" }}>scanned by Cockpit at: </span>
+            <span style={{ color: "var(--cc-muted)" }}>scanned by Plexar Studio at: </span>
             {scanPath}
           </div>
         )}
@@ -764,7 +764,7 @@ function VllmModelsFolderSection({ provider }) {
 
       <Callout token="var(--cc-accent)" icon={FolderOpen} testId="vllm-models-dir-immediate">
         This path is the one control on this page that does <strong>not</strong> wait for
-        <em> Save changes</em>. Apply now writes it to Cockpit&apos;s server and saves it to disk
+        <em> Save changes</em>. Apply now writes it to Plexar Studio&apos;s server and saves it to disk
         straight away, and it stays set across restarts. On Windows, models usually live inside
         WSL, so a path like <code>/home/&lt;you&gt;/models</code> is normal.
       </Callout>
@@ -807,7 +807,7 @@ function VllmModelsFolderSection({ provider }) {
           Saved and persisted.
           {modelsRefreshed
             ? " Model list re-read from the new folder."
-            : " Cockpit could not re-read the model list just now — reopen Engine ▸ Models to retry."}
+            : " Plexar Studio could not re-read the model list just now — reopen Engine ▸ Models to retry."}
         </div>
       )}
     </div>
@@ -874,7 +874,7 @@ function reachabilityPill(health, testId, stale) {
       <Pill
         token={stale ? DIRTY : "var(--cc-muted)"}
         testId={testId}
-        title={`${staleTitle}Cockpit could not read this backend's health`}
+        title={`${staleTitle}Plexar Studio could not read this backend's health`}
       >
         {q("unknown")}
       </Pill>
@@ -1076,7 +1076,7 @@ function OpenRouterCard({ get, setField, isDirty }) {
       {source === "ui" && (
         <FieldRow
           label="Remove key"
-          hint="Deletes the key Cockpit stored"
+          hint="Deletes the key Plexar Studio stored"
           action={
             <ActionButton
               label={busy ? "Removing…" : "Remove"}
@@ -1087,14 +1087,14 @@ function OpenRouterCard({ get, setField, isDirty }) {
           }
         >
           <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>
-            Cockpit stops routing through OpenRouter.
+            Plexar Studio stops routing through OpenRouter.
           </span>
         </FieldRow>
       )}
 
       {source === "env" && (
         <Callout token="var(--cc-accent)" icon={Cloud}>
-          This key comes from the environment. Cockpit cannot remove it here — unset the
+          This key comes from the environment. Plexar Studio cannot remove it here — unset the
           environment variable instead.
         </Callout>
       )}
@@ -1124,7 +1124,7 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
       safeGet("/api/local/providers"),
       safeGet("/api/local/status"),
       // Who owns the vLLM process right now, and whether a save is waiting on a
-      // Cockpit restart. The draft value of providers.vllm.managed cannot answer
+      // Plexar Studio restart. The draft value of providers.vllm.managed cannot answer
       // that — it is intent, and the container is launched at startup.
       safeGet("/api/local/vllm/ownership"),
     ]);
@@ -1201,14 +1201,14 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   const vllmStale = staleUrl("providers.vllm.base_url");
 
   // ── vLLM ownership ──────────────────────────────────────
-  // "Managed by Cockpit" is INTENT; the container is launched during Cockpit
+  // "Managed by Plexar Studio" is INTENT; the container is launched during Plexar Studio
   // startup, so the draft (and even the saved value) can legitimately disagree
   // with what is running. GET /api/local/vllm/ownership is the only thing that
   // knows which of the three situations the user is actually in, and they need
   // different fixes:
   //   env_set          — COCKPIT_MANAGED_VLLM wins outright; this toggle is inert
   //   external         — someone else holds the port; a restart will NOT help
-  //   pending_restart  — the save is real but dormant until Cockpit restarts
+  //   pending_restart  — the save is real but dormant until Plexar Studio restarts
   const vllmOwned = ownership?.effective === true;
   const vllmExternalHoldsPort = ownership?.external === true;
   const vllmEnvPinned = ownership?.env_set === true;
@@ -1244,7 +1244,7 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           >
             {brokerStale ? `${brokerText} · saved URL` : brokerText}
           </Pill>
-          {status?.managed === true && <Badge token="var(--cc-accent)">managed by Cockpit</Badge>}
+          {status?.managed === true && <Badge token="var(--cc-accent)">managed by Plexar Studio</Badge>}
           {status?.managed === false && status?.reachable && <Badge>external process</Badge>}
           <span style={{ marginLeft: "auto" }} />
           <OverflowButton name="lane broker" />
@@ -1288,7 +1288,7 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           >
             In use right now: <code>{status.url}</code>
             {status.managed === true
-              ? " — started by Cockpit."
+              ? " — started by Plexar Studio."
               : status.reachable
                 ? " — an external process holds this address."
                 : ""}
@@ -1297,20 +1297,20 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
         <NotEnforcedNote
           name="lane-broker-base-url"
           what="Base URL"
-          why="Cockpit reads the broker address from the COCKPIT_BROKER_URL environment variable, not from this field. The address actually in use is shown above."
+          why="Plexar Studio reads the broker address from the COCKPIT_BROKER_URL environment variable, not from this field. The address actually in use is shown above."
         />
         <SettingToggle
-          label="Autostart with Cockpit"
+          label="Autostart with Plexar Studio"
           path="providers.lane_broker.autostart"
           get={get}
           setField={setField}
           isDirty={isDirty}
-          hint="Cockpit runs the broker unless one is already listening"
+          hint="Plexar Studio runs the broker unless one is already listening"
         />
         <NotEnforcedNote
           name="lane-broker-autostart"
-          what="Autostart with Cockpit"
-          why="whether Cockpit starts the broker is governed by the COCKPIT_MANAGED_BROKER environment variable (default on), not by this toggle."
+          what="Autostart with Plexar Studio"
+          why="whether Plexar Studio starts the broker is governed by the COCKPIT_MANAGED_BROKER environment variable (default on), not by this toggle."
         />
         <SettingSlider
           label="Lane concurrency"
@@ -1440,7 +1440,7 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
             }
           >
             {/* Ownership comes from the server, NOT from the draft toggle — the
-                toggle is intent and only takes effect on a Cockpit restart. */}
+                toggle is intent and only takes effect on a Plexar Studio restart. */}
             {`${vllmOwned ? "Managed" : "External"} · ${
               healthFor(vllm)?.provider?.reachable ? "serving" : "stopped"
             }${vllmStale ? " · saved URL" : ""}`}
@@ -1469,35 +1469,35 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
         />
         {vllmStale && <StaleUrlNote name="vllm" />}
         <SettingToggle
-          label="Managed by Cockpit"
+          label="Managed by Plexar Studio"
           path="providers.vllm.managed"
           get={get}
           setField={setField}
           isDirty={isDirty}
-          hint="Cockpit starts the container at startup and may restart it to change model"
+          hint="Plexar Studio starts the container at startup and may restart it to change model"
           title={ownership?.reason || undefined}
         />
         {/* Exactly one caveat, naming the situation the user is actually in.
             Order matters: the env var wins over everything, an external process
-            wins over a restart, and only then is "restart Cockpit" the fix. */}
+            wins over a restart, and only then is "restart Plexar Studio" the fix. */}
         {vllmEnvPinned && (
           <Callout testId="vllm-managed-env-pinned">
-            COCKPIT_MANAGED_VLLM is set in this Cockpit's environment, and it wins over this
+            COCKPIT_MANAGED_VLLM is set in this Plexar Studio's environment, and it wins over this
             toggle — the saved value is ignored until that variable is unset.
           </Callout>
         )}
         {!vllmEnvPinned && vllmExternalHoldsPort && (
           <Callout testId="vllm-managed-external">
-            Another vLLM is already answering on this port, so Cockpit is deferring to it and
-            will keep deferring until that process stops. Restarting Cockpit will not change
+            Another vLLM is already answering on this port, so Plexar Studio is deferring to it and
+            will keep deferring until that process stops. Restarting Plexar Studio will not change
             this — stop the other vLLM first.
           </Callout>
         )}
         {!vllmEnvPinned && !vllmExternalHoldsPort && vllmPendingRestart && (
           <Callout testId="vllm-managed-pending-restart">
             {vllmManagedDraft
-              ? "Cockpit starts the vLLM container during its own startup, so this takes effect the next time Cockpit restarts — not on save."
-              : "Cockpit still owns the container it started; it is released the next time Cockpit restarts."}
+              ? "Plexar Studio starts the vLLM container during its own startup, so this takes effect the next time Plexar Studio restarts — not on save."
+              : "Plexar Studio still owns the container it started; it is released the next time Plexar Studio restarts."}
           </Callout>
         )}
         <SettingText
@@ -1515,8 +1515,8 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
               testId="vllm-start"
               title={
                 vllmOwned
-                  ? "Cockpit starts its vLLM container during Cockpit startup — there is no start-on-demand endpoint."
-                  : "Cockpit does not own this vLLM, so it must not start or stop it. Start it where you started it."
+                  ? "Plexar Studio starts its vLLM container during Plexar Studio startup — there is no start-on-demand endpoint."
+                  : "Plexar Studio does not own this vLLM, so it must not start or stop it. Start it where you started it."
               }
             />
           }
@@ -1529,10 +1529,10 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           role="note"
           style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 4 }}
         >
-          Cockpit does not read this launch command — it builds its own{" "}
-          <code>docker run</code> from the vLLM environment variables and runs it at Cockpit
+          Plexar Studio does not read this launch command — it builds its own{" "}
+          <code>docker run</code> from the vLLM environment variables and runs it at Plexar Studio
           startup when it owns the container. `Start engine` stays disabled because there is
-          no start-on-demand endpoint, and Cockpit must never start or stop a container it
+          no start-on-demand endpoint, and Plexar Studio must never start or stop a container it
           does not own.
         </div>
         <SettingSlider

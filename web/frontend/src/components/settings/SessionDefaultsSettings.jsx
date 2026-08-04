@@ -437,7 +437,7 @@ export default function SessionDefaultsSettings({ get, setField, isDirty }) {
 
         {selectedModel && !known && (
           <Callout testId="unknown-model">
-            <strong>{selectedModel}</strong> is not in the model list Cockpit currently knows about.
+            <strong>{selectedModel}</strong> is not in the model list Plexar Studio currently knows about.
             It is stored as typed — if it came from a local provider that is offline right now, it
             will reappear in the list when that provider answers again.
           </Callout>
@@ -499,7 +499,7 @@ export default function SessionDefaultsSettings({ get, setField, isDirty }) {
             but tinted --cc-waiting because here the stored value has NO effect at
             all yet, not merely a delayed one. */}
         <Callout token={DIRTY} icon={Info} testId="not-read-sessions">
-          Saved, but <strong>not in force yet</strong>. Cockpit still takes a new session&apos;s
+          Saved, but <strong>not in force yet</strong>. Plexar Studio still takes a new session&apos;s
           model, permission mode, effort and fast flag from the command bar&apos;s DEFAULTS pill,
           which keeps its own selection for this workspace. Nothing reads{" "}
           <code>sessions.*</code> at startup today, so changing these values here does not yet

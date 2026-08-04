@@ -1354,7 +1354,7 @@ export default function App() {
     );
   }, [sessions, createSession]);
 
-  // Rename a session — PATCH /api/terminals/{id} always commits the Cockpit-side
+  // Rename a session — PATCH /api/terminals/{id} always commits the Studio-side
   // name first; sync_claude best-effort injects /rename into the live session
   // and may report claude_synced: false without the whole request failing.
   // Owns the sessions-state mutation here (not in TerminalPane) so the sidebar
