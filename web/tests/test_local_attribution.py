@@ -5,9 +5,12 @@
     and without terminal_id, and a bad terminal_id falling back un-scoped.
   - web/vllm_shim.py reachable at both /shim/vllm/v1/messages and
     /shim/vllm/s/{id}/v1/messages.
-  - web/lmstudio_proxy.py: forwards byte-verbatim to the broker, ADDS
-    X-Lane-Class/X-Client-Id/X-Agent-Id headers (absent when no session id),
-    and streaming passthrough works.
+  - web/lmstudio_proxy.py: forwards byte-verbatim DIRECT TO LM STUDIO
+    (:1234, the provider's management_url), sends NONE of the retired
+    X-Lane-Class/X-Client-Id/X-Agent-Id broker headers, and streaming
+    passthrough works. The lane broker was removed entirely in T11
+    (2026-08-04); attribution rides the session-scoped URL, never a header,
+    which is why deleting those three cost no attribution.
   - usage_tracker.UsageTracker.record_local_run(): inserts a row, unknown
     usage stores null tokens, and a failure never raises into the caller.
   - Schema migration: a DB created without local_runs/usage_events.workdir
@@ -141,7 +144,7 @@ async def test_vllm_shim_reachable_at_scoped_route(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lmstudio_proxy_forwards_and_tags_headers_with_session(client, monkeypatch):
+async def test_lmstudio_proxy_forwards_direct_to_lmstudio_without_broker_headers(client, monkeypatch):
     incoming_body = {"model": "qwen3-coder-30b", "max_tokens": 50, "messages": [{"role": "user", "content": "hi"}]}
     raw_incoming = json.dumps(incoming_body).encode()
 
@@ -149,7 +152,7 @@ async def test_lmstudio_proxy_forwards_and_tags_headers_with_session(client, mon
     original_post = httpx.AsyncClient.post
 
     async def fake_post(self, url, content=None, headers=None, **kwargs):
-        if "127.0.0.1:1235" not in str(url):
+        if "127.0.0.1:1234" not in str(url):
             return await original_post(self, url, content=content, headers=headers, **kwargs)
         captured["url"] = str(url)
         captured["content"] = content
@@ -175,9 +178,10 @@ async def test_lmstudio_proxy_forwards_and_tags_headers_with_session(client, mon
     # Byte-verbatim forwarding: outgoing body equals incoming body exactly.
     assert captured["content"] == raw_incoming
     assert captured["url"].endswith("/v1/messages")
-    assert captured["headers"]["X-Lane-Class"] == "interactive"
-    assert captured["headers"]["X-Client-Id"] == "term-abc"
-    assert captured["headers"]["X-Agent-Id"] == "term-abc"
+    # ABSENCE-SHAPED (R19): the three broker headers are GONE, not renamed.
+    # Asserting only "it still 200s" would pass on a proxy that kept them.
+    for dead in ("X-Lane-Class", "X-Client-Id", "X-Agent-Id"):
+        assert dead not in captured["headers"], f"{dead} outlived the broker"
     # Response body relayed byte-verbatim too.
     assert resp.content == json.dumps({
         "id": "msg_1", "type": "message", "role": "assistant", "model": "qwen3-coder-30b",
@@ -187,12 +191,12 @@ async def test_lmstudio_proxy_forwards_and_tags_headers_with_session(client, mon
 
 
 @pytest.mark.asyncio
-async def test_lmstudio_proxy_no_session_omits_client_and_agent_headers(client, monkeypatch):
+async def test_lmstudio_proxy_no_session_still_sends_no_broker_headers(client, monkeypatch):
     captured = {}
     original_post = httpx.AsyncClient.post
 
     async def fake_post(self, url, content=None, headers=None, **kwargs):
-        if "127.0.0.1:1235" not in str(url):
+        if "127.0.0.1:1234" not in str(url):
             return await original_post(self, url, content=content, headers=headers, **kwargs)
         captured["headers"] = headers
         request = httpx.Request("POST", url)
@@ -206,9 +210,8 @@ async def test_lmstudio_proxy_no_session_omits_client_and_agent_headers(client, 
         headers={"Content-Type": "application/json"},
     )
     assert resp.status_code == 200
-    assert captured["headers"]["X-Lane-Class"] == "interactive"
-    assert "X-Client-Id" not in captured["headers"]
-    assert "X-Agent-Id" not in captured["headers"]
+    for dead in ("X-Lane-Class", "X-Client-Id", "X-Agent-Id"):
+        assert dead not in captured["headers"], f"{dead} outlived the broker"
 
 
 @pytest.mark.asyncio
@@ -230,7 +233,7 @@ async def test_lmstudio_proxy_streaming_passthrough(client, monkeypatch):
             self.url = url
 
         async def __aenter__(self):
-            assert "127.0.0.1:1235" in self.url
+            assert "127.0.0.1:1234" in self.url
             return _FakeStreamResponse()
 
         async def __aexit__(self, *exc):
@@ -239,7 +242,7 @@ async def test_lmstudio_proxy_streaming_passthrough(client, monkeypatch):
     original_stream = httpx.AsyncClient.stream
 
     def fake_stream(self, method, url, content=None, headers=None, **kwargs):
-        if "127.0.0.1:1235" not in str(url):
+        if "127.0.0.1:1234" not in str(url):
             return original_stream(self, method, url, content=content, headers=headers, **kwargs)
         assert method == "POST"
         return _FakeStreamCtx(str(url))

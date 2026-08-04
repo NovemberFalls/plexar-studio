@@ -1,26 +1,29 @@
-"""Thin tagging proxy so LM Studio (via the lane broker) traffic can be
-attributed to the Cockpit session/repo that caused it.
+"""Thin attributing proxy so LM Studio traffic can be attributed to the
+Studio session/repo that caused it.
 
 Mounted at ``/shim/lmstudio`` on the main FastAPI ``app`` (see server.py).
-The `claude` CLI cannot be told to send custom HTTP headers, so Cockpit
-cannot tag outgoing requests with a session id that way. What Cockpit DOES
+The `claude` CLI cannot be told to send custom HTTP headers, so Studio
+cannot tag outgoing requests with a session id that way. What Studio DOES
 control is the base URL each session is launched with -- so every session
-gets a SESSION-SCOPED base URL (``/shim/lmstudio/s/{terminal_id}``) and this
-proxy adds the broker's attribution headers on the way out:
+gets a SESSION-SCOPED base URL (``/shim/lmstudio/s/{terminal_id}``), and
+**the URL itself is the attribution**: `session_id` comes off the path and
+is what `_record_local_run` writes to `usage.sqlite3`.
 
-  - ``X-Lane-Class: interactive`` -- an interactive Cockpit pane is always
-    the broker's "interactive" lane class.
-  - ``X-Client-Id`` / ``X-Agent-Id`` -- set to the session id when present
-    (the broker's per-session/per-agent breakdowns key off these).
+**THIS POSTS DIRECT TO LM STUDIO (T11, 2026-08-04).** It used to post at
+the vendored lane broker's address, which relayed to LM Studio one hop
+later; the broker is removed entirely and there is no intermediary. The
+three attribution headers it used to add (``X-Lane-Class``, ``X-Client-Id``,
+``X-Agent-Id``) went with it -- they were read by the broker's breakdowns
+and by nothing else. **LM Studio has never read them, so removing them
+cost no attribution**: the session-scoped URL was always the real carrier.
 
-This is a NON-TRANSLATING passthrough -- the broker already speaks the
-Anthropic ``/v1/messages`` shape directly (unlike vLLM, which needs
-web/vllm_shim.py's OpenAI translation). The body is forwarded BYTE-VERBATIM
-in both directions: the vendored broker README is explicit that
-byte-verbatim relay is mandatory (a prior middlebox that re-encoded bodies
-silently dropped tool-call arguments -- see vllm_shim.py's module docstring
-for the same lesson learned the hard way). Streaming responses are relayed
-as a raw SSE byte passthrough with no re-encoding.
+This is a NON-TRANSLATING passthrough -- LM Studio speaks the Anthropic
+``/v1/messages`` shape directly (unlike vLLM, which needs web/vllm_shim.py's
+OpenAI translation). The body is forwarded BYTE-VERBATIM in both directions
+(a prior middlebox that re-encoded bodies silently dropped tool-call
+arguments -- see vllm_shim.py's module docstring for the same lesson learned
+the hard way). Streaming responses are relayed as a raw SSE byte passthrough
+with no re-encoding.
 """
 
 from __future__ import annotations
@@ -39,19 +42,29 @@ logger = logging.getLogger("cockpit.lmstudio_proxy")
 router = APIRouter(prefix="/shim/lmstudio")
 
 # Mirrors vllm_shim's timeout stance: generous read timeout for local
-# generation, tight connect timeout so a dead broker fails fast.
+# generation, tight connect timeout so a dead LM Studio fails fast.
 _TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=600.0)
 
+# Last resort only -- the registry entry is the real source. Kept so a
+# malformed COCKPIT_PROVIDERS_FILE degrades to LM Studio's documented
+# default port rather than to None.
+_LMSTUDIO_FALLBACK_URL = "http://127.0.0.1:1234"
 
-def _broker_base_url() -> str:
-    """Resolve the LM Studio broker's URL from the provider registry, not a
+
+def _lmstudio_base_url() -> str:
+    """Resolve LM Studio's OWN address from the provider registry, not a
     hardcoded constant -- keeps this module in sync with whatever the user
     (or COCKPIT_PROVIDERS_FILE) has configured for ``lmstudio-local``.
+
+    This reads ``management_url`` (LM Studio itself, default ``:1234``). It
+    used to read ``broker_url`` and post at the vendored lane broker, which
+    relayed to the same place one hop later. The broker is gone (T11), so
+    this is the direct path and there is no intermediary left to resolve.
     """
     import server as server_module  # local import: avoids a circular import
 
     provider = server_module._PROVIDERS.get("lmstudio-local") or {}
-    return (provider.get("broker_url") or server_module._LOCAL_BROKER_URL).rstrip("/")
+    return (provider.get("management_url") or _LMSTUDIO_FALLBACK_URL).rstrip("/")
 
 
 def _anthropic_error(message: str, *, status_code: int = 502, err_type: str = "api_error") -> JSONResponse:
@@ -98,9 +111,9 @@ def _record_local_run(*, session_id: str | None, model, input_tokens, output_tok
 
 def _extract_usage(oa_like_resp: dict) -> tuple:
     """Anthropic /v1/messages responses carry usage at top-level ``usage``
-    ({"input_tokens":..,"output_tokens":..}) -- the broker forwards LM
-    Studio's Anthropic-shaped response verbatim, so no translation needed
-    here (unlike vllm_shim, which translates from OpenAI's usage shape).
+    ({"input_tokens":..,"output_tokens":..}) -- LM Studio answers in the
+    Anthropic shape, so no translation is needed here (unlike vllm_shim,
+    which translates from OpenAI's usage shape).
     """
     usage = oa_like_resp.get("usage") if isinstance(oa_like_resp, dict) else None
     if not isinstance(usage, dict):
@@ -128,12 +141,17 @@ async def _handle_messages(request: Request, *, session_id: str | None):
     model = body_obj.get("model") if isinstance(body_obj, dict) else None
     stream = bool(body_obj.get("stream")) if isinstance(body_obj, dict) else False
 
-    upstream_url = f"{_broker_base_url()}/v1/messages"
+    upstream_url = f"{_lmstudio_base_url()}/v1/messages"
 
-    headers = {"Content-Type": "application/json", "X-Lane-Class": "interactive"}
-    if session_id:
-        headers["X-Client-Id"] = session_id
-        headers["X-Agent-Id"] = session_id
+    # The X-Lane-Class / X-Client-Id / X-Agent-Id attribution headers were
+    # REMOVED with the broker (T11). They were read by exactly one thing --
+    # the broker's per-session/per-agent/per-lane-class breakdowns -- and
+    # LM Studio has never read any of them. Attribution of an LM Studio run
+    # to a Studio session did NOT depend on them and is unaffected: it comes
+    # from the session-scoped URL this route is mounted at, which is what
+    # `_record_local_run` keys off. Re-adding them would be sending headers
+    # nothing reads.
+    headers = {"Content-Type": "application/json"}
 
     if stream:
         return await _proxy_stream(upstream_url, body_bytes, headers, model=model, session_id=session_id)
@@ -150,8 +168,8 @@ async def _proxy_non_stream(
             # received, with NO re-encoding/re-parsing of the body.
             resp = await client.post(upstream_url, content=body_bytes, headers=headers)
     except httpx.HTTPError:
-        logger.error("lmstudio_proxy: failed to reach broker at %s", upstream_url, exc_info=True)
-        return _anthropic_error(f"Could not reach LM Studio broker at {upstream_url}", status_code=503)
+        logger.error("lmstudio_proxy: failed to reach LM Studio at %s", upstream_url, exc_info=True)
+        return _anthropic_error(f"Could not reach LM Studio at {upstream_url}", status_code=503)
 
     wall_ms = (time.monotonic() - start) * 1000
 
@@ -217,7 +235,7 @@ async def _proxy_stream(
                                 if isinstance(usage, dict):
                                     final_usage.update(usage)
         except httpx.HTTPError:
-            logger.error("lmstudio_proxy: failed to reach broker at %s during streaming", upstream_url, exc_info=True)
+            logger.error("lmstudio_proxy: failed to reach LM Studio at %s during streaming", upstream_url, exc_info=True)
         finally:
             wall_ms = (time.monotonic() - start) * 1000
             _record_local_run(
