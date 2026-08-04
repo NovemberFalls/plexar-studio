@@ -462,7 +462,18 @@ class PtyManager:
 
     # File that tracks PIDs of claude processes spawned by this cockpit instance.
     # Only these PIDs are killed during orphan cleanup — never random Claude sessions.
-    _PID_TRACK_FILE = os.path.join(os.path.dirname(__file__), ".cockpit-child-pids")
+    #
+    # **PORT-SCOPED, and that is load-bearing.** This used to be one fixed path
+    # shared by every instance started from this directory, which made the file a
+    # cross-instance channel rather than a per-instance record: a second server
+    # (a dev run, a test rig, a probe on another port) read the LIVE server's
+    # tracked child PIDs and `cleanup_orphans()` killed them at startup. The
+    # user's running sessions died because someone started a second copy. Two
+    # servers cannot share a port, so the port is exactly the right discriminator.
+    _PID_TRACK_DIR = os.path.dirname(__file__)
+    # The pre-port-scoping name. Read ONCE, and only by the instance that would
+    # have owned it, then deleted — see `_migrate_legacy_pid_file`.
+    _LEGACY_PID_TRACK_FILE = os.path.join(_PID_TRACK_DIR, ".cockpit-child-pids")
 
     # Interval (seconds) at which the background state ticker calls tick() on
     # every live session.  1 second is fine-grained enough that the bridge idle
@@ -478,6 +489,12 @@ class PtyManager:
         self._lock = threading.Lock()  # Protects sessions dict and PID file
         self._pty_executor = ThreadPoolExecutor(max_workers=64)
         self._state_ticker_task: Optional[asyncio.Task] = None
+        # Resolved per instance, at construction, from the port this process will
+        # serve. Read here rather than at class-definition time so a test (or the
+        # probe launcher) that sets PORT before constructing gets its own file.
+        self._PID_TRACK_FILE = os.path.join(
+            self._PID_TRACK_DIR, f".cockpit-child-pids-{os.getenv('PORT', '8420')}"
+        )
 
     def _load_child_pids(self) -> set[int]:
         """Load previously tracked child PIDs."""
@@ -516,12 +533,45 @@ class PtyManager:
         """Clear the PID tracking file."""
         self._write_child_pids(set())
 
+    def _migrate_legacy_pid_file(self) -> None:
+        """Adopt the pre-port-scoping PID file, exactly once, and only if it is ours.
+
+        A build that predates port scoping wrote `.cockpit-child-pids` with no
+        port. Ignoring it outright would strand those PIDs forever — one upgrade
+        where a crash's orphans are never reaped.
+
+        **The guard is the whole point: only the DEFAULT-port instance adopts it.**
+        A dev server or a probe on another port must never read that file, because
+        the process that wrote it may be an older build that is *still running*,
+        and adopting its PIDs is precisely the cross-instance kill this scoping
+        exists to prevent. Two servers cannot both hold 8420, so the default-port
+        instance is the only one that can safely claim to be its successor.
+        """
+        if os.getenv("PORT", "8420") != "8420":
+            return
+        legacy = self._LEGACY_PID_TRACK_FILE
+        if not os.path.exists(legacy):
+            return
+        try:
+            with open(legacy) as f:
+                pids = {int(ln.strip()) for ln in f if ln.strip().isdigit()}
+            if pids:
+                with self._lock:
+                    merged = self._load_child_pids() | pids
+                    self._write_child_pids(merged)
+                logger.info("Adopted %d PID(s) from the legacy child-PID file", len(pids))
+            os.remove(legacy)
+        except Exception:
+            logger.debug("Legacy child-PID migration failed — continuing", exc_info=True)
+
     def cleanup_orphans(self):
         """Kill cockpit-spawned claude processes left over from a previous crash.
 
-        Only kills processes whose PIDs were tracked in the child-PID file.
-        Never touches Claude sessions running in other terminals or editors.
+        Only kills processes whose PIDs were tracked in THIS instance's child-PID
+        file. Never touches Claude sessions running in other terminals or editors,
+        and — since the file is port-scoped — never another cockpit instance's.
         """
+        self._migrate_legacy_pid_file()
         tracked_pids = self._load_child_pids()
         if not tracked_pids:
             logger.debug("No tracked child PIDs — skipping orphan cleanup")

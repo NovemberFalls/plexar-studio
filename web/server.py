@@ -305,8 +305,13 @@ _upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
 # both pass the quota check, and together exceed MAX_UPLOAD_DIR_SIZE.
 _upload_lock = asyncio.Lock()
 
-# PID file for crash detection
-PID_FILE = Path(__file__).parent / ".cockpit.pid"
+# PID file for crash detection. PORT-SCOPED for the same reason as
+# PtyManager._PID_TRACK_FILE: one fixed path shared by every instance turns a
+# per-instance record into a cross-instance channel. Here the damage is milder —
+# a second server overwrites the first's PID, so the crash-detection warning
+# afterwards reports the wrong process — but the fix is the same and they must
+# agree, or one file says "instance on 8421" while the other says "instance".
+PID_FILE = Path(__file__).parent / f".cockpit-{os.getenv('PORT', '8420')}.pid"
 
 ALLOWED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
