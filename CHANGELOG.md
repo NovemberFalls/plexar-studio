@@ -35,6 +35,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The app-wide ban on `window.prompt`/`confirm`/`alert` and its structural test, extracted to `__tests__/NoNativeDialogs.test.jsx`. The rule was pinned in a chat test file but was never chat's.
 - `voice_service.py`, `/api/voice/*` and the `voice.*` settings keys — a separate subsystem chat merely called. It now has **no UI renderer**; it is backend-only until something surfaces it.
 
+## [1.30.0] - 2026-08-03
+
+The rename release, plus a section boundary that finally matches what the
+sections claim to own. Seven changes Len has never seen ship together here.
+
+### Changed
+- **The product is called Plexar Studio.** 265 renderable sites across 46
+  frontend files stop saying "Cockpit". Tiers 1 and 2 of S25.
+- **Reports takes the past.** Engine ▸ Requests -> Reports ▸ Traces and
+  Engine ▸ Logs -> Reports ▸ Logs. Engine keeps Live / Models / API. The rule
+  was already written in Engine's own header — Settings owns intent, Reports
+  owns the past, Engine owns now — and two tabs were on the wrong side of it.
+  Nothing was deleted; the trace card is exported and shared, so the two
+  surfaces cannot drift.
+- Providers settings render as three rows of two rather than six stacked
+  blocks (S-PAIRS), and every view now resets its own boundary (S21).
+
+### Fixed
+- **The Logs tab claimed no log endpoint existed. One always had.**
+  `GET /api/logs` tails the rotating file with secrets redacted, and a viewer
+  for it already shipped in Settings ▸ Diagnostics. Reports ▸ Logs now renders
+  the real tail. An empty state is only honest if the reason it gives is true.
+- Reports ▸ Local engine no longer blanks the whole tab when the engine
+  refuses a credential (S-CRASH).
+- Reports ▸ Tools' long tail was wrong three ways (S-TOOLS), and the Traces
+  pointer named an Engine tab that has never existed (S-TRACES).
+
+### Kept honest
+- Moving the trace panel MOVES AN EMPTY PANEL. The lane broker ships in shadow
+  mode so no job is ever queued, and a trace is written per queued job; Plexar
+  does not publish traces at all. The copy explaining that renders WITH the
+  panel, and a test fails if it stops. Consolidation did not turn a recorder on.
+
+### Identifiers deliberately UNCHANGED
+`com.claude-cockpit.app`, the `cockpit-server` sidecar, 204 `COCKPIT_*` env var
+references and 90 `cockpit-*` localStorage keys are compatibility surface with
+an existing install and with the updater. Renaming any of them would present as
+data loss on first launch. `scripts/gate_s25_rename.py` freezes that census and
+fails if it moves in either direction.
+
 ## [1.3.9] - 2026-07-12
 
 ### Added
