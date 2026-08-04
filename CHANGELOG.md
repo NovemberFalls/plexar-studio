@@ -35,6 +35,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The app-wide ban on `window.prompt`/`confirm`/`alert` and its structural test, extracted to `__tests__/NoNativeDialogs.test.jsx`. The rule was pinned in a chat test file but was never chat's.
 - `voice_service.py`, `/api/voice/*` and the `voice.*` settings keys — a separate subsystem chat merely called. It now has **no UI renderer**; it is backend-only until something surfaces it.
 
+## [1.31.0] - 2026-08-04
+
+The subtraction release. Two vendored subsystems leave, one live transport is
+rewired, and a settings pane that nobody could reach without landing on nothing
+gets its default fixed. **Net −6,746 lines across 63 files.**
+
+MINOR, not patch: T11 deletes a vendored subsystem and changes where LM Studio
+traffic physically goes. A patch number would understate that.
+
+### Removed
+- **The lane broker, entirely.** `web/lane_broker/`, the managed-broker
+  lifecycle, the service-identity fingerprint, `GET /api/local/status`,
+  `/api/local/{id}/queue`, `/traces`, `/trace/{id}`, `/metrics/timeseries`, the
+  legacy `/api/local/queue`, the `queue` and `traces` capabilities, the Engine
+  queue table and the Reports ▸ Traces tab. No flag, no stub, no disabled
+  control. **Nothing in Studio queues.**
+  - **What observation was lost was measured BEFORE deleting, and it was zero
+    real data:** `jobs.jsonl` absent in both data homes, `/traces` `{"count":0}`,
+    `/metrics?window=lifetime` `runs_total: 1` — and that one run was a test
+    fixture. No real LM Studio run was ever recorded through it.
+  - Per-run token and cost recording never went through the broker
+    (`lmstudio_proxy._record_local_run` → `usage.sqlite3`) and is untouched.
+- **Spill, entirely** — the policy, not the broker: `/config/spill`, `/spills`,
+  `spills.jsonl`, both `--spill-*` flags, both server proxies, the `spill`
+  capability, `SpillPolicy.jsx` and `DepthWaitPanel.jsx`. It was inert three
+  ways and nobody ever experienced it working; this is not a fix.
+- **Settings ▸ General & startup and ▸ Permissions & safety**, with their nav
+  entries and the settings keys they bound. A third candidate pane was
+  **refused, not deleted** — it is what a cold open lands on, and removing it
+  would have left Settings opening onto nothing.
+- The Lane broker card from Settings ▸ Providers, which was drawn as a peer of
+  five providers when it was a property of exactly one. All three controls it
+  offered were already declared not-enforced against their own values.
+
+### Changed
+- **LM Studio talks to LM Studio.** `lmstudio_proxy.py` now posts directly at
+  the provider's `management_url` (`:1234`) instead of hopping through the
+  broker. The `X-Lane-Class` / `X-Client-Id` / `X-Agent-Id` headers went with
+  it — the broker was their only reader. **Attribution is unaffected:** it rides
+  the session-scoped URL (`/shim/lmstudio/s/{terminal_id}`), which is what
+  `_record_local_run` keys on.
+- `DEFAULT_SETTINGS_SECTION` re-points to `providers`, so a cold open with no
+  stored pane id resolves to a pane that still exists.
+- The `health` route keeps its `broker` key, permanently
+  `{applicable: false, reachable: null}`. The shape already said "there is no
+  broker here"; dropping the key would be a breaking change to say what it can
+  already say.
+
+### Fixed
+- **Reports ▸ Tools: the tool list painted into the coverage note.** The defect
+  was the CARD's `flex-shrink`, not the rows. The "recorded since <date>" note
+  is the load-bearing half — tool events only exist from 2026-07-30, so a
+  30d/all range legitimately undercounts — and it was the half being obscured.
+- A latent breadcrumb/label bug in the settings `layout` path, made reachable
+  by the pane deletion above.
+- An unstable effect dependency in the re-sourced health poller that hung
+  AppShell. Caught by the suite before commit, not after.
+
+### Preserved deliberately
+- `providers.lane_broker.*` stays in `settings.json` AND in `DEFAULT_SETTINGS`.
+  Unknown keys survive a read, and removing a persisted setting is a decision
+  about the user's file rather than about this code. Nothing reads them.
+- `~/.plexar-studio/lane-broker/`, including `jobs.jsonl` and `spills.jsonl`,
+  is left on disk untouched. Removing a feature must not remove the record.
+- **LM Studio support stays**, as a plain direct provider. Not deprecated, not
+  notice-flagged.
+
+### Notes
+- Tests were **rewritten to pin the new truth, not deleted to go green.** The
+  `plexar-provider` health test was inverted: it used to assert LM Studio went
+  not-ok when the broker died; it now asserts health ignores `_broker_get`
+  entirely, with the stub still raising to prove it.
+- `_broker_get` survives as a fossil NAME on the generic provider-GET helper
+  that also reads vLLM and Prometheus. Renaming it is a separate sweep.
+
 ## [1.30.0] - 2026-08-03
 
 The rename release, plus a section boundary that finally matches what the
