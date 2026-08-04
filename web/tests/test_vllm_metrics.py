@@ -30,7 +30,7 @@ from server import app
 @pytest.fixture
 def client():
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test")
+    return AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
 
 
 # A trimmed-but-real-shaped vLLM /metrics scrape.

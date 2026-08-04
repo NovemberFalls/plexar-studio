@@ -390,7 +390,7 @@ async def test_post_terminals_forwards_permission_mode():
         raise RuntimeError("stop early")  # abort before spawn
 
     with patch("server.pty_manager.create_terminal", side_effect=fake_create_terminal):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
             res = await client.post("/api/terminals", json={
                 "name": "t",
                 "workdir": "C:\\Code",
@@ -421,7 +421,7 @@ async def test_post_terminals_forwards_fast_true():
         raise RuntimeError("stop early")
 
     with patch("server.pty_manager.create_terminal", side_effect=fake_create_terminal):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
             res = await client.post("/api/terminals", json={
                 "name": "t",
                 "workdir": "C:\\Code",
@@ -443,7 +443,7 @@ async def test_post_terminals_invalid_permission_mode_returns_500():
     from httpx import AsyncClient, ASGITransport
     from server import app
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
         res = await client.post("/api/terminals", json={
             "name": "t",
             "workdir": "C:\\Code",
@@ -464,7 +464,7 @@ async def test_post_terminals_invalid_effort_returns_500():
     from httpx import AsyncClient, ASGITransport
     from server import app
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
         res = await client.post("/api/terminals", json={
             "name": "t",
             "workdir": "C:\\Code",

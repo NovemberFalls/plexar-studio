@@ -51,6 +51,7 @@ from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other 
 import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the other local-module imports above
 from pricing_store import pricing_store  # noqa: E402
 import spend_guard  # noqa: E402 -- reads settings_store/usage_tracker lazily; the sole spend-decision module
+import origin_guard  # noqa: E402 -- grouped with the other local-module imports above; the browser-origin guard wired as middleware below
 import context_window  # noqa: E402 -- pure resolver; fed the local /models payload below so local sessions get a real context ring
 
 START_TIME = _time.time()
@@ -248,6 +249,27 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+# Browser-origin guard. CORS above is NOT authentication and never was — it stops
+# a foreign page READING a reply, not a foreign page CAUSING the side effect, and
+# it stops neither under DNS rebinding. See origin_guard.py for the two clauses
+# and why an Origin==Host equality check is insufficient here.
+@app.middleware("http")
+async def _origin_guard_middleware(request: Request, call_next):
+    reason = origin_guard.check_http(
+        request.headers.get("host", ""),
+        request.headers.get("origin"),
+    )
+    if reason:
+        logger.warning(
+            "Refused %s %s — %s", request.method, request.url.path, reason
+        )
+        return JSONResponse(
+            {"error": "forbidden", "reason": reason},
+            status_code=403,
+        )
+    return await call_next(request)
 
 # Anthropic -> OpenAI translation shim, mounted at /shim/vllm so the `claude`
 # CLI can drive a local vLLM server via ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/shim/vllm.
@@ -1257,6 +1279,24 @@ async def resize_terminal(terminal_id: str, request: Request):
 @app.websocket("/ws/terminal/{terminal_id}")
 async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     """Bridge xterm.js <-> PTY via WebSocket."""
+    # BEFORE accept(), and before the terminal lookup. A WebSocket handshake is not
+    # subject to CORS at all, so this route is the one a foreign page can reach
+    # directly: it can read output, write input, and — via active_consumer's
+    # "latest connection wins" below — supersede the real pane on a terminal the
+    # user is already working in. Completing the upgrade and closing afterwards
+    # would also hand out a free oracle: 101-then-4004 for a miss versus
+    # 101-and-silence for a hit is enough to enumerate terminal ids.
+    reason = origin_guard.check_websocket(
+        websocket.headers.get("host", ""),
+        websocket.headers.get("origin"),
+    )
+    if reason:
+        logger.warning("Refused WS /ws/terminal/%s — %s", terminal_id, reason)
+        # 4403, not 4004: a stale bundle or a misconfigured dev server must read
+        # as "this connection was refused", never as "your terminal is gone".
+        await websocket.close(code=4403, reason="Origin not allowed — reload the app")
+        return
+
     session = pty_manager.get_terminal(terminal_id)
     await websocket.accept()
 

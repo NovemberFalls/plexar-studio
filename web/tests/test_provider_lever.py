@@ -266,7 +266,7 @@ async def test_post_terminals_forwards_provider_and_provider_model():
         raise RuntimeError("stop early")  # abort before spawn/sleep
 
     with patch("server.pty_manager.create_terminal", side_effect=fake_create_terminal):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
             res = await client.post("/api/terminals", json={
                 "name": "t",
                 "workdir": "C:\\Code",
@@ -294,7 +294,7 @@ async def test_post_terminals_defaults_provider_to_anthropic():
         raise RuntimeError("stop early")
 
     with patch("server.pty_manager.create_terminal", side_effect=fake_create_terminal):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
             res = await client.post("/api/terminals", json={
                 "name": "t",
                 "workdir": "C:\\Code",
@@ -327,7 +327,7 @@ async def test_post_terminals_missing_key_returns_500_with_error_string():
             "OpenRouter key not configured — add one via the key icon in the top bar or set OPENROUTER_API_KEY"
         ),
     ):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
             res = await client.post("/api/terminals", json={
                 "name": "t",
                 "workdir": "C:\\Code",
@@ -370,7 +370,7 @@ async def test_post_terminals_success_echoes_provider_and_model():
     with patch("server.pty_manager.create_terminal", return_value=fake_session), \
          patch("asyncio.sleep", new=AsyncMock()), \
          patch("server.asyncio.create_task", side_effect=_swallow_create_task):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as client:
             res = await client.post("/api/terminals", json={
                 "name": "t",
                 "workdir": "C:\\Code",

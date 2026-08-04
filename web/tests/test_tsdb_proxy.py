@@ -22,7 +22,7 @@ from server import app
 
 @pytest.fixture
 def client():
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420")
 
 
 @pytest.mark.asyncio
@@ -90,7 +90,7 @@ async def test_query_range_prometheus_down(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_status_reachable(monkeypatch):
     monkeypatch.setattr(server_module, "_http_get_text", lambda url, timeout=None: "Prometheus Server is Ready.")
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as c:
         resp = await c.get("/api/tsdb/status")
     assert resp.json() == {"reachable": True}
 
@@ -100,6 +100,6 @@ async def test_status_down(monkeypatch):
     def _down(url, timeout=None):
         raise OSError("refused")
     monkeypatch.setattr(server_module, "_http_get_text", _down)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420") as c:
         resp = await c.get("/api/tsdb/status")
     assert resp.json() == {"reachable": False}

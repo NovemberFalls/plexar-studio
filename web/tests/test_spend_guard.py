@@ -635,7 +635,7 @@ def test_check_start_allows_on_unexpected_failure(monkeypatch):
 
 @pytest.fixture()
 def client():
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1:8420")
 
 
 _BLOCKING_PAYLOAD = {

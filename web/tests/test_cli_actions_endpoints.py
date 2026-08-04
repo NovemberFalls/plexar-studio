@@ -42,7 +42,7 @@ import bridge_manager  # _SUBMIT: injection is paste-then-submit, two writes
 @pytest.fixture()
 def client():
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test")
+    return AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
 
 
 def _make_pty_mock(alive=True):
