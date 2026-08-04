@@ -127,13 +127,16 @@ async def test_providers_managed_flag_true_when_managed(client, vllm_ownership):
 
 
 @pytest.mark.asyncio
-async def test_providers_managed_flag_matches_status_for_broker(client):
-    """The broker provider's `managed` must be the SAME determination
-    /api/local/status reports -- never a second guess that can disagree."""
+async def test_lmstudio_is_never_managed(client):
+    """T11: the lane broker was the only thing Studio ever owned at LM
+    Studio's address, and it is gone. LM Studio itself has always been
+    somebody else's process -- Studio cannot start or restart it -- so
+    `managed: False` is the truth here, not a missing feature. vLLM is now
+    the ONLY kind that can report True."""
     async with client as c:
         providers = (await c.get("/api/local/providers")).json()["providers"]
     lms = [p for p in providers if p["id"] == "lmstudio-local"][0]
-    assert lms["managed"] is server_module._broker_is_managed()
+    assert lms["managed"] is False
 
 
 @pytest.mark.asyncio

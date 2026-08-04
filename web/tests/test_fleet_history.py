@@ -43,7 +43,12 @@ def test_fleet_record_flattens_snapshot():
         {"id": "vllm-local", "kind": "vllm"}, _snap(12, 90.0, waiting=7, ttft_p95_ms=900), ts=1000)
     assert rec["ts"] == 1000 and rec["provider"] == "vllm-local"
     assert rec["runs"] == 12 and rec["tps"] == 90.0
-    assert rec["waiting"] == 7 and rec["queue_depth"] == 7   # falls back to engine waiting
+    # T11: `queue_depth` is GONE from the record. Its only surviving source
+    # was the engine's own `waiting` counter, which is already its own key --
+    # keeping both charted the same series under two names, one of which
+    # promised a lane queue that no longer exists.
+    assert rec["waiting"] == 7
+    assert "queue_depth" not in rec
     assert rec["ttft_p95"] == 0.9                            # 900ms -> 0.9s
 
 

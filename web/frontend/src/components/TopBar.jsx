@@ -56,7 +56,6 @@ export default function TopBar({
   onToast,
   localEnabled,
   setLocalEnabled,
-  localQueue,
   localMetrics,
   localStatus,
   onOpenLocalBroker,
@@ -130,7 +129,7 @@ export default function TopBar({
     setLocalOpen(false);
   }
 
-  const live = laneLive(localQueue, localMetrics);
+  const live = laneLive(localMetrics);
   const liveEta = live ? fmtEta(live.etaSec) : null;
 
   return (

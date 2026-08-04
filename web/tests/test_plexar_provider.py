@@ -176,8 +176,15 @@ async def test_brokerless_provider_is_not_queue_probed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_broker_fronted_provider_still_requires_its_broker(monkeypatch):
-    """The fix must not make the broker optional where it IS in the path."""
+async def test_no_provider_is_broker_fronted_any_more(monkeypatch):
+    """T11 INVERTS THIS TEST, and the inversion is the point.
+
+    It used to assert that LM Studio's health went NOT-OK when the lane
+    broker was down, because the broker was genuinely in its request path.
+    The broker is removed and LM Studio is reached directly, so a health
+    result must now depend on LM Studio alone. `_broker_get` is left raising
+    to prove health no longer consults it at all -- if anything still
+    broker-probed, this would go not-ok and the test would fail."""
     monkeypatch.setattr(
         server, "_broker_get",
         lambda path, qs="", base=None: (_ for _ in ()).throw(RuntimeError("down")),
@@ -190,8 +197,8 @@ async def test_broker_fronted_provider_still_requires_its_broker(monkeypatch):
     import json as _json
     body = _json.loads(resp.body)
 
-    assert body["broker"] == {"applicable": True, "reachable": False}
-    assert body["ok"] is False, "LM Studio is served THROUGH the broker; down broker means not ok"
+    assert body["broker"] == {"applicable": False, "reachable": None}
+    assert body["ok"] is True, "LM Studio is reached DIRECTLY; there is no broker to be down"
 
 
 @pytest.mark.asyncio

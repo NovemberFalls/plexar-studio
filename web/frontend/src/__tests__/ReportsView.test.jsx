@@ -163,7 +163,7 @@ const ready = () => waitFor(() => expect(screen.getByTestId("kpi-row")).toBeInTh
 // ── tabs ──────────────────────────────────────────────────
 
 describe("ReportsView — tabs", () => {
-  it("lists exactly the seven tabs, in order, after the S26 consolidation", async () => {
+  it("lists exactly the six tabs, in order, after Traces went with the broker", async () => {
     render(<ReportsView />);
     await ready();
     expect(REPORTS_TABS.map((t) => t.label)).toEqual([
@@ -171,7 +171,6 @@ describe("ReportsView — tabs", () => {
       "Sessions",
       "Models",
       "Tools",
-      "Traces",
       "Logs",
       "Local engine",
     ]);
@@ -197,14 +196,13 @@ describe("ReportsView — tabs", () => {
     expect(screen.getByTestId("tools-breakdown")).toBeInTheDocument();
     expect(screen.queryByTestId("not-built-tools")).not.toBeInTheDocument();
 
-    // Traces and Logs are BUILT now — S26 moved both here from Engine.
-    fireEvent.click(screen.getByLabelText("Traces report"));
-    /* S26 (2026-08-03): Traces is no longer a stub. The real renderer moved here
-       from Engine ▸ Requests, so the assertion changed from "names a destination
-       that exists" to "renders the panel AND still admits the recorder is off".
-       That second half is owned by ReportsView.consolidation.test.jsx, which
-       replaced ReportsView.tracesPointer.test.jsx. */
-    await waitFor(() => expect(screen.queryByTestId("not-built-traces")).not.toBeInTheDocument());
+    /* THE TRACES TAB IS GONE (T11, 2026-08-04). S26 had moved a real renderer
+       here from Engine ▸ Requests, but its only producer was the lane broker's
+       /traces index over the broker's own jobs.jsonl. With the broker removed
+       there is no recorder and no renderer -- so the tab is deleted rather
+       than left as a permanently empty panel explaining itself. Asserted as an
+       absence so nothing quietly re-adds a tab with no producer. */
+    expect(screen.queryByLabelText("Traces report")).not.toBeInTheDocument();
 
     /* S26-LOGS: this tab renders the REAL /api/logs tail now. The mock fetch here
        serves the usage report only, so /api/logs 404s and the tab must say

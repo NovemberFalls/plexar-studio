@@ -1,15 +1,17 @@
 """Tests for the Phase-A routing/reporting proxy + API-side endpoints.
 
 Covers:
-  1. GET /api/local/{provider}/metrics/timeseries proxies broker JSON verbatim
-     (new fields pass through unchanged -- no shape validation to strip them).
   3. GET /api/local/{provider}/metrics passthrough of new (ttft_ms etc.) fields.
   4. GET /api/usage/summary sources usage_tracker.summary(window) and validates
      the window param.
   5. GET /api/pricing/models reads pricing_models.json, falls back to the
      inline default (still 200) when missing/unreadable.
 
-The broker itself is never contacted -- server._broker_get is monkeypatched,
+NOTE (T11): the /metrics/timeseries tests are DELETED, not skipped. That route
+was the LANE BROKER's recomputable-bucket endpoint and the broker is removed
+entirely; LM Studio serves no such shape, so there is nothing left to proxy.
+
+The provider itself is never contacted -- server._broker_get is monkeypatched,
 matching web/tests/test_local_broker.py's style. usage_tracker.summary is
 monkeypatched directly on the singleton instance.
 """
@@ -38,64 +40,8 @@ def client():
 
 
 @pytest.mark.asyncio
-async def test_timeseries_proxies_broker_json(client, monkeypatch):
-    payload = {
-        "buckets": [
-            {"ts": "2026-07-24T00:00:00Z", "by_provider": {
-                "lmstudio-local": {"runs": 3, "tokens": 900, "decode_tps_p50": 42.0,
-                                    "ttft_ms_p50": 210, "queue_wait_ms_p50": 15, "errors": 0}
-            }}
-        ]
-    }
-    seen = {}
-
-    def fake_get(path, query="", base_url=None):
-        seen["path"] = path
-        seen["query"] = query
-        return payload
-
-    monkeypatch.setattr(server_module, "_broker_get", fake_get)
-    res = await client.get("/api/local/lmstudio-local/metrics/timeseries?window=24h&bucket=1h")
-    assert res.status_code == 200
-    assert res.json() == payload
-    assert seen["path"] == "/metrics/timeseries"
-    assert seen["query"] == "window=24h&bucket=1h"
-
-
-@pytest.mark.asyncio
-async def test_timeseries_invalid_window_400_not_forwarded(client, monkeypatch):
-    called = {"n": 0}
-
-    def fake_get(path, query="", base_url=None):
-        called["n"] += 1
-        return {}
-
-    monkeypatch.setattr(server_module, "_broker_get", fake_get)
-    res = await client.get("/api/local/lmstudio-local/metrics/timeseries?window=bogus")
-    assert res.status_code == 400
-    assert called["n"] == 0
-
-
-@pytest.mark.asyncio
-async def test_timeseries_unknown_provider_404(client, monkeypatch):
-    res = await client.get("/api/local/nope/metrics/timeseries")
-    assert res.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_timeseries_offline_returns_503(client, monkeypatch):
-    def fake_get(path, query="", base_url=None):
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(server_module, "_broker_get", fake_get)
-    res = await client.get("/api/local/lmstudio-local/metrics/timeseries")
-    assert res.status_code == 503
-    assert res.json() == {"reachable": False}
-
-
-@pytest.mark.asyncio
 async def test_metrics_passthrough_of_new_fields(client, monkeypatch):
-    """/metrics already proxies verbatim -- new broker fields (ttft_ms,
+    """/metrics already proxies verbatim -- new fields (ttft_ms,
     queue_wait_ms, errors_total, by_model, by_provider) must pass through
     unchanged, with no shape-stripping code path added for them."""
     payload = {
@@ -109,11 +55,8 @@ async def test_metrics_passthrough_of_new_fields(client, monkeypatch):
         "by_provider": [{"id": "gpu-main", "runs_total": 12, "spilled_out": 0}],
     }
 
-    def fake_get(path, query="", base_url=None):
-        return payload
-
-    monkeypatch.setattr(server_module, "_broker_get", fake_get)
-    res = await client.get("/api/local/lmstudio-local/metrics?window=lifetime")
+    monkeypatch.setattr(server_module, "_vllm_metrics_persisted", lambda base, window: payload)
+    res = await client.get("/api/local/vllm-local/metrics?window=lifetime")
     assert res.status_code == 200
     assert res.json() == payload
 

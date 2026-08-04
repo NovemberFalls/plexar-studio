@@ -293,9 +293,8 @@ export default function App() {
   const [localEnabled, setLocalEnabled] = useState(() => {
     try { return localStorage.getItem("cockpit-local-enabled") === "true"; } catch (_) { return false; }
   });
-  const [localQueue, setLocalQueue] = useState(null);   // GET /api/local/queue, or null/offline
   const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
-  const [localStatus, setLocalStatus] = useState(null); // GET /api/local/status — what's actually connected
+  const [localStatus, setLocalStatus] = useState(null); // GET /api/local/{id}/health — is the provider reachable
   const [metricsWindow] = useState("lifetime"); // lifetime | 24h | session (legacy TopBar quick-glance poller)
   // Provider registry (ProviderPicker owns the fetch + localStorage selection;
   // this mirrors the full selected provider object back up so App can gate
@@ -1001,10 +1000,23 @@ export default function App() {
     try { localStorage.setItem("cockpit-local-enabled", String(localEnabled)); } catch (_) { /* ignore */ }
   }, [localEnabled]);
 
-  // Poll the local broker's status (unaffected by provider selection — a
-  // machine-global compatibility probe) every 3s while enabled.
+  // Poll the SELECTED provider's health every 3s while enabled.
+  //
+  // This replaced a machine-global `GET /api/local/status` poll when the lane
+  // broker was removed (T11). That route fingerprinted whatever was listening
+  // at the BROKER's address, so the indicator it fed was really reporting the
+  // broker's liveness -- not the engine's. With no broker there is no such
+  // address to probe, and `/health` is the surviving route that answers
+  // exactly "is this provider reachable". The signal is therefore now
+  // PER-PROVIDER rather than machine-global, which is the more truthful shape
+  // anyway: the dot sits next to a provider you chose.
   useEffect(() => {
-    if (!backendReady || !localEnabled) {
+    if (!backendReady || !localEnabled || !selectedProvider) {
+      setLocalStatus(null);
+      return;
+    }
+    const providerId = selectedProvider.id;
+    if (!(selectedProvider.capabilities || []).includes("health")) {
       setLocalStatus(null);
       return;
     }
@@ -1012,7 +1024,7 @@ export default function App() {
     const { signal } = controller;
     const fetchStatus = async () => {
       try {
-        const res = await fetch("/api/local/status", { signal });
+        const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/health`, { signal });
         if (res.ok) setLocalStatus(await res.json());
       } catch (_) {
         // swallow — best-effort
@@ -1024,16 +1036,17 @@ export default function App() {
       clearInterval(id);
       controller.abort();
     };
-  }, [backendReady, localEnabled]);
+  }, [backendReady, localEnabled, selectedProvider]);
 
-  // Poll the selected provider's queue (3s) and metrics (10s) — gated so a
-  // disabled feature or unselected provider costs nothing. Best-effort:
-  // errors/offline are swallowed and surfaced as a null (offline) state the
-  // panels render as "broker offline". Each fetch is additionally gated on
-  // the provider actually listing that capability.
+  // Poll the selected provider's metrics (10s) — gated so a disabled feature
+  // or unselected provider costs nothing. Best-effort: errors/offline are
+  // swallowed and surfaced as a null (offline) state. Gated on the provider
+  // actually listing the capability.
+  //
+  // THE 3s QUEUE POLL IS GONE (T11). `/api/local/{id}/queue` was the lane
+  // broker's snapshot and no provider serves that shape any more.
   useEffect(() => {
     if (!backendReady || !localEnabled || !selectedProvider) {
-      setLocalQueue(null);
       setLocalMetrics(null);
       return;
     }
@@ -1041,16 +1054,6 @@ export default function App() {
     const caps = selectedProvider.capabilities || [];
     const controller = new AbortController();
     const { signal } = controller;
-
-    const fetchQueue = async () => {
-      if (!caps.includes("queue")) { setLocalQueue(null); return; }
-      try {
-        const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/queue`, { signal });
-        setLocalQueue(res.ok ? await res.json() : { reachable: false });
-      } catch (_) {
-        // swallow — best-effort; leave prior state
-      }
-    };
 
     const fetchMetrics = async () => {
       if (caps.includes("metrics")) {
@@ -1065,12 +1068,9 @@ export default function App() {
       }
     };
 
-    fetchQueue();
     fetchMetrics();
-    const queueId = setInterval(fetchQueue, 3000);
     const slowId = setInterval(fetchMetrics, 10000);
     return () => {
-      clearInterval(queueId);
       clearInterval(slowId);
       controller.abort();
     };
@@ -1589,14 +1589,11 @@ export default function App() {
   // Lane readout, from the shared math (utils/laneMath.js) so the strip, the
   // TopBar pill and Engine > Live cannot disagree.
   // The mapping itself lives in utils/laneMath.js as `laneStripFrom` so it can
-  // be tested. It used to be inline here, and the R26 re-audit of S10 found it
-  // was the one untested link between two proven halves: a real broker proves
-  // the `shadow` flag means something, and LaneStrip's suite proves the UI
-  // tells the truth about a lane object -- but nothing carried the flag from
-  // one to the other. See laneMath.js::laneStripFrom for the full note.
+  // be tested -- it used to be inline here and was the one untested link
+  // between two proven halves (R26). See laneMath.js::laneStripFrom.
   const laneStripData = useMemo(
-    () => laneStripFrom(localQueue, localMetrics),
-    [localQueue, localMetrics]
+    () => laneStripFrom(localMetrics),
+    [localMetrics]
   );
 
   /** Engine rail dot: down when something is configured but unreachable, else
@@ -1609,14 +1606,17 @@ export default function App() {
    *  on. Two honest states beat three with one made up. */
   const engineStatus = useMemo(() => {
     if (!localEnabled) return null;
-    // Field names pinned to GET /api/local/status, which returns
-    // {reachable, compatible, service, detail, url, managed} — there is NO `ok`
-    // key here (that belongs to /api/local/{id}/health). Reading `ok` made the
-    // "down" branch dead code, so killing LM Studio still painted a green
-    // "serving" dot — the one thing this indicator exists to rule out.
-    // `compatible: false` is also down for our purposes: something is answering,
-    // but not the broker contract, so it cannot serve us.
-    if (localStatus && (localStatus.reachable === false || localStatus.compatible === false)) return "down";
+    // Field names pinned to GET /api/local/{id}/health, which returns
+    // {broker, provider:{reachable, models_loaded}, ok}. `ok` is now exactly
+    // "the provider answered", because nothing is broker-probed any more.
+    //
+    // THIS USED TO READ /api/local/status's {reachable, compatible} (T11).
+    // Those described the LANE BROKER's address, and the historic bug worth
+    // remembering is the mirror of this one: reading `ok` back when the route
+    // did not have it made the "down" branch dead code, so killing the
+    // backend still painted a green dot. The field set and the route must
+    // move together -- which is why this comment names the route.
+    if (localStatus && localStatus.ok === false) return "down";
     return "serving";
   }, [localEnabled, localStatus]);
 
@@ -1885,7 +1885,6 @@ export default function App() {
                 localEnabled={localEnabled}
                 setLocalEnabled={setLocalEnabled}
                 localLaunchEnabled={localEnabled}
-                localQueue={localQueue}
                 localMetrics={localMetrics}
                 localStatus={localStatus}
                 onOpenLocalBroker={() => setActiveSection("engine")}
@@ -2358,12 +2357,11 @@ export default function App() {
 
           <StatusStrip
             connected={sessions.some((s) => s.status === "running")}
-            brokerLabel={localStatus?.reachable ? (localStatus.service || "Broker") : "no engine"}
+            brokerLabel={localStatus?.ok ? (selectedProvider?.label || "engine") : "no engine"}
             /* The Claude CLI version is not reported by any endpoint yet —
                resolving the CLI binary + detected version is Settings > Claude
                CLI (backlog 03, Phase 4). Passing null so the strip honestly
-               renders "—" rather than reading a field that does not exist on
-               /api/local/status. */
+               renders "—" rather than reading a field that does not exist. */
             cliVersion={null}
             appVersion={APP_VERSION}
             systemStats={stripSystemStats}

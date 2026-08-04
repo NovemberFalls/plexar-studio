@@ -23,7 +23,7 @@
  * Props:
  *   active            — Engine is the visible section; false tears down polling
  *   provider          — selected provider {id,label,kind,scope,capabilities}
- *   status            — GET /api/local/status (identity fingerprint), or null
+ *   health            — GET /api/local/{id}/health, or null
  *   tab / onSelectTab — optional controlled tab; falls back to internal state
  *   onNavigate(section, subsection) — REQUIRED for the two hand-off links to
  *     work. Without it they render disabled with a title saying so: a dead-end
@@ -78,12 +78,13 @@ function useEngineData(providerId, capabilities, active, fastTab) {
     const ask = (cap, path) => (caps.has(cap) ? safeGet(`/api/local/${id}${path}`) : Promise.resolve(undefined));
 
     const fast = async () => {
-      const [queue, metrics] = await Promise.all([
-        ask("queue", "/queue"),
+      // `/queue` is NOT asked any more (T11): it was the lane broker's
+      // snapshot and no provider serves that shape.
+      const [metrics] = await Promise.all([
         ask("metrics", "/metrics?window=session"),
       ]);
       if (cancelled) return;
-      setData((prev) => ({ ...prev, queue, metrics }));
+      setData((prev) => ({ ...prev, metrics }));
       // Only accumulate the sparkline while Live is on screen — a hidden chart
       // does not need a 60s buffer, and sampling it would imply a continuity
       // the samples do not have.
@@ -101,12 +102,13 @@ function useEngineData(providerId, capabilities, active, fastTab) {
     // same read for the model-load busy marker — two owners meant two identical
     // requests every 10s whenever Engine was open.
     const slow = async () => {
-      const [traces, health] = await Promise.all([
-        ask("traces", "/traces?limit=20"),
+      // `/traces` went with the broker too -- it indexed the broker's own
+      // jobs.jsonl, which no longer exists.
+      const [health] = await Promise.all([
         ask("health", "/health"),
       ]);
       if (cancelled) return;
-      setData((prev) => ({ ...prev, traces, health }));
+      setData((prev) => ({ ...prev, health }));
     };
 
     fast();
@@ -224,9 +226,8 @@ export default function EngineView({
     if (data.health) return data.health.provider?.reachable ? "serving" : "down";
     if (data.health === null) return "down";
     if (data.models !== undefined) return data.models?.reachable === true ? "serving" : "down";
-    if (data.queue !== undefined) return data.queue ? "serving" : "down";
     return "checking";
-  }, [localEnabled, data.health, data.models, data.queue]);
+  }, [localEnabled, data.health, data.models]);
 
   const servingToken =
     serving === "serving"
@@ -279,7 +280,7 @@ export default function EngineView({
         }}
       >
         <span style={{ fontSize: 13, fontWeight: 800, color: "var(--cc-fg)", flexShrink: 0 }}>Engine</span>
-        <Pill token={servingToken} testId="engine-serving-pill" title={status?.detail || undefined}>
+        <Pill token={servingToken} testId="engine-serving-pill" title={status?.ok === false ? "The provider did not answer" : undefined}>
           {servingLabel}
         </Pill>
         {provider?.label && (

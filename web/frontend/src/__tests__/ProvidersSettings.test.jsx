@@ -23,7 +23,7 @@ const PROVIDERS = {
       scope: "local",
       // Deliberately the full broker vocabulary MINUS "traces" so the dim path
       // is exercised on a card that otherwise looks fully capable.
-      capabilities: ["models", "health", "queue", "metrics"],
+      capabilities: ["models", "health"],
     },
     {
       id: "vllm-local",
@@ -74,7 +74,6 @@ function installFetch(overrides = {}) {
   const impl = vi.fn(async (url, init) => {
     const u = String(url);
     if (u === "/api/local/providers") return jsonOk(overrides.providers ?? PROVIDERS);
-    if (u === "/api/local/status") return jsonOk(overrides.status ?? STATUS);
     if (u === "/api/local/vllm/ownership") {
       // null override = the route is unreachable (best-effort surface).
       return "ownership" in overrides
@@ -121,7 +120,7 @@ describe("ProvidersSettings", () => {
     render(<ProvidersSettings {...shell} />);
 
     // Wait for the mount probes to settle so no act() warning leaks.
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     for (const id of [
       "card-lmstudio",
@@ -140,7 +139,7 @@ describe("ProvidersSettings", () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
 
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url-unknown")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
     expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument();
     expect(screen.getByTestId("card-vllm")).toBeInTheDocument();
     expect(screen.getByTestId("card-ollama")).toBeInTheDocument();
@@ -151,7 +150,7 @@ describe("ProvidersSettings", () => {
   it("routes a base-URL edit through setField with the exact dotted path", async () => {
     const shell = makeShell({ draft: { "providers.lmstudio.base_url": "http://127.0.0.1:1234" } });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     fireEvent.change(screen.getByTestId("field-providers.lmstudio.base_url"), {
       target: { value: "http://127.0.0.1:9999" },
@@ -181,7 +180,7 @@ describe("ProvidersSettings", () => {
       dirtyPaths: [path],
     });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     // jsdom's cssstyle drops var() out of the typed properties, so the inline
     // style attribute is the honest place to assert the token landed.
@@ -203,25 +202,24 @@ describe("ProvidersSettings", () => {
   it("dims capability chips for capabilities a backend does not declare", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
-    // LM Studio declares queue but not traces; vLLM declares neither.
+    // T11: `queue` and `traces` are no longer capabilities at all, so the
+    // chip set is what a backend can really promise. LM Studio declares
+    // models+health but not metrics; vLLM declares metrics.
     const lmCard = screen.getByTestId("card-lmstudio");
     const vllmCard = screen.getByTestId("card-vllm");
 
-    const lmQueue = lmCard.querySelector('[data-testid="cap-queue"]');
-    const lmTraces = lmCard.querySelector('[data-testid="cap-traces"]');
-    const vllmQueue = vllmCard.querySelector('[data-testid="cap-queue"]');
+    const lmModels = lmCard.querySelector('[data-testid="cap-models"]');
+    const lmMetrics = lmCard.querySelector('[data-testid="cap-metrics"]');
     const vllmModels = vllmCard.querySelector('[data-testid="cap-models"]');
 
-    expect(lmQueue).toHaveAttribute("data-present", "true");
-    expect(lmQueue.style.opacity).toBe("1");
+    expect(lmModels).toHaveAttribute("data-present", "true");
+    expect(lmModels.style.opacity).toBe("1");
 
     // Absent capabilities are shown-but-dimmed, never hidden.
-    expect(lmTraces).toHaveAttribute("data-present", "false");
-    expect(lmTraces.style.opacity).toBe("0.5");
-    expect(vllmQueue).toHaveAttribute("data-present", "false");
-    expect(vllmQueue.style.opacity).toBe("0.5");
+    expect(lmMetrics).toHaveAttribute("data-present", "false");
+    expect(lmMetrics.style.opacity).toBe("0.5");
     expect(vllmModels).toHaveAttribute("data-present", "true");
   });
 
@@ -269,7 +267,7 @@ describe("ProvidersSettings", () => {
   it("keeps the inert controls inert (Browse, Start engine, overflow) with an explanatory title", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     const browse = screen.getByTestId("browse-providers.lmstudio.models_dir");
     expect(browse).toBeDisabled();
@@ -363,7 +361,7 @@ describe("ProvidersSettings", () => {
     const onBrowse = vi.fn();
     const shell = makeShell();
     render(<ProvidersSettings {...shell} onBrowse={onBrowse} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     // Repointed from claude_cli.binary_path to a SURVIVING Browse field when the
     // Claude CLI card was removed. The mechanism under test is Browse itself —
@@ -394,14 +392,14 @@ describe("ProvidersSettings", () => {
     // Checked before any waitFor — waitFor itself installs a polling interval.
     expect(intervalSpy).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
-    const afterMount = fetchMock.mock.calls.filter((c) => c[0] === "/api/local/status").length;
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
+    const afterMount = fetchMock.mock.calls.filter((c) => c[0] === "/api/local/providers").length;
     expect(afterMount).toBe(1);
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("test-lmstudio"));
     });
-    expect(fetchMock.mock.calls.filter((c) => c[0] === "/api/local/status").length).toBe(2);
+    expect(fetchMock.mock.calls.filter((c) => c[0] === "/api/local/providers").length).toBe(2);
   });
 });
 
@@ -429,7 +427,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("disables that card's Test and shows the qualifying note when its base URL is dirty", async () => {
     const shell = makeShell({ dirtyPaths: ["providers.lmstudio.base_url"] });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     const test = screen.getByTestId("test-lmstudio");
     expect(test).toBeDisabled();
@@ -456,7 +454,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("leaves clean sibling cards fully testable", async () => {
     const shell = makeShell({ dirtyPaths: ["providers.lmstudio.base_url"] });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     // Only the LM Studio card is gated.
     expect(screen.getByTestId("test-lmstudio")).toBeDisabled();
@@ -500,7 +498,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("says plainly which saved values the server does not enforce yet", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     // GPU utilisation persists but is still env-driven — a slider that saves
     // cleanly and changes nothing is a trap.
@@ -518,7 +516,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("explains why Default backend is LM Studio only", async () => {
     const shell = makeShell();
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     expect(screen.getByTestId("field-providers.lmstudio.default").getAttribute("title")).toMatch(
       /only backend/i
@@ -535,32 +533,6 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
    * probe is not evidence of the right service. A green pill here would tell the
    * user the lane broker is fine while something else holds the port.
    */
-  it("reads a reachable-but-wrong service as 'wrong service', never as online", async () => {
-    installFetch({
-      status: {
-        reachable: true,
-        compatible: false,
-        service: "lmstudio",
-        detail: "LM Studio is answering on the lane-broker port",
-        url: "http://127.0.0.1:1235",
-        managed: false,
-      },
-    });
-    const shell = makeShell();
-    render(<ProvidersSettings {...shell} />);
-
-    // THE PILL IS GONE WITH THE CARD; THE STATEMENT IS NOT. It moved into the
-    // LM Studio transport note, which is the only place left that names the
-    // address — so it is also the only place a wrong occupant of that address
-    // can be reported.
-    const note = await screen.findByTestId("broker-wrong-service");
-    expect(note).toHaveTextContent(/not.*transport/i);
-    expect(note).toHaveTextContent(/lmstudio/i);
-    // The failure mode this guards: a compatible:false probe still rendering
-    // the healthy "requests reach LM Studio through ..." sentence.
-    expect(screen.queryByTestId("broker-effective-url")).toBeNull();
-  });
-
   /**
    * Models-folder config, re-homed from the deleted LocalBrokerView
    * DirectProviderConnectionCard (LocalBrokerView.modelsFolder.test.jsx).
@@ -575,7 +547,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
   it("routes a models-folder edit through setField with the exact dotted path", async () => {
     const shell = makeShell({ draft: { "providers.lmstudio.models_dir": "~/.lmstudio/models" } });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     const field = screen.getByTestId("field-providers.lmstudio.models_dir");
     expect(field).toHaveValue("~/.lmstudio/models");
@@ -588,7 +560,7 @@ describe("ProvidersSettings — unsaved URL cannot be tested", () => {
     const fetchMock = installFetch();
     const shell = makeShell({ draft: { "providers.lmstudio.models_dir": "/models" } });
     render(<ProvidersSettings {...shell} />);
-    await waitFor(() => expect(screen.getByTestId("broker-effective-url")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("card-lmstudio")).toBeInTheDocument());
 
     fireEvent.change(screen.getByTestId("field-providers.lmstudio.models_dir"), {
       target: { value: "/mnt/models" },
@@ -654,7 +626,6 @@ function installDiscoveryFetch({
   const impl = vi.fn(async (url, init) => {
     const u = String(url);
     if (u === "/api/local/providers") return jsonOk(providers);
-    if (u === "/api/local/status") return jsonOk(STATUS);
     if (u.endsWith("/models-dir")) {
       if (init?.method === "PUT") {
         return putOk

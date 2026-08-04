@@ -8,35 +8,10 @@
  */
 import { describe, it, expect } from "vitest";
 import {
-  queueDepth,
   fmtEta,
   laneLive,
   predictedWaitSeconds,
 } from "../utils/laneMath";
-
-describe("queueDepth", () => {
-  it("returns null when unreachable — distinct from a real depth of 0", () => {
-    expect(queueDepth({ reachable: false, in_flight: null, queued: [] })).toBeNull();
-  });
-
-  it("returns null for null/undefined input", () => {
-    expect(queueDepth(null)).toBeNull();
-    expect(queueDepth(undefined)).toBeNull();
-  });
-
-  it("returns 0 when reachable, idle, and empty queue (a real, known zero)", () => {
-    expect(queueDepth({ in_flight: null, queued: [] })).toBe(0);
-  });
-
-  it("counts in_flight (0/1) plus queued length", () => {
-    expect(queueDepth({ in_flight: { id: "x" }, queued: [1, 2, 3] })).toBe(4);
-    expect(queueDepth({ in_flight: null, queued: [1, 2] })).toBe(2);
-  });
-
-  it("tolerates a non-array queued field", () => {
-    expect(queueDepth({ in_flight: { id: "x" }, queued: null })).toBe(1);
-  });
-});
 
 describe("fmtEta boundaries", () => {
   it("returns null for non-finite input", () => {
@@ -81,8 +56,8 @@ describe("fmtEta boundaries", () => {
 
 describe("laneLive", () => {
   it("returns null when there is no engine block and the broker queue is unreachable", () => {
-    expect(laneLive({ reachable: false }, null)).toBeNull();
-    expect(laneLive(null, null)).toBeNull();
+    expect(laneLive(null)).toBeNull();
+    expect(laneLive({ reachable: false })).toBeNull();
   });
 
   it("prefers the engine-block path when metrics carry an engine object", () => {
@@ -92,7 +67,7 @@ describe("laneLive", () => {
       run_time_ms: { p50: 2000 },
       decode_tokens_per_sec: { avg: 15 },
     };
-    const live = laneLive({ in_flight: null, queued: [] }, metrics);
+    const live = laneLive(metrics);
     expect(live).toEqual({
       running: 1,
       queued: 2,
@@ -105,33 +80,13 @@ describe("laneLive", () => {
 
   it("engine-block path tolerates missing p50 wall (etaSec null, not 0)", () => {
     const metrics = { reachable: true, engine: { running: 1, waiting: 0 } };
-    const live = laneLive(null, metrics);
+    const live = laneLive(metrics);
     expect(live.etaSec).toBeNull();
     expect(live.p50WallSeconds).toBeNull();
   });
 
-  it("falls back to the broker queue snapshot when metrics have no engine block", () => {
-    const q = { in_flight: { id: "x" }, queued: [1], estimated_clear_seconds: 12 };
-    const live = laneLive(q, { reachable: true, tokens_per_sec: { current: 9 } });
-    expect(live).toEqual({
-      running: 1,
-      queued: 1,
-      tps: 9,
-      etaSec: 12,
-      total: 2,
-      p50WallSeconds: null,
-    });
-  });
-
-  it("falls back to queue snapshot when metrics are unreachable/null, ignoring their fields", () => {
-    const q = { in_flight: null, queued: [] };
-    const live = laneLive(q, { reachable: false, engine: { running: 5 } });
-    expect(live.total).toBe(0);
-    expect(live.running).toBe(0);
-  });
-
   it("returns null when queue is unreachable and metrics have no usable engine block", () => {
-    expect(laneLive({ reachable: false }, { reachable: true })).toBeNull();
+    expect(laneLive({ reachable: true })).toBeNull();
   });
 });
 

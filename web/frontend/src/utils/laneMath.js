@@ -1,6 +1,7 @@
 /**
- * Lane math — the single implementation of every queue-depth <-> wait
- * conversion in the app.
+ * Lane math — the single implementation of the in-engine lane readout (how
+ * many sequences are running, how many the engine has waiting, and how long
+ * the lane should take to drain).
  *
  * WHY THIS FILE EXISTS: the same numbers are rendered in three places (the
  * Workspace lane strip, the TopBar quick-glance pill, and Engine > Live). Two
@@ -12,19 +13,11 @@
  * is no threshold left to be a fraction of the way towards, so nothing here
  * invents one. Depth and wait are now reported, never compared.
  *
- * Every function here is pure and total: polled broker data is best-effort and
+ * Every function here is pure and total: polled provider data is best-effort and
  * routinely arrives null, unreachable, or missing fields, so these return null
  * rather than throwing or fabricating a zero. A `null` means "unknown" and must
  * render as "—" / "n/a" upstream — never as 0, which would read as "no wait".
  */
-
-/** Queue depth = in-flight (0/1) + queued length. Field names pinned from
- * broker source (broker.py::_queue_state): in_flight (object|null), queued [].
- * Returns null when the broker is unreachable — distinct from a depth of 0. */
-export function queueDepth(q) {
-  if (!q || q.reachable === false) return null;
-  return (q.in_flight ? 1 : 0) + (Array.isArray(q.queued) ? q.queued.length : 0);
-}
 
 /** Short human duration: 45 -> "45s", 130 -> "2m", 3900 -> "1h5m".
  *  Returns null for non-finite or non-positive input. */
@@ -37,13 +30,20 @@ export function fmtEta(sec) {
 }
 
 /**
- * Unified live lane readout: prefers the vLLM in-engine block (running/waiting/
- * decode + wall to estimate drain) and falls back to the broker queue snapshot.
+ * Live lane readout from the vLLM in-engine block (running/waiting/decode +
+ * wall to estimate drain).
+ *
+ * THE BROKER-QUEUE FALLBACK IS GONE (T11). This used to take a `localQueue`
+ * first argument and, when no engine block was present, derive the readout
+ * from the lane broker's /queue snapshot. The broker is removed, so that
+ * branch had no producer. A backend with no engine block now returns null --
+ * "nothing live to report" -- rather than a zero, which is the same
+ * distinction the rest of this module exists to preserve.
  *
  * @returns {{running:number, queued:number, tps:number|null, etaSec:number|null,
  *   total:number, p50WallSeconds:number|null}|null} null when nothing is live.
  */
-export function laneLive(localQueue, localMetrics) {
+export function laneLive(localMetrics) {
   const m = localMetrics && localMetrics.reachable !== false ? localMetrics : null;
   const wallMs = m?.run_time_ms?.p50;
   const p50WallSeconds = typeof wallMs === "number" && wallMs > 0 ? wallMs / 1000 : null;
@@ -58,14 +58,7 @@ export function laneLive(localQueue, localMetrics) {
     return { running, queued, tps, etaSec, total: running + queued, p50WallSeconds };
   }
 
-  const d = queueDepth(localQueue);
-  if (d == null) return null;
-  const running = localQueue?.in_flight ? 1 : 0;
-  const queued = Array.isArray(localQueue?.queued) ? localQueue.queued.length : 0;
-  const tps = m?.tokens_per_sec?.current ?? null;
-  const etaSec =
-    typeof localQueue?.estimated_clear_seconds === "number" ? localQueue.estimated_clear_seconds : null;
-  return { running, queued, tps, etaSec, total: d, p50WallSeconds };
+  return null;
 }
 
 /**
@@ -83,51 +76,36 @@ export function predictedWaitSeconds(inFlight, aheadOfYou, p50WallSeconds) {
 }
 
 /**
- * THE SEAM: broker payload -> the object LaneStrip renders.
+ * THE SEAM: metrics payload -> the object LaneStrip renders.
  *
  * WHY THIS IS A NAMED, EXPORTED FUNCTION AND NOT AN INLINE `useMemo` (R26).
  * It used to be four lines inside App.jsx, and the R26 re-audit of row S10
- * found that both SIDES of it were proven and IT was not:
+ * found that both SIDES of it were proven and IT was not -- L3's shape exactly
+ * (a property proven directly, a store proven with hand-built dicts, and the
+ * mapping between them writing nothing). Extracting it makes the seam
+ * importable so the wiring test can drive it and render the result, with no
+ * hand-built lane object anywhere in the chain. That reasoning is unchanged
+ * and is why this stays a named export.
  *
- *   * `lane_broker/tests/test_shadow_default_is_inert.py` drives a REAL broker
- *     subprocess and proves the `shadow` flag corresponds to real queueing
- *     behaviour;
- *   * `LaneStrip.shadowState.test.jsx` proves the UI tells the truth about a
- *     lane object -- but it BUILT that object by hand;
- *   * and the one line carrying the flag from the payload into that object was
- *     exercised by neither.
- *
- * That is L3's shape exactly (a record property proven directly, a store proven
- * with hand-built dicts, and `to_row()` between them writing nothing). The
- * failure is silent and it wears a friendly face: if `shadow` is ever renamed,
- * dropped, or arrives as the STRING "true", `=== true` yields false and the
- * strip renders the LIVE METER over a shadow broker -- claiming an idle lane,
- * which is the first of the two opposite lies LaneStrip exists to refuse.
- *
- * Extracting it makes the seam importable, so `LaneStrip.wiring.test.jsx` can
- * drive it with a payload GENERATED FROM THE REAL BROKER and render the result,
- * with no hand-built lane object anywhere in the chain.
- *
- * FIELD NAME PINNED FROM PROVIDER SOURCE, not from an inventory (R25):
- * `broker.py::_queue_state` emits `{"shadow": b.shadow, ...}` as a real bool,
- * and `server.py` passes the body through untouched.
+ * `shadow` IS GONE (T11), and with it the specific silent failure this note
+ * used to describe (a renamed or stringified flag rendering the LIVE meter
+ * over a shadow broker). It reported whether the lane broker's queue was
+ * switched off; with no broker there is no queue to be on or off. The honest
+ * move is to stop making the claim, not to hard-code `false`, which would
+ * assert "queueing exists and is enabled".
  *
  * @returns {{inFlight:number, queued:number, predictedWaitSeconds:number|null,
  *   estimatedClearSeconds:number|null,
- *   shadow:boolean}|null} null when nothing is live.
+ *    }|null} null when nothing is live.
  */
-export function laneStripFrom(localQueue, localMetrics) {
-  const live = laneLive(localQueue, localMetrics);
+export function laneStripFrom(localMetrics) {
+  const live = laneLive(localMetrics);
   if (!live) return null;
   return {
     inFlight: live.running,
     queued: live.queued,
     predictedWaitSeconds: predictedWaitSeconds(live.running, live.queued, live.p50WallSeconds),
     estimatedClearSeconds: live.etaSec,
-    // Read the field. Do not restate the condition as prose, and do not infer
-    // it from a depth of zero -- that is also what a genuinely idle queue looks
-    // like, which is the collapse S10 closed.
-    shadow: localQueue?.shadow === true,
   };
 }
 
@@ -142,7 +120,6 @@ export const LANE_STRIP_KEYS = Object.freeze([
   "queued",
   "predictedWaitSeconds",
   "estimatedClearSeconds",
-  "shadow",
 ]);
 
 /** Non-negative integer count, or null. Rejects NaN/Infinity/negatives so a

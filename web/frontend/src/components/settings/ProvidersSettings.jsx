@@ -9,7 +9,6 @@
  * Live data is read-only, best-effort, and fetched ONCE on mount (plus on an
  * explicit "Test" click) — never on an interval:
  *   GET /api/local/providers        → capability chips + which backends exist
- *   GET /api/local/status           → lane-broker identity fingerprint + managed
  *   GET /api/local/{id}/health      → per-backend reachability pill
  *   GET /api/local/vllm/ownership   → who owns vLLM, and whether a saved
  *                                     "Managed by Plexar Studio" is waiting on a restart
@@ -108,7 +107,7 @@ const FIELD_GRID = {
 // both were missing here, which hid the very capability the vLLM models-folder
 // section is gated on.
 const ALL_CAPABILITIES = [
-  "models", "model-control", "model-discovery", "health", "queue", "metrics", "traces",
+  "models", "model-control", "model-discovery", "health", "metrics",
 ];
 
 /** Plexar Studio's expected Claude CLI binary name — anything else earns a warning callout. */
@@ -1106,141 +1105,42 @@ function OpenRouterCard({ get, setField, isDirty }) {
 
 // ── page ──────────────────────────────────────────────────
 
-/**
- * The LM Studio transport — NOT a card, and that is the whole point of it.
+/* THE LM STUDIO TRANSPORT NOTE IS GONE (T11, 2026-08-04), AND THE T9 TANGLE
+ * DISSOLVED WITH IT RATHER THAN BEING UNPICKED.
  *
- * T9 / 2026-08-04. The page used to draw a top-level `Lane broker` card and a
- * `Queueing` card beside it, as PEERS of the five provider cards. The owner
- * read that layout and said so, verbatim: *"if lane broker is unique to
- * lmstudio then its not doing the right job, and I would remove it or merge it
- * into the lmstudio card."* He is structurally right. The broker is Studio's
- * own in-process transport in front of ONE backend -- `lmstudio_proxy.py`
- * POSTs every LM Studio session's `/v1/messages` at its address and nothing
- * else ever calls it -- so it is a PROPERTY of LM Studio, not a sibling of it.
- * A rename would have made the label honest and left the misdescription
- * standing; the position was the defect.
+ * T9 kept this note inside the LM Studio card because it carried two facts the
+ * deleted `Lane broker` / `Queueing` cards had been the only home for: WHERE
+ * the traffic actually went, and WHETHER requests were queued. Both were read
+ * off the wire (`/api/local/status` -> url/managed/compatible, `/queue` ->
+ * shadow) rather than restated as prose, and S10's three-never-collapsed
+ * states applied to the second.
  *
- * So this renders INSIDE the LM Studio card, and it is a note rather than a
- * card because nothing here is configurable. The three controls the old card
- * offered (base URL, autostart, concurrency) were ALL declared not-enforced
- * against their own values -- the server reads the environment for the first
- * two and nothing at all reads the third -- so deleting the card removed three
- * controls that could not move anything, and zero that could.
+ * Len then ruled the queue out entirely: *"we need to remove the queue
+ * system... lmstudio is the only reason its there and thats bad design."*
+ * Both facts are now answered by their own absence:
  *
- * TWO THINGS ARE STILL WORTH STATING TO A HUMAN, AND BOTH ARE READ FROM THE
- * WIRE RATHER THAN RESTATED AS PROSE:
+ *   * WHERE — there is no intermediary. LM Studio's address is the address,
+ *     and the card already shows it via the provider's `endpoint_hint`. The
+ *     "the address in use and the address in settings may disagree" hazard
+ *     was a property of the broker having a SECOND address; with one address
+ *     there is nothing left to disagree.
+ *   * WHETHER IT QUEUES — nothing queues. S10's ruling was that hiding the
+ *     queueing state is its own lie, because absence reads as "this build has
+ *     no queueing" rather than "queueing exists and is off". THAT IS NOW THE
+ *     TRUE STATEMENT: this build has no queueing. The surface is not hiding a
+ *     switch; the switch does not exist.
  *
- *   1. WHERE the traffic actually goes (`GET /api/local/status` -> `url`,
- *      `managed`), because the address in use and the address in the settings
- *      file were demonstrably allowed to disagree.
- *   2. WHETHER requests are queued (`GET /queue` -> `shadow`). S10's ruling
- *      survives the card's deletion intact: hiding this is its own lie, since
- *      absence reads as "this build has no queueing" and that is a DIFFERENT
- *      claim from "queueing exists and is switched off". Three states, never
- *      collapsed -- and never inferred from a depth of zero, because a healthy
- *      idle queueing broker reports 0/0 too.
+ * Service identity went too, and it is worth being explicit that this was NOT
+ * an oversight. The `/api/local/status` fingerprint existed because LM Studio
+ * answers unknown paths "200 anyway", so reaching the BROKER's port proved
+ * nothing about what held it. With the broker gone Studio talks to LM Studio's
+ * own port and the models call either returns LM Studio's catalogue or it does
+ * not -- the health/models routes are the check, and a dedicated fingerprint
+ * of a port nobody binds is a question about a component that no longer exists.
  */
-function LmStudioTransport({ provider, status, loading }) {
-  const [queue, setQueue] = useState(undefined); // undefined = not asked yet
-
-  // No synchronous setState in the effect body (react-hooks/set-state-in-effect,
-  // the same rule the page's own probe() obeys): the no-provider case is handled
-  // inside the async body, after the first await.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!provider) {
-        if (!cancelled) setQueue(undefined);
-        return;
-      }
-      const data = await safeGet(`/api/local/${encodeURIComponent(provider.id)}/queue`);
-      if (!cancelled) setQueue(data ?? null);
-    })();
-    return () => { cancelled = true; };
-  }, [provider]);
-
-  // Three states, never collapsed: shadow (queueing off), queueing on, and
-  // unknown (nothing answered). A `.get()` on an absent field yields undefined,
-  // which must not read as "queueing is on".
-  const shadow = queue && queue.reachable !== false ? queue.shadow : undefined;
-
-  return (
-    <div
-      data-testid="lmstudio-transport"
-      role="note"
-      style={{
-        fontSize: 11,
-        lineHeight: 1.6,
-        color: "var(--cc-muted)",
-        borderTop: "1px solid var(--cc-line)",
-        marginTop: 10,
-        paddingTop: 8,
-      }}
-    >
-      {/* WHERE. `status.url` is the address the transport actually binds; the
-          settings field that used to sit beside it was never read, so showing
-          the real one is the only honest half of that pair that survived.
-
-          SERVICE IDENTITY IS CARRIED HERE TOO, and deleting the card must not
-          delete it. LM Studio's dev server answers unknown paths with "200
-          anyway" plus an error body, so REACHABLE IS NOT EVIDENCE OF THE RIGHT
-          SERVICE -- `/api/local/status` fingerprints what is actually
-          listening. Three outcomes, and collapsing any two of them tells the
-          user the transport is fine while something else holds the port. */}
-      {!status?.url ? (
-        <div data-testid="broker-effective-url-unknown">
-          Plexar Studio could not reach its local transport, so the address it uses for
-          LM Studio is unknown.
-        </div>
-      ) : status.compatible === false ? (
-        <div data-testid="broker-wrong-service" style={{ color: "var(--cc-error)" }}>
-          Something that is <strong>not</strong> Plexar Studio&rsquo;s transport is
-          answering at <code>{status.url}</code>
-          {status.service ? ` — it identifies as ${status.service}.` : "."}{" "}
-          LM Studio sessions will not work until whatever holds that address is stopped.
-        </div>
-      ) : (
-        <div data-testid="broker-effective-url">
-          Requests reach LM Studio through Plexar Studio&rsquo;s own local transport at{" "}
-          <code>{status.url}</code>
-          {status.managed === true
-            ? " — started by Plexar Studio."
-            : status.reachable
-              ? " — an external process holds this address."
-              : " — nothing is answering there right now."}
-        </div>
-      )}
-
-      {/* WHETHER IT QUEUES. Three states, never collapsed (S10). */}
-      <div style={{ paddingTop: 4 }}>
-        {loading || shadow === undefined ? (
-          <span data-testid="queueing-unknown">
-            It did not report whether it queues, so that is unknown. This is not the same
-            as &ldquo;queueing is off&rdquo;.
-          </span>
-        ) : shadow ? (
-          <span data-testid="queueing-shadow">
-            It is running in <strong>shadow mode</strong>: it forwards and logs every
-            request but never queues one. Nothing waits. Set{" "}
-            <code>COCKPIT_BROKER_SHADOW=0</code> and restart Plexar Studio to enable
-            queueing.
-          </span>
-        ) : (
-          <span data-testid="queueing-on">
-            It is queueing: one request is forwarded at a time and the rest wait their
-            turn.
-            <strong> The queue has no depth limit and no wait ceiling</strong> — a request
-            waits as long as the lane takes.
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
 
 export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) {
   const [providers, setProviders] = useState(null); // null = not yet read
-  const [status, setStatus] = useState(undefined); // undefined = checking, null = unknown
   const [health, setHealth] = useState({}); // providerId -> payload | null
   const [ownership, setOwnership] = useState(null); // vLLM ownership; null = unknown
   const [testing, setTesting] = useState(false);
@@ -1250,9 +1150,8 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
   // renders (react-hooks/set-state-in-effect). The in-flight flag is owned by
   // handleTest, which is only ever reached from a user click.
   const probe = useCallback(async () => {
-    const [list, st, own] = await Promise.all([
+    const [list, own] = await Promise.all([
       safeGet("/api/local/providers"),
-      safeGet("/api/local/status"),
       // Who owns the vLLM process right now, and whether a save is waiting on a
       // Plexar Studio restart. The draft value of providers.vllm.managed cannot answer
       // that — it is intent, and the container is launched at startup.
@@ -1262,7 +1161,6 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
     // probe purely to fill the deleted broker pill's "online · <n>ms".
     const rows = Array.isArray(list?.providers) ? list.providers : [];
     setProviders(rows);
-    setStatus(st ?? null);
     setOwnership(own ?? null);
 
     const results = await Promise.all(
@@ -1288,22 +1186,14 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
 
   const rows = providers || [];
   const byKind = (kind) => rows.find((p) => p.kind === kind) || null;
-  // Whichever backend sits behind the broker — the one that declares `queue`.
-  // Passed down as a prop rather than re-fetched so the page keeps exactly one
-  // /api/local/providers read.
-  const queueProvider = rows.find(
-    (p) => Array.isArray(p.capabilities) && p.capabilities.includes("queue")
-  ) || null;
   const lmStudio = byKind("lmstudio");
   const vllm = byKind("vllm");
   const ollama = byKind("ollama");
   const healthFor = (p) => (p ? health[p.id] : null);
 
   // The lane-broker health pill, its `checking/offline/wrong service` text and
-  // its stale-URL qualifier went with the card, T9. `status` itself is still
-  // read — LmStudioTransport shows the address actually in use — but there is
-  // no longer a broker BASE URL control for a probe to be stale against, which
-  // is what `brokerStale` existed to qualify.
+  // its stale-URL qualifier went with the card (T9); `status` and the whole
+  // /api/local/status read went with the broker itself (T11).
   //
   // The `latencyMs` state went too. Its ONLY renderer was the broker pill's
   // "online · <n>ms", so once the pill went it was a value measured on every
@@ -1570,7 +1460,6 @@ export default function ProvidersSettings({ get, setField, isDirty, onBrowse }) 
           title="LM Studio is currently the only backend the settings schema lets you mark as default."
         />
         <CapabilityChips capabilities={lmStudio?.capabilities} />
-        <LmStudioTransport provider={queueProvider} status={status} loading={providers === null} />
       </div>
       </div>
 

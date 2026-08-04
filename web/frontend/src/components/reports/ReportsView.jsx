@@ -94,7 +94,6 @@ const CARD = {
 };
 
 import { NOT_BUILT_TABS as NOT_BUILT } from "./notBuilt.js";
-import TracesTab from "./TracesTab.jsx";
 import LogsTab from "./LogsTab.jsx";
 
 /**
@@ -717,12 +716,7 @@ export default function ReportsView({
     tab === "overview" || tab === "sessions" || tab === "models" || tab === "tools";
 
   let body;
-  if (tab === "traces") {
-    // S26: the real trace renderer, moved here from Engine ▸ Requests. Sourced
-    // independently of /api/usage/report for the same reason Local engine is:
-    // no Claude usage this range does not mean no traces.
-    body = <TracesTab />;
-  } else if (tab === "logs") {
+  if (tab === "logs") {
     // S26: moved from Engine ▸ Logs, and it now renders the REAL tail. The old
     // panel claimed no log endpoint existed; GET /api/logs has existed all
     // along. See LogsTab.jsx's header for the measurement.

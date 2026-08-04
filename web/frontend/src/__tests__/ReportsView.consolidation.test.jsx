@@ -27,11 +27,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
-import TracesTab from "../components/reports/TracesTab.jsx";
 import LogsTab from "../components/reports/LogsTab.jsx";
 import { ENGINE_TABS } from "../components/engine/ui.jsx";
 import { REPORTS_TABS } from "../components/reports/format.js";
-import { TRACES_EMPTY_WHY } from "../components/reports/notBuilt.js";
 
 function mockFetch(routes) {
   return vi.fn(async (url) => {
@@ -58,9 +56,10 @@ describe("S26 — the tab map after consolidation", () => {
     expect(ENGINE_TABS.map((t) => t.id)).toEqual(["live", "models", "api"]);
   });
 
-  it("gives Reports both moved destinations, and keeps every tab it already had", () => {
+  it("keeps the Logs destination and every tab it already had, and has NO traces tab", () => {
     const ids = REPORTS_TABS.map((t) => t.id);
-    expect(ids).toContain("traces");
+    // T11: `traces` is gone -- the lane broker was its only producer.
+    expect(ids).not.toContain("traces");
     expect(ids).toContain("logs");
     // NO DELETIONS: the four data tabs and Local engine are untouched.
     for (const id of ["overview", "sessions", "models", "tools", "local-engine"]) {
@@ -77,44 +76,6 @@ describe("S26 — the tab map after consolidation", () => {
     const engine = new Set(ENGINE_TABS.map((t) => t.id));
     expect(engine.has("requests")).toBe(false);
     expect(engine.has("logs")).toBe(false);
-  });
-});
-
-describe("S26 — the moved trace panel still admits it is empty", () => {
-  it("renders the explanation ALONGSIDE the real panel when the recorder is off", async () => {
-    vi.stubGlobal(
-      "fetch",
-      mockFetch([
-        ["/api/local/providers", BROKER],
-        ["/traces", { traces: [], count: 0 }],
-      ])
-    );
-    render(<TracesTab />);
-    // The real renderer is mounted — this is the move actually happening.
-    await waitFor(() => expect(screen.getByTestId("reports-traces")).toBeInTheDocument());
-    // ...and it does not pretend the emptiness is a lack of activity.
-    const why = await screen.findByTestId("traces-empty-why");
-    expect(why).toHaveTextContent(/shadow/i);
-    expect(why.textContent).toBe(TRACES_EMPTY_WHY);
-  });
-
-  it("says NO BACKEND PUBLISHES TRACES rather than showing a blank list", async () => {
-    vi.stubGlobal(
-      "fetch",
-      mockFetch([["/api/local/providers", { providers: [{ id: "plexar-vllm", capabilities: ["models"] }] }]])
-    );
-    render(<TracesTab />);
-    await waitFor(() => expect(screen.getByTestId("traces-not-offered")).toBeInTheDocument());
-  });
-
-  it("distinguishes 'asked and could not read' from 'read and there is nothing'", async () => {
-    // Providers resolve, the traces read 404s -> null, NOT an empty list.
-    vi.stubGlobal("fetch", mockFetch([["/api/local/providers", BROKER]]));
-    render(<TracesTab />);
-    await waitFor(() => expect(screen.getByTestId("traces-offline")).toBeInTheDocument());
-    // An unreachable broker must NOT render the "recorder is off" explanation —
-    // that would be an unmeasured claim about why.
-    expect(screen.queryByTestId("traces-empty-why")).not.toBeInTheDocument();
   });
 });
 

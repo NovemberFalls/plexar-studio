@@ -55,7 +55,7 @@ async def test_query_range_all_providers_wildcard(client, monkeypatch):
     monkeypatch.setattr(server_module, "_broker_get",
                         lambda path, query="", base_url=None: seen.update(q=query) or {"ok": 1})
     async with client as c:
-        await c.get("/api/tsdb/query_range?metric=queue_depth&provider=all&window=session")
+        await c.get("/api/tsdb/query_range?metric=waiting&provider=all&window=session")
     assert 'provider=~".*"' in urllib.parse.unquote_plus(seen["q"])
     assert "step=15" in seen["q"]
 

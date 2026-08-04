@@ -227,13 +227,16 @@ def test_offline_snapshot_none_without_history(_tmp_store):
 
 
 @pytest.mark.asyncio
-async def test_route_vllm_timeseries_honest_unsupported(client):
+async def test_route_vllm_timeseries_is_gone_not_unsupported(client):
+    """This route used to answer 200 {supported: false} for vLLM, to say
+    "cumulative counters only, no recomputable buckets" rather than 503 as if
+    unreachable. The ROUTE ITSELF is now removed (T11) -- it existed to proxy
+    the lane broker's /metrics/timeseries, and with no broker there is no
+    implementation for any provider. A 404 from an absent route is the honest
+    answer; a 200 saying "unsupported" would imply the route still exists."""
     async with client as c:
         resp = await c.get("/api/local/vllm-local/metrics/timeseries")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["supported"] is False
-    assert body["buckets"] == []
+    assert resp.status_code == 404
 
 
 # ── Persistence (reset-aware accumulator + JSONL dataset) ──

@@ -5,7 +5,7 @@
    the DOM changes), and moving them to their own module would separate them
    from the ROUTES table they exist to interpret. */
 /**
- * EngineApi — Engine ▸ API (screen 3c). The broker/Plexar Studio HTTP surface, made
+ * EngineApi — Engine ▸ API (screen 3c). Plexar Studio's HTTP surface, made
  * discoverable without reading server.py.
  *
  * THE HONESTY RULES ARE THE FEATURE. This screen invites the operator to fire
@@ -48,11 +48,6 @@ const METHOD_TOKEN = {
 
 const GROUPS = [
   {
-    id: "broker",
-    label: "Lane broker · direct",
-    note: "A separate process on its own port. Plexar Studio proxies some of these; the browser can reach none of them.",
-  },
-  {
     id: "provider",
     label: "Plexar Studio · per-provider",
     note: "Same origin as this page. Provider URLs and auth never reach the browser.",
@@ -65,42 +60,27 @@ const GROUPS = [
 ];
 
 /**
- * The route catalogue. Every entry was read off lane_broker/broker.py's dispatch
+ * The route catalogue. Every entry was read off the server's own dispatch
  * table or server.py's decorators — there are no aspirational routes here.
  *
  *   direct    — different origin; unreachable from the browser
  *   cap       — provider capability required (404 without it)
  *   needs     — path parameter Plexar Studio must fill from live data
  *   body      — requires a request body the explorer does not compose
- *   forbidden — reason this must never be fired from a UI
  */
 const ROUTES = [
-  // ── lane broker, direct ────────────────────────────────
-  { group: "broker", method: "GET", path: "/queue", desc: "in-flight job, queued jobs, predicted clear", direct: true },
-  { group: "broker", method: "GET", path: "/metrics", desc: "run/prompt/token counters + percentiles", direct: true },
-  { group: "broker", method: "GET", path: "/metrics/timeseries", desc: "recomputed buckets (5m/1h/1d)", direct: true },
-  { group: "broker", method: "GET", path: "/traces", desc: "recent trace roots", direct: true },
-  { group: "broker", method: "GET", path: "/trace/{trace_id}", desc: "one trace closure: nodes + edges", direct: true },
-  { group: "broker", method: "GET", path: "/v1/models", desc: "passed through to the upstream server", direct: true },
-  {
-    group: "broker",
-    method: "POST",
-    path: "/v1/chat/completions",
-    desc: "the lane itself — queued, then forwarded",
-    direct: true,
-    forbidden: "This spends real inference. Plexar Studio will not fire it from a UI button.",
-  },
+  // THE ENTIRE "broker, direct" GROUP IS GONE (T11, 2026-08-04). It listed
+  // the vendored lane broker's own surface -- /queue, /metrics,
+  // /metrics/timeseries, /traces, /trace/{id}, and the queued
+  // /v1/chat/completions lane itself. The broker is removed and nothing
+  // answers at that address, so every row would have been an inventory entry
+  // for a service that no longer exists.
 
   // ── cockpit, per provider ──────────────────────────────
   { group: "provider", method: "GET", path: "/api/local/providers", desc: "registry: id, label, kind, scope, capabilities" },
-  { group: "provider", method: "GET", path: "/api/local/status", desc: "identity fingerprint of what is listening" },
-  { group: "provider", method: "GET", path: "/api/local/{provider_id}/health", desc: "concurrent broker + management probe", cap: "health" },
-  { group: "provider", method: "GET", path: "/api/local/{provider_id}/queue", desc: "proxied queue snapshot", cap: "queue" },
+  { group: "provider", method: "GET", path: "/api/local/{provider_id}/health", desc: "management reachability probe", cap: "health" },
   { group: "provider", method: "GET", path: "/api/local/{provider_id}/metrics", desc: "proxied metrics (window=lifetime|24h|session)", cap: "metrics" },
-  { group: "provider", method: "GET", path: "/api/local/{provider_id}/metrics/timeseries", desc: "proxied buckets; empty for vLLM", cap: "metrics" },
   { group: "provider", method: "GET", path: "/api/local/{provider_id}/models", desc: "management model list (+ disk scan for vLLM)", cap: "models" },
-  { group: "provider", method: "GET", path: "/api/local/{provider_id}/traces", desc: "recent traces (limit 1..100)", cap: "traces" },
-  { group: "provider", method: "GET", path: "/api/local/{provider_id}/trace/{trace_id}", desc: "one trace closure", cap: "traces", needs: "trace_id" },
   {
     group: "provider",
     method: "POST",
@@ -169,10 +149,6 @@ export function resolvePath(route, ctx) {
     if (!ctx.providerId) return { path: null, missing: "provider_id" };
     path = path.replace("{provider_id}", encodeURIComponent(ctx.providerId));
   }
-  if (route.needs === "trace_id") {
-    if (!ctx.traceId) return { path: null, missing: "trace_id" };
-    path = path.replace("{trace_id}", encodeURIComponent(ctx.traceId));
-  }
   if (route.needs === "model_id") {
     if (!ctx.modelId) return { path: null, missing: "model_id" };
     path = path.replace("{model_id}", encodeURIComponent(ctx.modelId));
@@ -187,7 +163,12 @@ export function resolvePath(route, ctx) {
  * rather than "wrong origin".
  */
 export function runBlockReason(route, ctx) {
-  if (route.forbidden) return route.forbidden;
+  // `forbidden` (a per-route "never fire this from a UI" reason) was REMOVED
+  // with the broker, T11. Its ONLY declarer was the broker's queued
+  // POST /v1/chat/completions -- the lane itself -- and with that row gone the
+  // branch was unreachable. It is not being kept "in case": an inert guard no
+  // route can trigger is indistinguishable from one that does not exist, and
+  // the destructive-row confirm gate below is the live protection.
   if (route.direct) {
     return (
       "Not runnable from here: this is the lane broker's own origin, which the browser cannot call " +
@@ -400,14 +381,12 @@ export default function EngineApi({ provider, caps, data, onToast, active = true
   // INSIDE the memo and the deps are the payloads themselves.
   const ctx = useMemo(() => {
     const modelList = Array.isArray(data?.models?.models) ? data.models.models : [];
-    const traceList = Array.isArray(data?.traces?.traces) ? data.traces.traces : [];
     return {
       providerId: provider?.id || null,
       caps,
       modelId: (modelList.find((m) => m.state === "loaded") || modelList[0] || {}).id || null,
-      traceId: (traceList[0] || {}).trace_id || null,
     };
-  }, [provider?.id, caps, data?.models, data?.traces]);
+  }, [provider?.id, caps, data?.models]);
 
   const selected = ROUTES.find((r) => routeId(r) === selectedId) || null;
   const selectedBlocked = selected ? runBlockReason(selected, ctx) : null;

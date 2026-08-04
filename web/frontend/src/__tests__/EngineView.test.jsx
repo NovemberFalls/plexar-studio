@@ -142,7 +142,10 @@ describe("EngineView frame", () => {
     await waitFor(() => expect(screen.getByTestId("engine-model-card")).toBeInTheDocument());
     expect(screen.getByTestId("engine-lane-card")).toBeInTheDocument();
     expect(screen.getByTestId("engine-routing-card")).toBeInTheDocument();
-    expect(screen.getByTestId("engine-queue-table")).toBeInTheDocument();
+    // T11: the queue table is gone -- it rendered one row per QUEUED JOB from
+    // the lane broker's /queue payload, and only the broker ever knew about
+    // individual jobs.
+    expect(screen.queryByTestId("engine-queue-table")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("engine-tab-models"));
     await waitFor(() => expect(screen.getByTestId("engine-models-card")).toBeInTheDocument());
@@ -239,16 +242,13 @@ describe("EngineView frame", () => {
     expect(globalThis.fetch.mock.calls.length).toBe(before);
   });
 
-  it("renders offline state rather than zeros when the broker does not answer", async () => {
-    globalThis.fetch = mockFetch({ "/queue": "reject", "/metrics": "reject", "/health": "reject" });
+  it("renders offline state rather than zeros when the engine does not answer", async () => {
+    globalThis.fetch = mockFetch({ "/metrics": "reject", "/health": "reject" });
     render(<EngineView provider={PROVIDER} onNavigate={vi.fn()} />);
 
-    // The fast (queue/metrics) and slow (traces/health) polls settle
-    // independently, so each offline state is awaited on its own.
     await waitFor(() => expect(screen.getByTestId("lane-offline")).toBeInTheDocument());
     expect(screen.getByTestId("lane-offline")).toHaveTextContent(/unread/i);
-    expect(screen.getByTestId("queue-offline")).toHaveTextContent(/not.*nothing running/i);
-    // No fabricated zeros: the four lane stats are absent entirely, not zeroed.
+    // No fabricated zeros: the lane stats are absent entirely, not zeroed.
     expect(screen.queryByTestId("lane-inflight")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId("engine-serving-pill")).toHaveTextContent("not serving"));
   });
@@ -374,12 +374,6 @@ describe("EngineView frame", () => {
     );
   });
 
-  it("explains the missing lane queue for a directly-served backend", async () => {
-    render(<EngineView provider={VLLM} onNavigate={vi.fn()} />);
-    await waitFor(() => expect(screen.getByTestId("queue-not-offered")).toBeInTheDocument());
-    expect(screen.getByTestId("queue-not-offered")).toHaveTextContent(/does not expose a lane queue/i);
-  });
-
   it("treats a 404 from load as not-offered and retracts the row buttons", async () => {
     globalThis.fetch = mockFetch({ "/models/qwen3-coder-30b-awq/unload": "notfound" });
     const onToast = vi.fn();
@@ -421,7 +415,6 @@ describe("EngineView frame", () => {
     // assert "not answering" about an endpoint they have not called.
     render(<EngineView provider={PROVIDER} onNavigate={vi.fn()} />);
     expect(screen.getByTestId("lane-loading")).toBeInTheDocument();
-    expect(screen.getByTestId("queue-loading")).toBeInTheDocument();
     expect(screen.queryByTestId("lane-offline")).not.toBeInTheDocument();
     await settle();
   });

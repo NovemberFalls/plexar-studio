@@ -171,57 +171,21 @@ function NewChip({ onNew }) {
   );
 }
 
-/** The broker is running in SHADOW: it forwards and logs, and never queues.
+/* THE SHADOW NOTE IS GONE (T11, 2026-08-04).
  *
- *  Rendering the live meter here would be a lie in the most expensive
- *  direction -- "0 in flight, 0 queued" is indistinguishable from a healthy
- *  idle lane, so the user reads "nothing is waiting" when the truth is
- *  "nothing is ever queued on this build". Measured in
- *  `lane_broker/tests/test_shadow_default_is_inert.py`: under the shipped
- *  default the broker never enters `_queued_forward` at all.
+ * It rendered "queueing off · shadow" instead of the live meter, because a
+ * shadow broker reports 0 in flight / 0 queued and that is indistinguishable
+ * from a healthy idle lane. S10's ruling was that BOTH states must be visible
+ * and must not look alike -- showing the meter was one lie ("nothing is
+ * waiting"), and omitting the strip entirely was the other ("this build has no
+ * queueing").
  *
- *  Omitting the meter would be the OTHER lie, and it is the one S9 spent a
- *  whole unit removing from the model picker: absence reads as "this build has
- *  no queueing", which is a different claim from "queueing exists and is
- *  switched off". Both states must be visible and must not look alike. */
-function LaneShadowNote({ onOpenLaneDetails }) {
-  const sentence =
-    "Queueing is not active: the lane broker is running in shadow mode, so requests are " +
-    "forwarded and logged but never queued. " +
-    "Set COCKPIT_BROKER_SHADOW=0 and restart to enable queueing.";
-  return (
-    <div
-      data-testid="lane-shadow-note"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        height: 28,
-        borderRadius: 8,
-        padding: "0 8px",
-        flexShrink: 0,
-        border: "1px dashed var(--cc-border)",
-        background: "transparent",
-      }}
-      title={sentence}
-      aria-label={sentence}
-    >
-      <Cpu size={12} style={{ color: "var(--cc-muted)", flexShrink: 0 }} />
-      <span style={{ fontSize: 10, whiteSpace: "nowrap", color: "var(--cc-muted)" }}>
-        queueing off · shadow
-      </span>
-      <button
-        onClick={onOpenLaneDetails}
-        className="hover-bg-elevated transition-colors"
-        style={{ display: "flex", flexShrink: 0, color: "var(--cc-muted)", background: "transparent", border: "none", padding: 2 }}
-        title="Why queueing is not active"
-        aria-label="Why queueing is not active"
-      >
-        <ChevronDown size={12} />
-      </button>
-    </div>
-  );
-}
+ * That ruling is not overturned; its premise is. There is no broker and no
+ * queue, so "queueing exists and is switched off" is no longer a state this
+ * build can be in -- the honest reading of the strip's absence of a shadow
+ * note is now simply TRUE. What remains is the in-engine readout, which counts
+ * vLLM's own running/waiting sequences and was never a broker fact.
+ */
 
 /** The live lane readout.
  *
@@ -237,9 +201,6 @@ function LaneShadowNote({ onOpenLaneDetails }) {
  *  lane is expected to take to drain. */
 function LaneMeter({ lane, onOpenLaneDetails }) {
   if (!lane) return null;
-  // Checked BEFORE any number is read: in shadow every one of them is a
-  // structural zero, not a measurement.
-  if (lane.shadow) return <LaneShadowNote onOpenLaneDetails={onOpenLaneDetails} />;
 
   const inFlight = Number.isFinite(lane.inFlight) ? lane.inFlight : 0;
   const queued = Number.isFinite(lane.queued) ? lane.queued : 0;

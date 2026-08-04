@@ -92,7 +92,6 @@ describe("Providers page layout — two half-width pairs", () => {
     vi.stubGlobal("fetch", vi.fn((url) => {
       const u = String(url);
       if (u.includes("/api/local/providers")) return json(PROVIDERS);
-      if (u.includes("/api/local/status")) return json(STATUS);
       if (u.includes("/vllm/ownership")) return json(OWNERSHIP);
       if (u.includes("/health")) return json({ ok: true, provider: { reachable: true, models_loaded: 1 } });
       return json({});

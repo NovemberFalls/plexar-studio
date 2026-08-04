@@ -132,12 +132,9 @@ async def lifespan(app: FastAPI):
     # frontend polling.  The bridge idle gate depends on this for correctness.
     pty_manager.start_state_ticker()
 
-    # 5. Managed lane broker: Cockpit owns the broker unless an external one
-    # already answers (or COCKPIT_MANAGED_BROKER=0). Best-effort — a broker
-    # failure must never block Cockpit startup.
-    # Apply any browser-configured local provider endpoints BEFORE the managed
-    # broker starts, so a configured endpoint is live from boot. Defensive — a
-    # bad config file must never block startup.
+    # 5. Apply any browser-configured local provider endpoints. Defensive — a
+    # bad config file must never block startup. (There is no managed lane
+    # broker to start any more; it was removed in T11.)
     try:
         apply_persisted_endpoints()
     except Exception:
@@ -147,11 +144,6 @@ async def lifespan(app: FastAPI):
         apply_persisted_vllm_models_dir()
     except Exception:
         logger.error("Applying persisted vLLM models dir failed", exc_info=True)
-
-    try:
-        await start_managed_broker()
-    except Exception:
-        logger.error("Managed broker startup failed", exc_info=True)
 
     # Managed vLLM: opt-in coexisting local provider, same best-effort posture.
     try:
@@ -169,7 +161,7 @@ async def lifespan(app: FastAPI):
 
     # Daily model-price refresh. Prices are only ever APPENDED (pricing_store),
     # so a refresh updates what NEW events cost and can never re-price history.
-    # Best-effort, same posture as the managed broker: never blocks startup,
+    # Best-effort, same posture as managed vLLM: never blocks startup,
     # cancelled cleanly on shutdown.
     app.state.pricing_refresh_task = asyncio.create_task(_pricing_refresh_loop())
 
@@ -225,8 +217,6 @@ async def lifespan(app: FastAPI):
     # Stop the background state ticker
     await pty_manager.stop_state_ticker()
 
-    # Stop the managed lane broker (no-op when external/disabled)
-    await stop_managed_broker()
     await stop_managed_vllm()
 
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
@@ -269,7 +259,8 @@ app.include_router(vllm_shim.router)
 # LM Studio tagging proxy, mounted at /shim/lmstudio -- same session-scoped
 # base URL strategy as /shim/vllm above, but a byte-verbatim passthrough
 # (the broker already speaks Anthropic /v1/messages) that ADDS
-# X-Lane-Class/X-Client-Id/X-Agent-Id headers for broker-side attribution.
+# that attributes each call via its SESSION-SCOPED URL (the X-Lane-Class /
+# X-Client-Id / X-Agent-Id headers went with the lane broker in T11).
 # See web/lmstudio_proxy.py.
 import lmstudio_proxy  # noqa: E402 -- grouped with other post-app-creation setup
 
@@ -3022,23 +3013,30 @@ async def reveal_log_folder():
     return JSONResponse({"ok": True, "path": path})
 
 
-# ── Local model broker (LM Studio lane broker) ───────────
+# ── Local inference providers ────────────────────────────
+#
+# THE LANE BROKER IS GONE (T11, 2026-08-04). It was a vendored single-flight
+# queueing gateway in front of LM Studio, and `COCKPIT_BROKER_URL` /
+# `COCKPIT_BROKER_SHADOW` / `COCKPIT_MANAGED_BROKER` went with it. Nothing
+# queues anywhere in Studio now, deliberately -- see CLAUDE.md.
 
-# Base URL of the local-lane broker (queue + metrics). Read-only endpoints.
-# The browser NEVER supplies this — proxying an arbitrary client-supplied URL
-# would be an SSRF hole, so the base is fixed server-side (env-overridable) and
-# only the *validated* window query param is ever forwarded to the broker.
-_LOCAL_BROKER_URL = os.getenv("COCKPIT_BROKER_URL", "http://127.0.0.1:1235").rstrip("/")
-_LOCAL_BROKER_TIMEOUT = 3.0
-# The broker's documented window set (broker-team contract). Never forward an
-# unbounded client string through to the broker.
+_LOCAL_PROVIDER_TIMEOUT = 3.0
+# Validated window set for the metrics routes. Never forward an unbounded
+# client string through to a provider.
 _LOCAL_METRICS_WINDOWS = ("lifetime", "24h", "session")
 
 # ── Provider registry ─────────────────────────────────────
 #
 # Multiple local/remote inference backends can be registered; the browser only
 # ever sees {id,label,kind,scope,capabilities} — broker_url/management_url/auth
-# are server-side only (same SSRF stance as _LOCAL_BROKER_URL above).
+# are server-side only (an SSRF stance: proxying an arbitrary client-supplied
+# URL would be a hole, so every base is fixed server-side).
+#
+# `broker_url` KEEPS ITS NAME. It is the registry's INFERENCE-base-url field
+# for every provider (vLLM's own port, Plexar's gateway, LM Studio's server)
+# and it never meant "the lane broker" for two of the three. Renaming a
+# required key across the registry, its validator, the persisted config
+# override and the tests is a separate change from removing the broker.
 
 # Raw COCKPIT_MANAGED_VLLM, or None when the operator did NOT set it. The
 # "unset" case has to stay distinguishable from an explicit "0", because the
@@ -3079,16 +3077,19 @@ _VLLM_URL = "http://127.0.0.1:" + COCKPIT_VLLM_PORT
 _VLLM_LOCAL_PROVIDER = {
     "id": "vllm-local", "label": "vLLM (local)", "kind": "vllm",
     "scope": "local",
-    # vLLM does its own continuous batching and must be served DIRECT --
-    # not through the broker (max_concurrent=1 would serialize requests
-    # and kill vLLM's throughput). Coexists beside the broker-fronted
-    # LM Studio provider; the user picks via ProviderPicker.
+    # vLLM does its own continuous batching and is served DIRECT. It was
+    # never behind the lane broker (which is now gone entirely) -- routing
+    # continuous batching through a single-flight queue serialises the exact
+    # property the GPU is for. Measured 2026-08-04 against the live rig at
+    # max_num_seqs=1: three concurrent 192-token requests came back
+    # 1.27s / 2.50s / 3.73s -- a ~1.23s staircase, i.e. served one at a time,
+    # with ZERO refusals (no 429, no 503, no 529). vLLM does not push back on
+    # concurrency; it silently makes you wait.
     "broker_url": _VLLM_URL,
     "management_url": _VLLM_URL,
     "auth": {"type": "none"},
-    # vLLM does not serve the broker's queue/traces shapes, but it
-    # DOES export a Prometheus /metrics endpoint that _vllm_metrics reshapes
-    # into the broker metrics contract (cumulative-since-start; see adapter).
+    # vLLM DOES export a Prometheus /metrics endpoint that _vllm_metrics
+    # reshapes into the metrics contract (cumulative-since-start; see adapter).
     "capabilities": ["models", "health", "metrics", "model-discovery"],
 }
 
@@ -3096,10 +3097,24 @@ _PROVIDERS = {
     "lmstudio-local": {
         "id": "lmstudio-local", "label": "LM Studio (local)", "kind": "lmstudio",
         "scope": "local",
-        "broker_url": os.getenv("COCKPIT_BROKER_URL", "http://127.0.0.1:1235").rstrip("/"),
+        # BOTH URLs are LM Studio's own server now. `broker_url` used to be
+        # the vendored lane broker on :1235, which relayed here; the broker
+        # is removed (T11) and there is no hop left.
+        "broker_url": os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234").rstrip("/"),
         "management_url": os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234").rstrip("/"),
         "auth": {"type": "none"},
-        "capabilities": ["queue", "metrics", "models", "traces", "health"],
+        # `queue`, `metrics` and `traces` are GONE, not temporarily absent.
+        # All three were served by the BROKER, never by LM Studio: /queue was
+        # the broker's queue snapshot, /metrics its jobs.jsonl aggregate and
+        # /traces its trace index. LM Studio serves none of those shapes, so
+        # advertising them would promise routes that cannot answer -- the same
+        # "a capability is a PROMISE" rule that kept model-control off Plexar.
+        # What this costs is measured, not assumed: the broker's telemetry
+        # store was EMPTY (jobs.jsonl absent in both data homes, /traces
+        # {"count":0}, one lifetime run and it was a test fixture). Per-run
+        # token/cost recording for LM Studio is NOT here -- it is in
+        # lmstudio_proxy._record_local_run -> usage.sqlite3, and it survives.
+        "capabilities": ["models", "health"],
     },
     "vllm-local": _VLLM_LOCAL_PROVIDER,
     "plexar-vllm": {
@@ -3823,13 +3838,17 @@ def _provider_managed(p: dict) -> bool:
 
     Resolved from the SAME determination each subsystem already uses, never a
     second guess:
-      * broker-fronted providers (the vendored lane broker, i.e. a local
-        provider whose broker_url is the configured broker URL) →
-        _broker_is_managed(), the same call GET /api/local/status reports.
       * vLLM → _vllm_is_managed(), the same call that gates the
         "model-control" capability and the restart route's refusal.
-    Everything else (remote scope, a provider from COCKPIT_PROVIDERS_FILE
-    pointing at somebody else's server) is external by definition.
+    Everything else (remote scope, LM Studio, a provider from
+    COCKPIT_PROVIDERS_FILE pointing at somebody else's server) is external by
+    definition.
+
+    **vLLM IS NOW THE ONLY MANAGED KIND.** The lane broker was the other one --
+    Studio ran it in-process and reported `managed: true` for it -- and it is
+    removed (T11). LM Studio has always been somebody else's process: Studio
+    never started it and cannot restart it, so `false` here is the truth and
+    not a gap.
 
     A boolean only — no URL, no auth. The UI uses it to EXPLAIN ("external
     process — restart it where you started it") instead of guessing.
@@ -3838,8 +3857,6 @@ def _provider_managed(p: dict) -> bool:
         return False
     if p.get("kind") == "vllm":
         return _vllm_is_managed()
-    if p.get("broker_url") == _LOCAL_BROKER_URL:
-        return _broker_is_managed()
     return False
 
 
@@ -3884,24 +3901,33 @@ _NO_REDIRECT_OPENER = _urllib_request.build_opener(_NoRedirect)
 
 
 def _broker_get(path: str, query: str = "", base_url: str | None = None) -> dict:
-    """GET {broker}{path}?{query} and return the parsed JSON.
+    """GET {base_url}{path}?{query} and return the parsed JSON.
 
-    ``base_url`` defaults to the legacy ``_LOCAL_BROKER_URL`` so existing
-    callers/monkeypatches are unaffected; provider-keyed routes pass the
-    registered provider's own ``broker_url``. Blocking (urllib) — callers run
-    it via ``asyncio.to_thread`` so it never blocks the event loop. Kept a
-    free function so tests can monkeypatch it directly instead of exercising
-    a real broker. Raises on any transport/parse error; the route handlers
-    translate that into a 503 so the best-effort frontend poller can silently
-    swallow an offline broker.
+    **THE NAME IS A FOSSIL AND IT IS DELIBERATE.** This is the generic
+    provider-GET helper, not a lane-broker client: it is what reads vLLM's
+    ``/v1/models``, Prometheus's ``/api/v1/query_range`` and every registered
+    provider's routes. It was only ever *named* for the broker because the
+    broker was its first caller. Renaming it is a mechanical sweep across
+    every call site and the tests that monkeypatch it BY NAME, which is a
+    separate change from removing the broker (T11) and was not folded in.
+
+    ``base_url`` is REQUIRED in practice -- it used to default to the broker's
+    address, and with the broker gone there is no sensible default left. A
+    caller that omits it is a bug, so it raises rather than quietly reading
+    from a dead port. Blocking (urllib); callers run it via
+    ``asyncio.to_thread`` so it never blocks the event loop. Raises on any
+    transport/parse error; route handlers translate that into a 503 so the
+    best-effort frontend poller can silently swallow an offline provider.
     """
     import urllib.request
 
-    url = f"{base_url or _LOCAL_BROKER_URL}{path}"
+    if not base_url:
+        raise ValueError("_broker_get requires an explicit base_url")
+    url = f"{base_url}{path}"
     if query:
         url += f"?{query}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_PROVIDER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -3936,13 +3962,13 @@ def _mgmt_get(provider: dict, path: str) -> dict:
     req = urllib.request.Request(
         url, headers=plexar_client.auth_headers(provider.get("auth"))
     )
-    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+    with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_PROVIDER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-# ── vLLM /metrics adapter (Prometheus → broker metrics contract) ──
+# ── vLLM /metrics adapter (Prometheus → the metrics contract) ──
 #
-# vLLM has no lane broker in front of it, but it DOES export a Prometheus
+# vLLM exports a Prometheus
 # text-exposition /metrics endpoint. This adapter scrapes it and reshapes it
 # into the same contract the broker's /metrics returns, so a vLLM provider can
 # carry the `metrics` capability and light up the Routing & Reporting dashboard
@@ -3964,7 +3990,7 @@ def _http_get_text(url: str, timeout: float | None = None) -> str:
     import urllib.request
 
     req = urllib.request.Request(url, headers={"Accept": "text/plain"})
-    with _NO_REDIRECT_OPENER.open(req, timeout=timeout or _LOCAL_BROKER_TIMEOUT) as resp:
+    with _NO_REDIRECT_OPENER.open(req, timeout=timeout or _LOCAL_PROVIDER_TIMEOUT) as resp:
         return resp.read().decode("utf-8", "replace")
 
 
@@ -4379,7 +4405,11 @@ _FLEET_MAX_LINES = 200_000
 _FLEET_METRICS = {
     "throughput_tps": "tps",
     "decode_tps": "decode",
-    "queue_depth": "queue_depth",
+    # `queue_depth` REMOVED (T11). With the broker's lane queue gone its only
+    # remaining source was the engine's own `waiting` counter -- which is
+    # already charted as "waiting" one line down. Keeping the key would have
+    # drawn the SAME series under two names, one of which promises a lane
+    # queue that no longer exists.
     "running": "running",
     "waiting": "waiting",
     "kv_cache_pct": "kv",
@@ -4404,11 +4434,6 @@ def _fleet_record(provider: dict, snap: dict, ts: int) -> dict:
     ctx = (m.get("context") or {})
     cin = (ctx.get("in") or {})
     cout = (ctx.get("out") or {})
-    q = snap.get("queue") if isinstance(snap.get("queue"), dict) else {}
-    qdepth = None
-    if q and q.get("reachable") is not False:
-        qdepth = (1 if q.get("in_flight") else 0) + (len(q["queued"]) if isinstance(q.get("queued"), list) else 0)
-
     def _s(v):  # ms -> seconds
         return round(v / 1000, 3) if isinstance(v, (int, float)) else None
 
@@ -4418,7 +4443,6 @@ def _fleet_record(provider: dict, snap: dict, ts: int) -> dict:
         "runs": m.get("runs_total"),
         "tps": tps.get("avg") if tps.get("avg") is not None else tps.get("current"),
         "decode": dec.get("avg") if dec.get("avg") is not None else dec.get("current"),
-        "queue_depth": qdepth if qdepth is not None else eng.get("waiting"),
         "running": eng.get("running"),
         "waiting": eng.get("waiting"),
         "kv": eng.get("kv_cache_pct"),
@@ -4521,23 +4545,21 @@ async def _fleet_history_loop() -> None:
             logger.debug("Fleet history sample skipped", exc_info=True)
 
 
-# ── Service identity (the middleware layer) ──────────────
+# ── Service shape validation ─────────────────────────────
 #
-# LM Studio's dev server answers UNKNOWN paths with "200 anyway" + a non-broker
-# body, so a bare 200 proves nothing. Every proxy response is shape-validated
-# against the broker contract, and a detection probe fingerprints what is
-# actually listening at the configured URL so the UI can say "that's LM Studio,
-# not the lane broker" instead of rendering dashes.
-
-# Pinned from broker source (broker.py::_queue_state, confirmed 2026-07-24):
-# top level = shadow · in_flight (object|null) · queued (array) ·
-# estimated_clear_seconds.
-_QUEUE_SHAPE_KEYS = ("shadow", "in_flight", "queued", "estimated_clear_seconds")
+# LM Studio's dev server answers UNKNOWN paths with "200 anyway" + an error
+# body, so a bare 200 proves nothing and every proxy response is still
+# shape-validated before it is believed.
+#
+# THE SERVICE-IDENTITY FINGERPRINT IS GONE (T11, 2026-08-04), and the three
+# things it did collapsed together rather than one at a time. `_detect_service`
+# read `/queue` to answer THREE questions at once -- is the queue empty, is the
+# thing at this address really the lane broker, and does Studio therefore own
+# the port -- and all three were questions ABOUT A BROKER. With no broker there
+# is no port to own, no service to disambiguate from it, and no queue state.
+# `GET /api/local/status`, `_cached_detect`, `_QUEUE_SHAPE_KEYS` and the
+# lmstudio/vllm/ollama fingerprint probes went with it.
 _METRICS_SHAPE_KEYS = ("runs_total", "prompts_total", "tokens_total", "tokens_per_sec")
-
-# Detection is cached so the 3s poller doesn't fire fingerprint probes each tick.
-_DETECT_CACHE_TTL = 30.0
-_detect_cache: dict = {"result": None, "at": 0.0}
 
 
 def _looks_like(data, keys) -> bool:
@@ -4545,155 +4567,12 @@ def _looks_like(data, keys) -> bool:
     return isinstance(data, dict) and any(k in data for k in keys)
 
 
-def _detect_service() -> dict:
-    """Fingerprint whatever is listening at _LOCAL_BROKER_URL.
-
-    Returns {reachable, compatible, service, detail}. service is one of:
-    "lane-broker" | "lmstudio" | "vllm" | "ollama" | "openai-compatible" |
-    "unknown" | "offline". Blocking — run via asyncio.to_thread.
-    """
-    # 1. The real contract: /queue must return a queue-shaped dict.
-    try:
-        data = _broker_get("/queue")
-        if _looks_like(data, _QUEUE_SHAPE_KEYS):
-            return {"reachable": True, "compatible": True, "service": "lane-broker",
-                    "detail": "lane broker contract verified via /queue"}
-    except Exception:
-        return {"reachable": False, "compatible": False, "service": "offline",
-                "detail": f"nothing answering at {_LOCAL_BROKER_URL}"}
-
-    # Reachable but /queue is not broker-shaped — fingerprint what it really is.
-    probes = (
-        ("/api/v0/models", "lmstudio", "LM Studio REST API (/api/v0/models)"),
-        ("/version", "vllm", "vLLM (/version)"),
-        ("/api/version", "ollama", "Ollama (/api/version)"),
-        ("/v1/models", "openai-compatible", "OpenAI-compatible server (/v1/models)"),
-    )
-    for path, service, detail in probes:
-        try:
-            probe = _broker_get(path)
-        except Exception:
-            continue
-        if isinstance(probe, dict) and (probe.get("data") is not None or probe.get("version") is not None or probe.get("models") is not None):
-            return {"reachable": True, "compatible": False, "service": service,
-                    "detail": f"detected {detail} — not the lane broker"}
-    return {"reachable": True, "compatible": False, "service": "unknown",
-            "detail": "service answers but matches no known fingerprint"}
-
-
-def _cached_detect() -> dict:
-    now = _time.monotonic()
-    if _detect_cache["result"] is None or now - _detect_cache["at"] > _DETECT_CACHE_TTL:
-        _detect_cache["result"] = _detect_service()
-        _detect_cache["at"] = now
-    return _detect_cache["result"]
-
-
-# ── Managed lane broker (vendored: web/lane_broker/) ─────
-#
-# Cockpit OWNS the broker: at startup, if nothing is already answering at the
-# broker URL, the vendored broker runs in-process as an asyncio task (pure
-# stdlib — no subprocess, so it works inside the PyInstaller sidecar). If an
-# external broker is already listening (e.g. a dev instance), external wins
-# and Cockpit only proxies — never a double-bind.
-_MANAGED_BROKER = {"task": None}
-
-
-def _broker_is_managed() -> bool:
-    """True when Cockpit's own in-process broker task is the thing listening.
-
-    The single determination behind both GET /api/local/status's `managed` flag
-    and the `managed` flag for broker-fronted providers on
-    GET /api/local/providers — the two must never be able to disagree.
-    """
-    task = _MANAGED_BROKER["task"]
-    return task is not None and not task.done()
-
-
-def _broker_port() -> int:
-    try:
-        return int(_LOCAL_BROKER_URL.rsplit(":", 1)[1])
-    except (ValueError, IndexError):
-        return 1235
-
-
-async def start_managed_broker() -> bool:
-    """Start the in-process broker unless disabled or an external one answers.
-
-    Returns True when Cockpit's own broker task is running.
-    """
-    if os.getenv("COCKPIT_MANAGED_BROKER", "1") != "1":
-        return False
-    if _MANAGED_BROKER["task"] is not None and not _MANAGED_BROKER["task"].done():
-        return True
-    try:
-        await asyncio.to_thread(_broker_get, "/queue")
-        logger.info("External lane broker already at %s — not spawning managed one", _LOCAL_BROKER_URL)
-        return False
-    except Exception:
-        pass  # nothing listening — ours to run
-
-    from types import SimpleNamespace
-    from lane_broker.broker import amain as broker_amain
-
-    state_dir = str(app_paths.data_path("lane-broker"))
-    os.makedirs(state_dir, exist_ok=True)
-    args = SimpleNamespace(
-        port=_broker_port(),
-        upstream=os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234"),
-        # Shadow (observe+log, no queueing) is the safe default here; flip with
-        # COCKPIT_BROKER_SHADOW=0.
-        #
-        # THIS DEFAULT IS COCKPIT'S, NOT THE BROKER'S. `broker.py`'s own CLI
-        # declares `--shadow` as store_true, i.e. upstream defaults to QUEUEING
-        # ON. This line previously claimed shadow was "the same posture the
-        # broker team runs" -- an assertion about another project's operating
-        # posture that cannot be checked from inside this tree, and that its
-        # argparse default contradicts. Corrected to state only what is ours.
-        #
-        # MEASURED CONSEQUENCE (S3, lane_broker/tests/test_shadow_default_is_inert.py):
-        # under this default the broker forwards and logs but NEVER queues and
-        # NEVER queues -- so the queue surface renders a feature that
-        # cannot fire as shipped, while traces/metrics and the transport are
-        # real and load-bearing.
-        shadow=os.getenv("COCKPIT_BROKER_SHADOW", "1") == "1",
-        log_file=os.path.join(state_dir, "jobs.jsonl"),
-    )
-
-    async def _run():
-        try:
-            await broker_amain(args)
-        except asyncio.CancelledError:
-            raise
-        except OSError:
-            # Port grabbed between probe and bind — external broker wins.
-            logger.info("Managed broker could not bind %s (external instance?)", _LOCAL_BROKER_URL)
-        except Exception:
-            logger.error("Managed lane broker crashed", exc_info=True)
-
-    _MANAGED_BROKER["task"] = asyncio.create_task(_run())
-    logger.info("Managed lane broker starting on %s (shadow=%s, log=%s)",
-                _LOCAL_BROKER_URL, args.shadow, args.log_file)
-    return True
-
-
-async def stop_managed_broker() -> None:
-    task = _MANAGED_BROKER["task"]
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-    _MANAGED_BROKER["task"] = None
-
-
 # ── Managed vLLM (coexisting local provider) ──────────────
 #
 # vLLM does its own continuous batching, so it must be served DIRECT (not
-# behind the max_concurrent=1 lane broker, which would serialize requests and
-# kill vLLM's throughput). Cockpit optionally owns a vLLM container the same
-# way it owns the lane broker: opt-in, double-bind guarded, best-effort, and
+# never behind a queue, which would serialize requests and kill vLLM's
+# throughput). Cockpit optionally owns a vLLM container: opt-in,
+# double-bind guarded, best-effort, and
 # never blocking startup/shutdown.
 #
 # "external": set True by start_managed_vllm's double-bind probe when something
@@ -4821,20 +4700,12 @@ async def stop_managed_vllm() -> None:
     _MANAGED_VLLM["proc"] = None
 
 
-@app.get("/api/local/status")
-async def get_local_status():
-    """Report what is actually connected at the configured broker URL."""
-    result = await asyncio.to_thread(_cached_detect)
-    return JSONResponse({**result, "url": _LOCAL_BROKER_URL, "managed": _broker_is_managed()})
-
-
 # ── Provider-keyed local routes ───────────────────────────
 #
-# Thin wrappers around the same _broker_get/_mgmt_get machinery
-# above, parameterized by a registered provider instead of the hard-coded
-# _LOCAL_BROKER_URL. The legacy /api/local/{queue,metrics} routes above
-# stay as-is and keep working unchanged -- only the write-refusal/model/health/
-# traces routes are new, all provider-keyed by construction.
+# Thin wrappers around the same _broker_get/_mgmt_get machinery above,
+# parameterized by a registered provider. `GET /api/local/status` used to sit
+# here and reported the broker's address plus whether Studio owned it; both
+# facts died with the broker (T11).
 
 _MODEL_FIELDS = ("id", "type", "arch", "quantization", "state",
                   "max_context_length", "loaded_context_length", "container_path",
@@ -5070,23 +4941,6 @@ def resolve_local_output_reservation(provider_id: str, model_id: str) -> int | N
     if not isinstance(window, int) or window <= 0:
         return None
     return max(1024, min(8000, window // 4))
-
-
-@app.get("/api/local/{provider_id}/queue")
-async def get_provider_queue(provider_id: str):
-    provider = _require_provider(provider_id)
-    if provider is None:
-        return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "queue" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
-    try:
-        data = await asyncio.to_thread(_broker_get, "/queue", "", provider["broker_url"])
-    except Exception:
-        logger.debug("Provider %s /queue unreachable", provider_id, exc_info=True)
-        return JSONResponse({"reachable": False}, status_code=503)
-    if not _looks_like(data, _QUEUE_SHAPE_KEYS):
-        return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
-    return JSONResponse(data)
 
 
 @app.get("/api/local/{provider_id}/metrics")
@@ -5431,22 +5285,13 @@ async def get_provider_health(provider_id: str):
     if "health" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
 
-    # Only providers actually FRONTED by the lane broker get queue-probed.
-    # Probing /queue on a broker-less backend (vLLM direct, Plexar) 404s, and
-    # reporting that as `broker.reachable: false` is a false claim about a
-    # component that does not exist there — which then dragged `ok` to false
-    # for a perfectly healthy engine. The `queue` capability is the signal:
-    # it is exactly "there is a broker in front of this".
-    has_broker = "queue" in provider["capabilities"]
-
-    async def probe_broker():
-        if not has_broker:
-            return None  # not applicable — distinct from "unreachable"
-        try:
-            await asyncio.to_thread(_broker_get, "/queue", "", provider["broker_url"])
-            return True
-        except Exception:
-            return False
+    # NOTHING IS BROKER-PROBED ANY MORE. The lane broker was the only thing
+    # that ever answered /queue and it is removed (T11), so `broker` is now
+    # permanently `{applicable: false, reachable: null}` for every provider.
+    # The KEY IS KEPT rather than dropped: it is on the wire that the frontend
+    # reads, and `applicable: false` already meant "there is no broker here",
+    # which is now simply true everywhere. Removing the key would be a
+    # breaking shape change to say something the shape can already say.
 
     async def probe_provider():
         try:
@@ -5455,16 +5300,15 @@ async def get_provider_health(provider_id: str):
         except Exception:
             return False, 0, None
 
-    broker_reachable, (provider_reachable, models_loaded, raw) = await asyncio.gather(
-        probe_broker(), probe_provider()
-    )
+    provider_reachable, models_loaded, raw = await probe_provider()
 
     body = {
         # `applicable: false` + `reachable: null` says "no broker here", which
-        # is not the same statement as "the broker is down".
-        "broker": {"applicable": has_broker, "reachable": broker_reachable},
+        # is not the same statement as "the broker is down". It is now the
+        # only answer this key ever gives.
+        "broker": {"applicable": False, "reachable": None},
         "provider": {"reachable": provider_reachable, "models_loaded": models_loaded},
-        "ok": bool(provider_reachable and (broker_reachable or not has_broker)),
+        "ok": bool(provider_reachable),
     }
 
     # Plexar is a GATEWAY: it answers 200 on /v1/models even while the engine
@@ -5909,78 +5753,6 @@ async def restart_provider_model(provider_id: str, request: Request):
     return JSONResponse({"ok": True, "status": "restarting", "model": model})
 
 
-_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-
-
-@app.get("/api/local/{provider_id}/traces")
-async def get_provider_traces(provider_id: str, limit: int = 20):
-    provider = _require_provider(provider_id)
-    if provider is None:
-        return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "traces" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
-    if limit < 1 or limit > 100:
-        limit = max(1, min(100, limit))
-    try:
-        data = await asyncio.to_thread(_broker_get, "/traces", f"limit={limit}", provider["broker_url"])
-    except Exception:
-        logger.debug("Provider %s /traces unreachable", provider_id, exc_info=True)
-        return JSONResponse({"reachable": False}, status_code=503)
-    return JSONResponse(data)
-
-
-@app.get("/api/local/{provider_id}/trace/{trace_id}")
-async def get_provider_trace(provider_id: str, trace_id: str):
-    provider = _require_provider(provider_id)
-    if provider is None:
-        return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "traces" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
-    if not _TRACE_ID_RE.match(trace_id):
-        return JSONResponse({"error": "invalid trace_id"}, status_code=400)
-    try:
-        data = await asyncio.to_thread(_broker_get, f"/trace/{trace_id}", "", provider["broker_url"])
-    except Exception:
-        logger.debug("Provider %s /trace/%s unreachable", provider_id, trace_id, exc_info=True)
-        return JSONResponse({"reachable": False}, status_code=503)
-    return JSONResponse(data)
-
-
-@app.get("/api/local/{provider_id}/metrics/timeseries")
-async def get_provider_metrics_timeseries(provider_id: str, window: str = "24h", bucket: str = "1h"):
-    """Proxy the broker's recomputable timeseries (GET :broker/metrics/timeseries).
-
-    Same window validation as /metrics -- window is never forwarded unvalidated.
-    ``bucket`` is passed through as-is; the broker validates bucket sizing per
-    its own contract (5m/1h/1d), this proxy does not second-guess it.
-    """
-    provider = _require_provider(provider_id)
-    if provider is None:
-        return JSONResponse({"error": "unknown provider"}, status_code=404)
-    if "metrics" not in provider["capabilities"]:
-        return JSONResponse({"error": "capability not available"}, status_code=404)
-    if window not in _LOCAL_METRICS_WINDOWS:
-        return JSONResponse(
-            {"error": f"window must be one of {list(_LOCAL_METRICS_WINDOWS)}"},
-            status_code=400,
-        )
-    # vLLM's Prometheus counters are cumulative-since-start -- there is no
-    # per-bucket history to recompute. Say so honestly instead of proxying a
-    # /metrics/timeseries the vLLM server does not serve (which would 503 as if
-    # it were merely unreachable).
-    if provider.get("kind") == "vllm":
-        return JSONResponse(
-            {"window": window, "bucket": bucket, "buckets": [], "supported": False,
-             "note": "vLLM exposes cumulative counters only; no recomputable timeseries."}
-        )
-    try:
-        data = await asyncio.to_thread(
-            _broker_get, "/metrics/timeseries", f"window={window}&bucket={bucket}", provider["broker_url"]
-        )
-    except Exception:
-        logger.debug("Provider %s /metrics/timeseries unreachable", provider_id, exc_info=True)
-        return JSONResponse({"reachable": False}, status_code=503)
-    return JSONResponse(data)
 
 
 # ── API-side usage summary + reference pricing ────────────
@@ -6228,29 +6000,20 @@ async def post_pricing_refresh():
 # Legacy routes: delegate to the default provider so old clients keep working.
 
 
-@app.get("/api/local/queue")
-async def get_local_queue():
-    """Proxy the broker's read-only queue snapshot (GET :broker/queue).
-
-    Returns the broker JSON verbatim on success; 503 {reachable: false} when
-    the broker is down/unreachable so the frontend renders a dim 'offline'
-    state without console noise.
-    """
-    return await get_provider_queue(_DEFAULT_PROVIDER)
-
-
 # ── Unified Prometheus exporter (Cockpit as the fleet metrics hub) ──
 #
-# vLLM speaks Prometheus natively; LM Studio (behind the broker) does NOT. Since
-# Cockpit already holds every provider's stats via its adapters, it re-exports
+# vLLM speaks Prometheus natively; LM Studio does NOT (the lane broker used to
+# synthesise counters for it, and that went with the broker in T11 -- so LM
+# Studio now contributes `up` and its model ceiling, and no run counters).
+# Cockpit already holds every provider's stats via its adapters and re-exports
 # them ALL as one Prometheus target at GET /metrics, each series labeled by
 # provider — so Prometheus/Grafana see every backend (vLLM + LM Studio + future)
 # side by side from a single scrape. Read-only; best-effort per provider.
 
 def _provider_snapshot(provider: dict) -> dict:
-    """Blocking: normalized {metrics, queue, up} for one provider (or up:False)."""
+    """Blocking: normalized {metrics, up} for one provider (or up:False)."""
     caps = provider.get("capabilities", [])
-    out = {"up": False, "metrics": None, "queue": None}
+    out = {"up": False, "metrics": None}
     if "metrics" in caps:
         try:
             if provider.get("kind") == "vllm":
@@ -6264,12 +6027,6 @@ def _provider_snapshot(provider: dict) -> dict:
             # series stays continuous (up=0 but counters don't drop to nothing).
             if provider.get("kind") == "vllm":
                 out["metrics"] = _vllm_offline_snapshot()
-    if "queue" in caps:
-        try:
-            out["queue"] = _broker_get("/queue", "", provider["broker_url"])
-            out["up"] = True
-        except Exception:
-            logger.debug("Prometheus export: %s queue unreachable", provider["id"], exc_info=True)
     if "models" in caps:
         try:
             md = _mgmt_get(provider, _models_path(provider))
@@ -6338,10 +6095,12 @@ def _render_prometheus(pairs: list) -> str:
             emit("cockpit_provider_req_completion_tokens_avg", "Avg completion (output) tokens per request", pid, kind, cout.get("avg"))
             emit("cockpit_provider_req_completion_tokens_p95", "p95 completion (output) tokens per request", pid, kind, cout.get("p95"))
             emit("cockpit_provider_model_max_tokens", "Model max context window (ceiling)", pid, kind, snap.get("model_max"))
-        q = snap.get("queue")
-        if isinstance(q, dict) and q.get("reachable") is not False:
-            depth = (1 if q.get("in_flight") else 0) + (len(q["queued"]) if isinstance(q.get("queued"), list) else 0)
-            emit("cockpit_provider_queue_depth", "Broker queue depth (in-flight + queued)", pid, kind, depth)
+        # `cockpit_provider_queue_depth` was emitted here from the lane
+        # broker's /queue snapshot and is GONE with it (T11). The in-engine
+        # `cockpit_provider_waiting` series above is the surviving depth
+        # signal and it is a different measurement -- vLLM's own scheduler
+        # backlog, not a front-end lane queue. Grafana panels keyed on the
+        # old series will go empty rather than silently read the new one.
 
     return "\n".join(lines) + "\n"
 
@@ -6369,7 +6128,11 @@ _PROMETHEUS_URL = os.getenv("COCKPIT_PROMETHEUS_URL", "http://127.0.0.1:9491").r
 _TSDB_METRICS = {
     "throughput_tps": 'cockpit_provider_tps{provider=~"%s"}',
     "decode_tps": 'cockpit_provider_decode_tps{provider=~"%s"}',
-    "queue_depth": 'cockpit_provider_queue_depth{provider=~"%s"}',
+    # `queue_depth` is REMOVED, not re-pointed. The exporter no longer emits
+    # cockpit_provider_queue_depth (it came from the lane broker, T11), and
+    # aliasing this key to `waiting` would answer a question about a lane
+    # queue with a number about vLLM's scheduler -- a different measurement
+    # wearing the old name.
     "running": 'cockpit_provider_running{provider=~"%s"}',
     "waiting": 'cockpit_provider_waiting{provider=~"%s"}',
     "kv_cache_pct": 'cockpit_provider_kv_cache_pct{provider=~"%s"}',

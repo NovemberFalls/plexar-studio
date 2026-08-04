@@ -20,7 +20,6 @@ import EngineApi, {
   highlightJson,
   resolvePath,
   routeId,
-  runBlockReason,
 } from "../components/engine/EngineApi.jsx";
 
 const CAPS = new Set(["queue", "metrics", "models", "traces", "health", "model-control"]);
@@ -57,33 +56,12 @@ describe("EngineApi route explorer", () => {
 
   it("renders grouped route rows and sends nothing on mount", () => {
     setup();
-    expect(screen.getByText("Lane broker · direct")).toBeInTheDocument();
+    // T11: the "Lane broker · direct" group is gone with the broker.
+    expect(screen.queryByText("Lane broker · direct")).not.toBeInTheDocument();
     expect(screen.getByText("Plexar Studio · per-provider")).toBeInTheDocument();
     expect(screen.getByText("Plexar Studio · usage & sessions")).toBeInTheDocument();
     expect(screen.getByTestId("api-no-selection")).toBeInTheDocument();
     expect(globalThis.fetch).not.toHaveBeenCalled();
-  });
-
-  it("marks broker-direct rows as not runnable from the browser and explains why", () => {
-    setup();
-    const run = screen.getByTestId("route-run-GET /queue");
-    expect(run).toBeDisabled();
-    expect(run.getAttribute("title")).toMatch(/not runnable from here/i);
-    expect(run.getAttribute("title")).toMatch(/cors/i);
-    expect(screen.getByTestId("route-row-GET /queue")).toHaveAttribute("data-blocked", "true");
-  });
-
-  it("never lets POST /v1/chat/completions run, on any origin", () => {
-    setup();
-    const run = screen.getByTestId("route-run-POST /v1/chat/completions");
-    expect(run).toBeDisabled();
-    expect(run.getAttribute("title")).toMatch(/spends real inference/i);
-    fireEvent.click(run);
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-    // …and the reason survives at the module level, not just in the DOM.
-    expect(
-      runBlockReason({ method: "POST", path: "/v1/chat/completions", direct: true, forbidden: "x" }, { caps: CAPS })
-    ).toBe("x");
   });
 
   it("runs a same-origin GET immediately and shows status + latency", async () => {
@@ -123,12 +101,12 @@ describe("EngineApi route explorer", () => {
   });
 
   it("dims capability-gated rows when the provider lacks the capability", () => {
-    setup({ caps: new Set(["models", "health", "metrics"]) });
-    const tracesRow = screen.getByTestId("route-row-GET /api/local/{provider_id}/traces");
-    expect(tracesRow).toHaveAttribute("data-blocked", "true");
-    const run = screen.getByTestId("route-run-GET /api/local/{provider_id}/traces");
+    setup({ caps: new Set(["models", "health"]) });
+    const metricsRow = screen.getByTestId("route-row-GET /api/local/{provider_id}/metrics");
+    expect(metricsRow).toHaveAttribute("data-blocked", "true");
+    const run = screen.getByTestId("route-run-GET /api/local/{provider_id}/metrics");
     expect(run).toBeDisabled();
-    expect(run.getAttribute("title")).toMatch(/does not declare the "traces" capability/i);
+    expect(run.getAttribute("title")).toMatch(/does not declare the "metrics" capability/i);
     // A route the provider DOES declare stays runnable.
     expect(screen.getByTestId("route-run-GET /api/local/{provider_id}/models")).toBeEnabled();
   });
@@ -141,10 +119,9 @@ describe("EngineApi route explorer", () => {
   });
 
   it("refuses to run routes whose path parameter cannot be filled", () => {
-    setup({ data: { models: { models: [] }, traces: { traces: [] } } });
-    const run = screen.getByTestId("route-run-GET /api/local/{provider_id}/trace/{trace_id}");
-    expect(run).toBeDisabled();
-    expect(run.getAttribute("title")).toMatch(/\{trace_id\}/);
+    // The {trace_id} row went with the broker (T11); {terminal_id} carries
+    // this behaviour on its own.
+    setup({ data: { models: { models: [] } } });
     expect(
       screen.getByTestId("route-run-GET /api/terminals/{terminal_id}/usage").getAttribute("title")
     ).toMatch(/\{terminal_id\}/);
@@ -202,24 +179,19 @@ describe("EngineApi route explorer", () => {
 
   it("offers cURL only when it can write a correct URL", () => {
     setup();
-    fireEvent.click(screen.getByTestId("route-select-GET /queue"));
-    const copy = screen.getByTestId("api-copy-curl");
-    expect(copy).toBeDisabled();
-    expect(copy.getAttribute("title")).toMatch(/server-side only/i);
-
     fireEvent.click(screen.getByTestId("route-select-GET /api/local/providers"));
     expect(screen.getByTestId("api-copy-curl")).toBeEnabled();
   });
 });
 
 describe("EngineApi pure helpers", () => {
-  it("resolvePath substitutes provider, model and trace ids", () => {
-    const ctx = { providerId: "p 1", caps: CAPS, modelId: "m/1", traceId: "t1" };
-    expect(resolvePath({ path: "/api/local/{provider_id}/queue" }, ctx).path).toBe("/api/local/p%201/queue");
+  it("resolvePath substitutes provider and model ids", () => {
+    const ctx = { providerId: "p 1", caps: CAPS, modelId: "m/1" };
+    expect(resolvePath({ path: "/api/local/{provider_id}/metrics" }, ctx).path).toBe("/api/local/p%201/metrics");
     expect(
       resolvePath({ path: "/api/local/{provider_id}/models/{model_id}/load", needs: "model_id" }, ctx).path
     ).toBe("/api/local/p%201/models/m%2F1/load");
-    expect(resolvePath({ path: "/api/local/{provider_id}/queue" }, { ...ctx, providerId: null }).missing).toBe(
+    expect(resolvePath({ path: "/api/local/{provider_id}/metrics" }, { ...ctx, providerId: null }).missing).toBe(
       "provider_id"
     );
   });

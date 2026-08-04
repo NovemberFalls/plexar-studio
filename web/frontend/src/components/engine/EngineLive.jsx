@@ -2,7 +2,7 @@
  * EngineLive — Engine ▸ Live (screen 2b). What the engine is doing RIGHT NOW.
  *
  * Four cards: the loaded model + its memory, the live lane, routing, and the
- * in-flight/queued table (shared with Engine ▸ Requests).
+ * in-flight/queued table (from the engine's own scheduler counters).
  *
  * Every number here comes from an endpoint that exists. Where the platform does
  * not report a value the card says so in words — VRAM is the honest example: no
@@ -23,7 +23,6 @@ import { useState } from "react";
 import { Cpu, Gauge, Route, RefreshCw } from "lucide-react";
 
 import { laneLive, fmtEta } from "../../utils/laneMath.js";
-import { QueueTable } from "./EngineRequests.jsx";
 import {
   Bar,
   Badge,
@@ -84,9 +83,8 @@ function controlUnavailableReason(provider) {
 /** The engine identity line: label plus whatever endpoint the server is willing
  *  to name. Provider URLs are server-side by design (SSRF stance), so an absent
  *  hint is expected and gets said out loud rather than guessed. */
-function endpointLine(provider, status) {
+function endpointLine(provider) {
   if (provider?.endpoint_hint) return provider.endpoint_hint;
-  if (provider?.capabilities?.includes("queue") && status?.url) return status.url;
   return "endpoint kept server-side";
 }
 
@@ -103,7 +101,7 @@ function loadedModelName(models, metrics) {
  * dialog, and both writes are confirm-gated: a restart tears down in-flight
  * inference, which is destructive even though it is routine.
  */
-function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
+function LoadedModelCard({ provider, models, metrics, caps, onToast }) {
   const [swapOpen, setSwapOpen] = useState(false);
   const [target, setTarget] = useState("");
   const [confirm, setConfirm] = useState(null); // "swap" | "restart" | null
@@ -190,7 +188,7 @@ function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
       testId="engine-model-card"
       style={{ flex: 1 }}
       title={<CardTitle icon={Cpu} token="var(--cc-accent)">{provider?.label || "Engine"}</CardTitle>}
-      right={<Badge testId="engine-endpoint">{endpointLine(provider, status)}</Badge>}
+      right={<Badge testId="engine-endpoint">{endpointLine(provider)}</Badge>}
     >
       <div
         data-testid="engine-loaded-model"
@@ -342,9 +340,9 @@ function LoadedModelCard({ provider, status, models, metrics, caps, onToast }) {
 }
 
 /** Live lane: four stats, a 60s decode sparkline, and the drain estimate. */
-function LaneCard({ queue, metrics, series }) {
-  const unread = queue === undefined && metrics === undefined;
-  const live = laneLive(queue, metrics);
+function LaneCard({ metrics, series }) {
+  const unread = metrics === undefined;
+  const live = laneLive(metrics);
   const eta = live?.etaSec ?? null;
   const drain = fmtEta(eta);
 
@@ -369,7 +367,7 @@ function LaneCard({ queue, metrics, series }) {
         <Note testId="lane-loading">Reading the lane…</Note>
       ) : live == null ? (
         <Note testId="lane-offline">
-          Neither the lane queue nor the engine metrics are answering, so Plexar Studio cannot say what is
+          The engine metrics are not answering, so Plexar Studio cannot say what is
           in flight. Nothing here is zero — it is unread.
         </Note>
       ) : (
@@ -504,7 +502,6 @@ function LaneFooter({ metrics }) {
 
 export default function EngineLive({
   provider,
-  status,
   caps,
   data,
   series,
@@ -517,13 +514,12 @@ export default function EngineLive({
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", minWidth: 0 }}>
         <LoadedModelCard
           provider={provider}
-          status={status}
           models={data?.models}
           metrics={data?.metrics}
           caps={caps}
           onToast={onToast}
         />
-        <LaneCard queue={data?.queue} metrics={data?.metrics} series={series} />
+        <LaneCard metrics={data?.metrics} series={series} />
       </div>
 
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", minWidth: 0 }}>
@@ -532,8 +528,13 @@ export default function EngineLive({
           localEnabled={localEnabled}
           setLocalEnabled={setLocalEnabled}
         />
+        {/* QueueTable is GONE (T11). It rendered ONE ROW PER QUEUED JOB from
+            the lane broker's /queue payload -- the broker was the only thing
+            that ever knew about individual jobs. The engine's own scheduler
+            reports COUNTS (running/waiting) and no per-job identity, so there
+            is nothing to put in a table; those counts are already the Lane
+            card's stats above. */}
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <QueueTable queue={data?.queue} caps={caps} metrics={data?.metrics} compact style={{ flex: 1 }} />
           <LaneFooter metrics={data?.metrics} />
         </div>
       </div>

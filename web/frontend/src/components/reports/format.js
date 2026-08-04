@@ -37,7 +37,6 @@ export const REPORTS_TABS = [
   { id: "sessions", label: "Sessions" },
   { id: "models", label: "Models" },
   { id: "tools", label: "Tools" },
-  { id: "traces", label: "Traces" },
   { id: "logs", label: "Logs" },
   { id: "local-engine", label: "Local engine" },
 ];
