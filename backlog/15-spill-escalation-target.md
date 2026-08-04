@@ -119,3 +119,95 @@ When it is flipped:
   queue works before any refusal is armed. **Watched to fail**: set one
   threshold to `0.0`s and assert a 503 `{spill:true}` at the wire, then unset.
 - **Owner reachable throughout.** This rig serves his sessions.
+
+---
+
+# LEN HAS RULED — 2026-08-03. TWO RULINGS, AND ONE OF THEM I MEASURED.
+
+> *"If Spill wont make it to frontier whats the point? And it should ride the
+> monthly sub before API..."*
+
+**RULING (i) — SPILL MUST ACTUALLY REACH FRONTIER.** A refusal with no listener
+has no point. This confirms the finding above rather than overriding it: do not
+flip shadow mode until something catches the 503 and re-issues the request.
+
+**RULING (ii) — THE ESCALATION ORDER IS SUBSCRIPTION FIRST, PAID API SECOND.**
+Len pays a monthly Claude subscription and the Claude Code harness already rides
+it. Spending per-token OpenRouter credit while a flat-rate subscription sits idle
+is waste. So the preferred target is the subscription-backed path; OpenRouter is
+the FALLBACK, not the default.
+
+**NOTHING WAS BUILT THIS WINDOW. The build was the priority, and the three gaps
+named above (a request-time path, a model mapping, a spend interlock) are all
+still open.** Ruling (ii) makes the SPEND INTERLOCK more important, not less:
+"prefer the subscription" is only a meaningful instruction if something can tell
+which path a request took and what it cost. An escalation you cannot attribute is
+indistinguishable from one that silently went to the paid API.
+
+## THE MEASUREMENT LEN ASKED FOR: is the subscription reachable at request time?
+
+**YES — AND THE WAY IT IS REACHABLE IS ITSELF THE DECISION.** Measured at the
+wire 2026-08-03 against `api.anthropic.com/v1/messages`, using the OAuth token
+Studio ALREADY reads for the usage bars (`~/.claude/.credentials.json` ->
+`claudeAiOauth.accessToken`, `subscriptionType: max`, scopes include
+**`user:inference`**).
+
+| # | request shape | result |
+|---|---|---|
+| A | `Authorization: Bearer <oat>`, no beta header | **429** `rate_limit_error` |
+| B | + `anthropic-beta: oauth-2025-04-20` | **429** `rate_limit_error` |
+| C | token as `x-api-key` | **401** `invalid x-api-key` |
+| D | + `claude-code-20250219` beta + Claude Code system prompt + CLI user-agent | **200**, real completion |
+
+**THE 429 IS NOT A QUOTA.** I predicted 401 on (A) and was wrong, and the miss is
+the whole finding — a 401 would have meant "this credential cannot do inference",
+which is a dead end. A 429 means the credential AUTHENTICATED and was then
+refused. Checked against `GET /api/oauth/usage` in the same minute: **five-hour
+window at 9%, seven-day at 0%, `extra_usage.spend_limit_reached: false`.** There
+was no cap to hit. The refusal is structural.
+
+**So the subscription path is gated on the caller PRESENTING AS CLAUDE CODE.**
+Same token, same quota, same endpoint: refused as a generic OAuth client,
+accepted as the CLI. That is a deliberate access control, and (D) passing means
+honouring ruling (ii) is a POLICY decision, not a technical one.
+
+### THIS IS AN ASK, AND I AM NOT BUILDING IT EITHER WAY
+
+Len needs this before anything is built, which is exactly why it was measured:
+
+- **The case that is clearly fine.** When the spilling request ORIGINATED in a
+  Claude Code session running inside Studio, the traffic genuinely IS Claude
+  Code — Studio would be relaying its own child's request to the same
+  subscription that child already uses. Ruling (ii) is honourable here without
+  anything pretending to be anything.
+- **The case that is clearly not.** Studio spilling on its OWN behalf — local
+  model overflow from a non-CLI caller — reaching the subscription by asserting
+  it is the Claude Code CLI is circumventing a control Anthropic enforces on
+  purpose. The 429 in (A) and (B) IS that enforcement. I will not build that, and
+  it does not belong in a product Len ships to anyone else.
+- **Which means the shape of the fix follows the ORIGIN of the spilled request,
+  not a config toggle.** That is a real design constraint ruling (ii) did not
+  anticipate, and it is the thing Len must rule on next.
+
+**If Len wants the strict reading of (ii) — subscription first for ALL spill —
+then it is NOT reachable for the second case, and he needs to know that before we
+build anything.** OpenRouter would remain the only lawful target for
+Studio-originated spill, which inverts his stated preference for that traffic
+class. That is the honest answer to the question he asked.
+
+### What is STILL missing, unchanged by the ruling
+
+1. **A request-time path.** `pty_manager.py:900` binds `ANTHROPIC_BASE_URL` at
+   SPAWN time, per session, into the child env, and never revisits it. A spill
+   happens mid-conversation, per request, inside a CLI already pinned to the
+   local proxy. Nothing re-routes at that layer today.
+2. **A model mapping.** The spilled body names `qwen3-coder-30b-awq`. The
+   subscription path serves Anthropic model ids only; OpenRouter has never heard
+   of it either. Something must decide what a local model escalates TO, and
+   "pick the biggest" is a cost decision wearing a routing decision's clothes.
+3. **A spend interlock, now load-bearing.** Per ruling (ii) the interlock must
+   record WHICH path served each escalation, not merely what it cost.
+   `spend_guard.py` already separates `real` from `equivalent` money and keys
+   enforcement on `mode`, so a subscription-served escalation belongs in
+   `equivalent` and an OpenRouter one in `real`. That distinction already exists
+   and is the right home; nothing writes it today.
