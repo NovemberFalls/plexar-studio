@@ -1292,8 +1292,19 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     )
     if reason:
         logger.warning("Refused WS /ws/terminal/%s — %s", terminal_id, reason)
-        # 4403, not 4004: a stale bundle or a misconfigured dev server must read
-        # as "this connection was refused", never as "your terminal is gone".
+        # MEASURED, and not what an earlier version of this comment claimed: a
+        # close() BEFORE accept() is turned by Starlette into an HTTP 403 on the
+        # handshake itself — the upgrade never completes, and the 4403 code and
+        # reason below are discarded rather than delivered. That is the stronger
+        # outcome (a refused origin never gets a live socket at all, not even
+        # briefly), so it is kept deliberately.
+        #
+        # The cost, stated because it is a real one: the browser reports a failed
+        # handshake as onerror + onclose(1006), so the client CANNOT distinguish
+        # "origin refused" from "server down" and never sees "reload the app".
+        # A stale bundle therefore retries and gives up rather than telling the
+        # user to reload. Fixing that is a frontend change (probe /api/version on
+        # 1006 and surface the 403), and it is NOT done here.
         await websocket.close(code=4403, reason="Origin not allowed — reload the app")
         return
 

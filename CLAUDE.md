@@ -128,9 +128,17 @@ xterm.js in `TerminalPane.jsx` and `PopoutTerminal.jsx`; nothing in `tests/` con
 The check runs **before `accept()` and before the terminal lookup** — completing the
 upgrade and closing afterwards hands out a free id oracle (`101`-then-`4004` for a miss vs.
 `101`-and-silence for a hit), and `active_consumer`'s "latest connection wins" means a
-second socket **supersedes the real pane** on a terminal already in use. Refusal closes
-`4403` with "reload the app", never `4004` "Terminal not found" — a stale bundle must not
-read as a lost terminal.
+second socket **supersedes the real pane** on a terminal already in use.
+
+**A refused WebSocket gets an HTTP `403` on the handshake, NOT a `101` then close `4403`**
+— measured at the wire, and the opposite of what this section first claimed. Starlette
+converts a `close()` before `accept()` into a handshake rejection, so the `4403` code and
+its reason are **discarded, never delivered**. That is the stronger outcome and is kept on
+purpose: a refused origin never holds a live socket, not even for an instant. **The cost is
+real and is not fixed:** a browser reports a failed handshake as `onerror` + `onclose(1006)`,
+so the client cannot tell "origin refused" from "server down" and a stale bundle silently
+retries instead of saying "reload the app". Surfacing that is a frontend change (probe
+`/api/version` on a `1006` and read the `403`) and it is **open work, not shipped**.
 
 - **`Origin: null` is refused, never treated as absent.** A sandboxed iframe or `data:`
   document is a real browser origin that is definitively not ours.

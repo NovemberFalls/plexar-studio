@@ -171,6 +171,76 @@ async def test_same_origin_fetch_without_origin_header_still_works():
     assert r.status_code == 200
 
 
+# ── The WebSocket, at the handshake ───────────────────────────────────────
+
+def _ws_connect(origin: str | None, host: str = "127.0.0.1:8420"):
+    from starlette.testclient import TestClient
+
+    headers = {"host": host}
+    if origin is not None:
+        headers["origin"] = origin
+    client = TestClient(app, base_url=f"http://{host}")
+    return client.websocket_connect("/ws/terminal/deadbeef", headers=headers)
+
+
+@pytest.mark.parametrize(
+    "origin,host",
+    [
+        ("https://evil.example", "127.0.0.1:8420"),
+        (None, "127.0.0.1:8420"),          # absent — the rule that differs from HTTP
+        ("null", "127.0.0.1:8420"),        # sandboxed iframe / data: document
+        ("https://evil.example", "evil.example"),  # rebinding surrogate
+    ],
+)
+def test_refused_websocket_is_rejected_before_accept(origin, host):
+    """The refusal is 4403 and it happens BEFORE `accept()` and before the lookup.
+
+    That ordering is what removes the id oracle: with the lookup first,
+    `101`-then-`4004` for a miss versus `101`-and-silence for a hit enumerates
+    32-bit terminal ids for free.
+
+    **What this test can and cannot see.** `TestClient` surfaces a pre-accept
+    close as a `WebSocketDisconnect` carrying the code. **Under uvicorn the same
+    close becomes an HTTP `403` on the handshake and the upgrade never completes
+    at all** — measured live on port 8421, and the stronger outcome, which is why
+    it is kept. The 4403 asserted here is therefore the in-process shape of a
+    refusal that is a `403` at the wire; both agree that no socket is ever
+    accepted. The consequence for the UI is recorded in `server.py`: the browser
+    sees `1006`, so the reason never reaches the user.
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with _ws_connect(origin, host):
+            pass
+    assert exc.value.code == 4403  # refused — distinct from 4004 "no such terminal"
+
+
+def test_the_real_pane_still_gets_its_socket():
+    """Positive twin. Without it, refuse-everything passes every arm above.
+
+    `deadbeef` is not a real terminal, so the handshake SUCCEEDS and the handler
+    then closes 4004 — which is exactly the point: the guard let it through and
+    the terminal lookup, not the guard, decided the outcome.
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with _ws_connect("http://localhost:8420", "localhost:8420") as ws:
+            ws.receive_text()
+    assert exc.value.code == 4004  # not 4403 — it passed the origin guard
+
+
+def test_dev_popout_handshake_succeeds_cross_origin():
+    """The one legitimately cross-origin caller: a :5174 page dialling :8420."""
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with _ws_connect("http://localhost:5174", "localhost:8420") as ws:
+            ws.receive_text()
+    assert exc.value.code == 4004
+
+
 @pytest.mark.asyncio
 async def test_the_claude_cli_path_is_not_collateral():
     """`/shim/*` is driven by the Node CLI via ANTHROPIC_BASE_URL: loopback Host,
