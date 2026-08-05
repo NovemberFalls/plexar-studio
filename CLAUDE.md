@@ -211,6 +211,30 @@ share a port, so the port is exactly the right discriminator.
 - **CRITICAL build lesson:** Always copy the fresh PyInstaller exe to `src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe` BEFORE building Tauri. A stale sidecar = "Internal Server Error" on desktop launch.
 - **Tauri webview:** `dragDropEnabled: false` in tauri.conf.json so the web-native file drop handler works in the desktop app.
 
+### The desktop app embeds NO frontend — the sidecar serves it
+
+`tauri.conf.json` sets `frontendDist: "http://localhost:8420"`, so the window is a **thin
+webview over the sidecar's HTTP server**. The bundle a user sees is the copy PyInstaller
+froze into `cockpit-server.exe` (the spec's `frontend_dist` datas entry), **not**
+`frontend/dist` on disk and not anything inside `claude-cockpit.exe`.
+
+**Therefore `npm run build` MUST run before PyInstaller.** `npm run tauri:build` runs vite
+itself, so "PyInstaller, then tauri:build" *looks* like it builds the frontend — it does,
+one step too late. The sidecar then ships the PREVIOUS release's UI.
+
+**This shipped broken in 1.32.0 and 1.33.0, and every existing check passed.**
+`scripts/check-version-sources.mjs` compares package.json / tauri.conf / Cargo.toml / both
+lockfiles / `dist/` and found them all agreeing on the new version — because each one did.
+**None of them is the bundle that gets served.** The only visible symptom was the TopBar
+version pill (`VITE_APP_VERSION`, baked into the JS at vite time) disagreeing with
+`GET /api/version` (which reads the bundled `package.json`). The pill was right.
+
+`web/verify_sidecar_bundle.py` closes it: it pulls `frontend_dist/index.html` back out of
+the onefile archive and compares **bytes** against `frontend/dist/index.html`. Run it after
+PyInstaller and before Tauri. A timestamp comparison is NOT a substitute — rebuilding the
+sidecar makes it newer than `dist/` while still carrying stale contents, which is exactly
+the shape of the bug.
+
 ## PTY injection — paste and submit are TWO writes
 
 Every programmatic injection (bridge V1/V2/V3, `/rename` sync, `POST /api/terminals/{id}/command`) goes through `bridge_manager._paste_and_submit`. **Never call `_wrap` and append `\r` yourself** — that is the bug this contract exists to prevent.
