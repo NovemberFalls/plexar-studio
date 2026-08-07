@@ -58,3 +58,17 @@ web/.cockpit-child-pids-*
 
 # Local build/release artifact downloads (not project-relative Downloads folder)
 downloads/
+
+# Internal working documents — kept ON DISK, deliberately not published.
+# These are planning notes, agent instructions, QA scratch and architecture
+# rationale written for whoever is building, not for whoever is using. They
+# name working paths, unshipped plans and half-formed opinions. Untracked with
+# `git rm --cached` rather than deleted: they are still the project's memory.
+CLAUDE.md
+AGENTS.md
+BACKLOG.md
+CONTINUATION.md
+QA_PLAN.md
+RALPH.md
+backlog/
+docs/

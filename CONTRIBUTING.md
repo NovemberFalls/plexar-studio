@@ -6,8 +6,8 @@ Thank you for your interest in contributing to Plexar Studio! This guide will he
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/NovemberFalls/claude-cockpit.git
-   cd claude-cockpit
+   git clone https://github.com/NovemberFalls/plexar-studio.git
+   cd plexar-studio
    ```
 
 2. **Install backend dependencies:**

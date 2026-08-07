@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 
+## [2.0.0] - 2026-08-07
+
+### Fixed — the reason this is a major version
+- **The desktop app now ships the frontend it was built with.** The Tauri window is a thin webview over the sidecar's HTTP server (`frontendDist: "http://localhost:8420"`), so the UI a user sees is the copy PyInstaller froze into `cockpit-server.exe` — not `frontend/dist` on disk and nothing inside `claude-cockpit.exe`. The build ran PyInstaller before vite, so **1.32.0 and 1.33.0 both served the previous release's interface.** Every existing check passed: `check-version-sources.mjs` compared package.json, tauri.conf, Cargo.toml, both lockfiles and `dist/`, and all of them genuinely agreed — none of them is the bundle that gets served. Upgrading from 1.x therefore delivers two releases of interface work that never actually shipped.
+- `web/verify_sidecar_bundle.py` — extracts `frontend_dist/index.html` back out of the onefile archive and compares **bytes** against `frontend/dist/index.html`. A timestamp check is not a substitute: rebuilding the sidecar makes it newer than `dist/` while still carrying stale contents, so mtime goes green on exactly the broken build. Proven to fail against the known-bad 1.33.0 sidecar before being trusted.
+
+### Security
+- **Browser-origin guard over every HTTP route and the terminal WebSocket** (`origin_guard.py`). The server authenticates none of its routes and binds loopback, but loopback is not a trust boundary against a browser — any page a user visits can reach it. Two independent clauses: an Origin allowlist (the drive-by/CSRF case) and a loopback `Host` check, which is the only thing that stops DNS rebinding, because under rebinding the browser believes it is same-origin and sends no `Origin` header at all. The WebSocket uses a stricter rule deliberately — a browser always sends `Origin` on a handshake, so an absent one there means "not the UI" and is refused before `accept()`.
+- A refused origin is told apart from a dead backend (`wsDiagnose.js`). Both look identical to a browser (`onclose(1006)`), and the remedies are opposite: waiting fixes a dead backend and never fixes a refused origin.
+
+### Fixed
+- **Starting a second server no longer kills the first one's sessions.** PID and child-PID files are now port-scoped; they used to be one fixed path shared by every server started from `web/`, which made the file a cross-instance channel — a dev run or test rig read the live server's tracked child PIDs and `cleanup_orphans()` killed them at startup.
+
+### Changed
+- **Renamed: Claude Cockpit → Plexar Studio**, including the repository (`claude-cockpit` → `plexar-studio`) and the Plexar mark across every icon slot.
+- Repository slimmed for publication: internal planning, QA and architecture-rationale documents are no longer tracked.
+
 ## [Unreleased]
 
 ### Removed
