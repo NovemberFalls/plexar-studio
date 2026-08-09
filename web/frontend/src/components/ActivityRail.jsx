@@ -282,36 +282,27 @@ export function ThemePopover({ onClose, align = "right" }) {
   );
 }
 
-/** Aperture logo mark (blue ring + gold center dot). */
 /**
- * The Plexar mark: a P whose bowl is cut by a diagonal light-bar.
+ * The Plexar mark — the REAL logo (`public/app-icon.png`, the same raster the
+ * installer and the window title bar use), not a redrawn one.
  *
- * Drawn as SVG rather than shipping the PNG, so it inherits the active theme's
- * accent instead of baking one palette's amber into a raster — the rail sits
- * against two different dark palettes, and a fixed-colour bitmap would look
- * correct in exactly one of them. The installer icon IS the raster; that one
- * has no theme to follow.
+ * This was previously a hand-drawn SVG "P" so it could follow the theme accent.
+ * The owner ruled that against: an approximation of the brand mark is worse than
+ * either the mark itself or nothing at all, so the redrawn glyph is gone. The
+ * raster carries its own dark rounded-square field, so callers render it BARE —
+ * no gradient badge wrapper behind it, or the mark reads as double-framed.
  */
 export function LogoMark({ size = 15 }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      {/* Stem + bowl of the P */}
-      <path
-        d="M6 3.5h7.2a5.4 5.4 0 0 1 0 10.8H10"
-        stroke="var(--cc-fg, #d8d8d8)"
-        strokeWidth="2.1"
-        strokeLinecap="square"
-      />
-      <path d="M6 3.5v17" stroke="var(--cc-fg, #d8d8d8)" strokeWidth="2.1" strokeLinecap="square" />
-      {/* The light-bar. Accent-coloured, so it is the one part that carries
-          the theme — matching the amber diagonal in the installer icon. */}
-      <path
-        d="M3.6 20.4 18.6 5.4"
-        stroke="var(--cc-accent, #ff9f43)"
-        strokeWidth="2.1"
-        strokeLinecap="round"
-      />
-    </svg>
+    <img
+      src="/app-icon.png"
+      width={size}
+      height={size}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+      style={{ display: "block", borderRadius: Math.round(size * 0.28) }}
+    />
   );
 }
 

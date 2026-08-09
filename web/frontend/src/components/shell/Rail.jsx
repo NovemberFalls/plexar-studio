@@ -99,20 +99,8 @@ export default function Rail({ activeSection, onSelectSection, engineStatus, use
         gap: 10,
       }}
     >
-      <div
-        style={{
-          width: 28,
-          height: 28,
-          borderRadius: 8,
-          background: "linear-gradient(140deg,#2a2f2a,#131311)",
-          border: "1px solid color-mix(in srgb, var(--cc-accent) 35%, transparent)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        <LogoMark size={16} />
+      <div style={{ display: "flex", flexShrink: 0 }}>
+        <LogoMark size={28} />
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>

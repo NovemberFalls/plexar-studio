@@ -5,7 +5,7 @@
    the single source for the model, permission-mode and effort vocabularies a
    session can be configured with. */
 import { useState, useEffect } from "react";
-import { PanelLeft, ChevronDown, KeyRound, Cpu } from "lucide-react";
+import { PanelLeft, PanelRight, ChevronDown, KeyRound, Cpu } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 import {
@@ -52,6 +52,11 @@ export default function TopBar({
   setFast,
   sidebarOpen,
   setSidebarOpen,
+  // The Inspector (right panel) had a collapse button and NO way back — a
+  // one-way door that only a reload undid. This toggle is the way back, and it
+  // is deliberately the mirror of the sidebar's: same icon family, same header.
+  inspectorOpen,
+  setInspectorOpen,
   user,
   onToast,
   localEnabled,
@@ -148,20 +153,10 @@ export default function TopBar({
         >
           <PanelLeft size={17} />
         </button>
-        <div
-          style={{
-            width: 25, height: 25, borderRadius: 7,
-            background: "linear-gradient(140deg,#2a2f2a,#131311)",
-            border: "1px solid color-mix(in srgb, var(--cc-accent, #4ea1e8) 35%, transparent)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: "0 0 12px color-mix(in srgb, var(--cc-accent, #4ea1e8) 25%, transparent)",
-          }}
-        >
-          <LogoMark size={15} />
-        </div>
-        <span style={{ fontSize: 14, fontWeight: 800, letterSpacing: ".1em", color: "var(--cc-fg, var(--text-primary))" }}>
-          COCKPIT
-        </span>
+        {/* Logo only — no "COCKPIT" wordmark. The app is Plexar Studio; the
+            window title bar already names it, and the old wordmark was the
+            pre-rename product name sitting in the chrome of the renamed one. */}
+        <LogoMark size={25} />
       </div>
 
       {/* Right */}
@@ -701,6 +696,28 @@ export default function TopBar({
           </div>
         )}
 
+        {/* Inspector toggle — the counterpart of the sidebar button on the far
+            left, so the two panels are reopened from the two ends of the same
+            bar. Rendered only when the host wired it up. */}
+        {setInspectorOpen && (
+          <button
+            onClick={() => setInspectorOpen((v) => !v)}
+            className="transition-colors hover-bg-surface"
+            style={{
+              display: "flex",
+              padding: 5,
+              borderRadius: 7,
+              color: inspectorOpen
+                ? "var(--cc-accent, var(--accent))"
+                : "var(--cc-dim, var(--text-secondary))",
+            }}
+            title={inspectorOpen ? "Hide inspector" : "Show inspector"}
+            aria-label="Toggle inspector"
+            aria-pressed={Boolean(inspectorOpen)}
+          >
+            <PanelRight size={17} />
+          </button>
+        )}
       </div>
 
       <OpenRouterModal

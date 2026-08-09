@@ -42,6 +42,7 @@ const FAST_KEY = "cockpit-fast";
 const LAYOUT_KEY = "cockpit-layout";
 const FLIP_KEY = "cockpit-flip";
 const FEATURED_KEY = "cockpit-featured-slot";
+const INSPECTOR_KEY = "cockpit-inspector-open";
 
 /** Canonical key for a working directory in path-keyed maps (`gitStatuses`).
  *  Backslash-normalized with any trailing separator stripped. Both the writer
@@ -267,7 +268,14 @@ export default function App() {
   // so it survives navigating away to Workspace and back, and so a future
   // command-palette deep link ("go to Settings > Design tokens") can set it.
   const [settingsSection, setSettingsSection] = useState(DEFAULT_SETTINGS_SECTION);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // Inspector visibility. Persisted for the same reason layout/flip/featured
+  // are: it is part of "how my workspace is arranged", and a panel the user
+  // deliberately closed should not be back on the next launch. Defaults OPEN,
+  // so only an explicit `false` on disk hides it.
+  const [inspectorOpen, setInspectorOpen] = useState(
+    () => lsLoad(INSPECTOR_KEY, true) !== false,
+  );
+  useEffect(() => { lsSave(INSPECTOR_KEY, inspectorOpen); }, [inspectorOpen]);
   // Engine's selected tab (Live|Models|Requests|API|Logs). Held here so it
   // survives leaving and re-entering the section.
   const [engineTab, setEngineTab] = useState("live");
@@ -1880,6 +1888,8 @@ export default function App() {
                 setFast={setFast}
                 sidebarOpen={sidebarOpen}
                 setSidebarOpen={setSidebarOpen}
+                inspectorOpen={inspectorOpen}
+                setInspectorOpen={setInspectorOpen}
                 user={user}
                 onToast={toast}
                 localEnabled={localEnabled}
