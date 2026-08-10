@@ -397,7 +397,42 @@ class TerminalSession:
     last_output_time: float = 0.0  # monotonic timestamp of last PTY output (JSONL staleness detection)
 
 
-MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "8"))
+def _resolve_max_sessions() -> int:
+    """Concurrent-session cap: env var wins, else settings.json, else 8.
+
+    `sessions.max_sessions` has been in DEFAULT_SETTINGS since the facelift and
+    NOTHING read it -- one of the documented "persisted but not yet enforced"
+    keys. It is read here now, so the Settings field means something.
+
+    Precedence is env-first because MAX_SESSIONS is how a headless/CI run pins
+    the value, and a settings file on disk must not override an operator who
+    set it explicitly for this process.
+
+    This is deliberately NOT removed as a cap. It is the backstop against a
+    runaway spawn loop; what changed is that it is a value the user can raise
+    (up to the 1-64 bound in settings_store) rather than a constant matching
+    the old 8-pane grid. Read ONCE at import: the limit is checked on every
+    create, and a live read would let a settings save change it mid-flight
+    with no way to see that it had.
+    """
+    env = os.getenv("MAX_SESSIONS")
+    if env is not None:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            logger.warning("MAX_SESSIONS=%r is not an integer -- falling back to settings", env)
+    try:
+        from settings_store import read_settings
+
+        value = read_settings().get("sessions", {}).get("max_sessions")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+    except Exception:
+        logger.warning("Could not read sessions.max_sessions from settings", exc_info=True)
+    return 8
+
+
+MAX_SESSIONS = _resolve_max_sessions()
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "0"))  # 0 = disabled (no auto-close)
 
 # Allowed model names — prevents command injection via the model parameter.

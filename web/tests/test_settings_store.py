@@ -241,7 +241,11 @@ def test_freeform_leaf_must_be_a_dict(isolated_settings):
     ({"appearance": {"glow_size": -1}}, "glow_size"),
     ({"appearance": {"glow_size": 49}}, "glow_size"),
     ({"sessions": {"max_sessions": 0}}, "max_sessions"),
-    ({"sessions": {"max_sessions": 17}}, "max_sessions"),
+    # 17 used to be out of range. The ceiling moved to 64 for the scrolling
+    # layout, which exists to hold more sessions than the 8-pane grid can show.
+    # There is still a ceiling -- it is a runaway-spawn backstop, not a display
+    # limit -- so the over-bound case is asserted at the NEW edge.
+    ({"sessions": {"max_sessions": 65}}, "max_sessions"),
     ({"data": {"retention_days": 0}}, "retention_days"),
     ({"data": {"retention_days": 3651}}, "retention_days"),
 ])
