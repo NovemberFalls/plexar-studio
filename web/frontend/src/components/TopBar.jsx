@@ -5,7 +5,7 @@
    the single source for the model, permission-mode and effort vocabularies a
    session can be configured with. */
 import { useState, useEffect } from "react";
-import { PanelLeft, PanelRight, ChevronDown, KeyRound, Cpu } from "lucide-react";
+import { PanelLeft, PanelRight, ChevronDown, KeyRound, Cpu, LayoutGrid, Rows3 } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 import {
@@ -57,6 +57,9 @@ export default function TopBar({
   // is deliberately the mirror of the sidebar's: same icon family, same header.
   inspectorOpen,
   setInspectorOpen,
+  // "grid" | "scroll". Optional: hosts that render no pane area omit it.
+  layoutMode,
+  setLayoutMode,
   user,
   onToast,
   localEnabled,
@@ -153,6 +156,43 @@ export default function TopBar({
         >
           <PanelLeft size={17} />
         </button>
+        {/* Layout mode. Sits beside the sidebar toggle because both answer
+            "how is my workspace arranged", and the pane area is what changes. */}
+        {setLayoutMode && (
+          <div
+            role="group"
+            aria-label="Layout mode"
+            style={{
+              display: "flex", gap: 2, padding: 2, borderRadius: 999,
+              background: "var(--cc-bg2, var(--bg-surface))",
+              border: "1px solid var(--cc-border, var(--border-color))",
+            }}
+          >
+            {[
+              { id: "grid", Icon: LayoutGrid, label: "Grid layout" },
+              { id: "scroll", Icon: Rows3, label: "Scrolling layout, grouped by folder" },
+            ].map(({ id, Icon, label }) => (
+              <button
+                key={id}
+                onClick={() => setLayoutMode(id)}
+                className="transition-colors hover-bg-surface"
+                style={{
+                  display: "flex", padding: 4, borderRadius: 999,
+                  color: layoutMode === id ? "var(--cc-accent, var(--accent))" : "var(--cc-dim, var(--text-secondary))",
+                  background: layoutMode === id
+                    ? "color-mix(in srgb, var(--cc-accent, #4ea1e8) 18%, transparent)"
+                    : "transparent",
+                }}
+                title={label}
+                aria-label={label}
+                aria-pressed={layoutMode === id}
+              >
+                <Icon size={15} />
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Logo only — no "COCKPIT" wordmark. The app is Plexar Studio; the
             window title bar already names it, and the old wordmark was the
             pre-rename product name sitting in the chrome of the renamed one. */}

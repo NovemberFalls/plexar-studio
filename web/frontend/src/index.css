@@ -456,3 +456,39 @@ body {
    past its own clip and reintroduce the bug. */
 .chat-row .chat-row-more { display: none; }
 .chat-row:hover .chat-row-more { display: block; }
+
+/* ── Scroll-mode folder headers ───────────────────────────────────────────
+   Sticky inside the pane container. These are SIBLINGS of the panes, never
+   their parents: re-parenting a pane remounts its terminal and drops live
+   scrollback (see LAYOUT_MODES in App.jsx). They span the full grid width so
+   auto-fill starts each folder on a fresh row. */
+.pane-group-head {
+  position: sticky;
+  top: -14px; /* cancels the container's 14px padding so it pins flush */
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 2px;
+  margin-bottom: -4px;
+  font-size: 11px;
+  letter-spacing: .05em;
+  color: var(--cc-dim, var(--text-secondary));
+  background: var(--cc-bg);
+  border-bottom: 1px solid var(--cc-line, var(--border-color));
+}
+.pane-group-name {
+  color: var(--cc-fg, var(--text-primary));
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.pane-group-branch { color: var(--cc-muted, var(--text-muted)); }
+.pane-group-count {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cc-accent, #4ea1e8) 16%, transparent);
+  color: var(--cc-accent, var(--accent));
+  font-variant-numeric: tabular-nums;
+}
+.pane-group-rule { flex: 1; }

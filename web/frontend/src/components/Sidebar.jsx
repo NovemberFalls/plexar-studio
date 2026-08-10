@@ -239,7 +239,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
   );
 }
 
-function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu }) {
+function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu, onFocusFolder }) {
   const sessionsHere = sessionsByDir[norm(node.path)] || [];
   const hasChildren = node.children.length > 0 || sessionsHere.length > 0;
   const [expanded, setExpanded] = useState(true);
@@ -279,7 +279,14 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
 
         <button
           className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
-          onClick={() => setExpanded(!expanded)}
+          onClick={() => {
+            // In scroll mode a folder click means "take me to those panes".
+            // onFocusFolder returns false when it did nothing (grid mode, or no
+            // sessions in this folder) -- then fall back to expand/collapse, so
+            // the control never feels dead.
+            if (sessionsHere.length && onFocusFolder?.(node.path)) return;
+            setExpanded(!expanded);
+          }}
           onDoubleClick={() => onNewAt(node.path)}
           title={node.path}
         >
@@ -335,7 +342,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
             </div>
           )}
           {node.children.map((child) => (
-            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} />
+            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} onFocusFolder={onFocusFolder} />
           ))}
         </>
       )}
@@ -354,6 +361,10 @@ export default function Sidebar({
   onNew,
   onNewAt,
   onDelete,
+  // (workdir) => boolean. Scrolls the pane area to that folder's panes and
+  // reports whether it actually did; the folder row falls back to
+  // expand/collapse when it returns false.
+  onFocusFolder,
   open,
   savedLocations,
   onAddLocations,
@@ -592,7 +603,7 @@ export default function Sidebar({
             </div>
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {locationTree.map((node) => (
-                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} />
+                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} />
               ))}
             </div>
           </>

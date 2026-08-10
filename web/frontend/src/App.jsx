@@ -43,6 +43,19 @@ const LAYOUT_KEY = "cockpit-layout";
 const FLIP_KEY = "cockpit-flip";
 const FEATURED_KEY = "cockpit-featured-slot";
 const INSPECTOR_KEY = "cockpit-inspector-open";
+const LAYOUT_MODE_KEY = "cockpit-layout-mode";
+
+/** Layout modes. `grid` is the fixed-slot grid that has always shipped;
+ *  `scroll` is one row per working folder, scrolled vertically.
+ *
+ *  BOTH MODES RENDER THE SAME SLOT LOOP INTO THE SAME PARENT. Only the
+ *  container's CSS and the children's ORDER change. That is load-bearing:
+ *  React reconciles by key within a parent, so reordering MOVES a pane's DOM
+ *  node, while re-parenting it into a per-group wrapper would UNMOUNT it —
+ *  destroying live scrollback and tearing down the WebSocket, which is exactly
+ *  what App.jsx's "terminals never unmount" rule exists to prevent. Group
+ *  headers are therefore siblings of the panes, never their parents. */
+const LAYOUT_MODES = new Set(["grid", "scroll"]);
 
 /** Canonical key for a working directory in path-keyed maps (`gitStatuses`).
  *  Backslash-normalized with any trailing separator stripped. Both the writer
@@ -276,6 +289,22 @@ export default function App() {
     () => lsLoad(INSPECTOR_KEY, true) !== false,
   );
   useEffect(() => { lsSave(INSPECTOR_KEY, inspectorOpen); }, [inspectorOpen]);
+  // Grid vs scroll. Persisted beside layout/flip/featured/inspector because all
+  // five are one "how my workspace is arranged" decision — restoring four of
+  // five is a partial restore, which reads as a bug rather than as a default.
+  const [layoutMode, setLayoutMode] = useState(() => {
+    const v = lsLoad(LAYOUT_MODE_KEY, "grid");
+    return LAYOUT_MODES.has(v) ? v : "grid";
+  });
+  useEffect(() => { lsSave(LAYOUT_MODE_KEY, layoutMode); }, [layoutMode]);
+  const scrollMode = layoutMode === "scroll";
+  /** The pane container, so a folder click can scroll it. */
+  const stageRef = useRef(null);
+  /** Slot ceiling when looking for somewhere to put a session. The grid can
+   *  only show `layout` of them; scroll mode has no ceiling, which is the
+   *  whole point — a session that exists but has no slot is invisible, and
+   *  that is the state the tab strip was papering over. */
+  const slotCapacity = scrollMode ? Number.MAX_SAFE_INTEGER : layout;
   // Engine's selected tab (Live|Models|Requests|API|Logs). Held here so it
   // survives leaving and re-entering the section.
   const [engineTab, setEngineTab] = useState("live");
@@ -494,7 +523,7 @@ export default function App() {
     };
     setSessions((prev) => [...prev, newSession]);
     setActiveIds((prev) => {
-      const slot = findEmptySlot(prev, layout);
+      const slot = findEmptySlot(prev, slotCapacity);
       if (slot === -1) return prev; // all panes full — user drags from sidebar to place
       const next = [...prev];
       while (next.length <= slot) next.push(null);
@@ -565,7 +594,7 @@ export default function App() {
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, permissionMode, effort, fast, layout, addLocations, toast]);
+  }, [model, permissionMode, effort, fast, slotCapacity, addLocations, toast]);
 
   // Remove a session (kills terminal on server) with 12s undo window.
   // Undo resumes via claude_session_id (exact session) if available, or
@@ -618,18 +647,92 @@ export default function App() {
   // Select a session: fill an empty pane slot if available, never auto-rearrange
   const selectSession = useCallback((id) => {
     setActiveIds((prev) => {
-      // Check if already in a visible slot
-      for (let i = 0; i < layout && i < prev.length; i++) {
+      // Check if already in a visible slot. In scroll mode EVERY filled slot is
+      // visible, so the scan must not stop at `layout` -- doing so would hand a
+      // second slot to a session that is already on screen.
+      const visible = Math.min(prev.length, slotCapacity);
+      for (let i = 0; i < visible; i++) {
         if (prev[i] === id) return prev;
       }
-      const slot = findEmptySlot(prev, layout);
+      const slot = findEmptySlot(prev, slotCapacity);
       if (slot === -1) return prev; // all panes full — user drags to place
       const next = [...prev];
       while (next.length <= slot) next.push(null);
       next[slot] = id;
       return next;
     });
-  }, [layout]);
+  }, [slotCapacity]);
+
+  /**
+   * Bring a folder's panes into view. Scroll mode only — in the grid there is
+   * nothing to scroll, and silently switching modes on a sidebar click would
+   * rearrange the whole workspace for someone who just wanted to look at a
+   * folder. Returns false when it did nothing, so callers can fall back.
+   */
+  const scrollToFolder = useCallback((workdir) => {
+    if (!scrollMode || !stageRef.current) return false;
+    const key = normalizeWorkdir(workdir) || "";
+    const head = stageRef.current.querySelector(`[data-folder-head="${CSS.escape(key)}"]`);
+    if (!head) return false;
+    head.scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+    return true;
+  }, [scrollMode]);
+
+  /**
+   * The children to render, in order.
+   *
+   * GRID: exactly `layout` slots, no headers — byte-for-byte the old behaviour.
+   * SCROLL: every filled slot, ordered by working folder, with a header item
+   * before each group. Groups are DERIVED from `workdir` and never stored:
+   * `activeIds` stays a flat positional array, so `swapPanes` is untouched and
+   * there is no second source of truth about where a session lives.
+   *
+   * Keyed through `normalizeWorkdir` — indexing by raw `workdir` silently
+   * misses whenever a path uses forward slashes or a trailing separator, which
+   * is exactly how the Inspector lost its git row.
+   */
+  const renderItems = useMemo(() => {
+    if (!scrollMode) {
+      return Array.from({ length: layout }, (_, idx) => ({ type: "slot", idx }));
+    }
+    const groups = new Map(); // normalized dir -> {label, branch, slots[]}
+    for (let idx = 0; idx < activeIds.length; idx++) {
+      const id = activeIds[idx];
+      if (id == null) continue; // empty slots are a GRID concept; scroll omits them
+      const session = sessions.find((s) => s.id === id);
+      if (!session) continue;
+      const key = normalizeWorkdir(session.workdir) || "";
+      if (!groups.has(key)) {
+        groups.set(key, {
+          label: key ? key.split("\\").filter(Boolean).pop() || key : "No folder",
+          branch: gitStatuses[key]?.branch || null,
+          slots: [],
+        });
+      }
+      groups.get(key).slots.push(idx);
+    }
+    const items = [];
+    for (const [key, g] of groups) {
+      items.push({ type: "header", folder: key, label: g.label, branch: g.branch, count: g.slots.length });
+      for (const idx of g.slots) items.push({ type: "slot", idx });
+    }
+    return items;
+  }, [scrollMode, layout, activeIds, sessions, gitStatuses]);
+
+  /** Slot index -> normalized folder, so a drop can be refused across groups
+   *  without recomputing the grouping inside an event handler. */
+  const folderBySlot = useMemo(() => {
+    const m = new Map();
+    activeIds.forEach((id, idx) => {
+      if (id == null) return;
+      const s = sessions.find((x) => x.id === id);
+      if (s) m.set(idx, normalizeWorkdir(s.workdir) || "");
+    });
+    return m;
+  }, [activeIds, sessions]);
 
   // Explicitly place a session into a specific pane slot index
   const placeSession = useCallback((sessionId, slotIndex) => {
@@ -1839,6 +1942,277 @@ export default function App() {
     );
   }
 
+  /** Render ONE slot. Extracted from the JSX so both layout modes can call
+   *  it and emit panes as DIRECT children of the same container -- see
+   *  LAYOUT_MODES. Wrapping panes in per-group elements (or even in keyed
+   *  Fragments) would re-parent them on a swap and remount the terminal. */
+  const renderSlot = (idx) => {
+              const sessionId = idx < activeIds.length ? activeIds[idx] : null;
+              const session = sessionId != null ? sessions.find((s) => s.id === sessionId) : null;
+              // Grid placement from the adaptive layout engine. `paneOrder`
+              // lists SLOTS in CELL order, so this slot's cell index is its
+              // position in paneOrder; cell 0 is the big featured cell in
+              // 3/5/7. Hence "featured cell" === "slot paneOrder[0]".
+              const cellIndex = paneOrder.indexOf(idx);
+              const area = gridLayout.areas[cellIndex] || gridLayout.areas[idx] || { col: "auto", row: "auto" };
+              // Featured/cell placement is a GRID concept. In scroll mode the
+              // auto-flow places panes and `featuredIndex` is left untouched --
+              // reinterpreting it here would give the slot/cell/order triple a
+              // fourth meaning, which is how that code rots.
+              const slotPlacement = scrollMode ? {} : { gridColumn: area.col, gridRow: area.row };
+              // Dropping a pane onto this slot moves that session INTO the
+              // slot (swapPanes/placeSession act on slots), so when this is
+              // the featured slot the dragged pane lands in the big cell —
+              // "it should be whatever we drag", with no extra state write.
+              const isFeaturedSlot = FEATURED_LAYOUTS.has(layout) && cellIndex === 0;
+
+              // Shared drop handlers for all slots
+              const dndHandlers = {
+                onDragOver: (e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  if (dragOverSlot !== idx) setDragOverSlot(idx);
+                },
+                onDragLeave: (e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget)) {
+                    setDragOverSlot(null);
+                  }
+                },
+                onDrop: (e) => {
+                  e.preventDefault();
+                  setDragOverSlot(null);
+                  setDragSource(null);
+                  const data = e.dataTransfer.getData("text/plain");
+                  if (data.startsWith("session:")) {
+                    placeSession(parseInt(data.slice(8), 10), idx);
+                  } else if (data.startsWith("pane:")) {
+                    const from = parseInt(data.slice(5), 10);
+                    if (isNaN(from) || from === idx) return;
+                    // Scroll mode groups by folder, so POSITION MEANS FOLDER: a
+                    // cross-group drop would file a session under a directory it
+                    // has nothing to do with. Refused, not reinterpreted.
+                    if (scrollMode && folderBySlot.get(from) !== folderBySlot.get(idx)) {
+                      toast("Panes can only be rearranged within their folder", "info");
+                      return;
+                    }
+                    swapPanes(from, idx);
+                  }
+                },
+              };
+
+              // Drop target overlay (shared between filled and empty slots)
+              const dropOverlay = dragOverSlot === idx && dragSource !== idx && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 4,
+                    border: "2px dashed var(--accent)",
+                    borderRadius: 8,
+                    backgroundColor: "rgba(122, 162, 247, 0.08)",
+                    animation: "drop-target-pulse 1.5s ease-in-out infinite",
+                    zIndex: 10,
+                    pointerEvents: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <span
+                    className="text-xs font-semibold px-3 py-1.5 rounded-full"
+                    style={{
+                      backgroundColor: "var(--bg-elevated)",
+                      color: "var(--accent)",
+                      border: "1px solid var(--accent)",
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                    }}
+                  >
+                    {isFeaturedSlot
+                      ? "Drop to feature"
+                      : dragSource != null ? "Drop to swap" : "Drop here"}
+                  </span>
+                </div>
+              );
+
+              if (session) {
+                const isPopped = poppedOutIds.has(session.terminalId);
+
+                // Find an active bridge involving this session's terminalId
+                const activeBridge = session.terminalId
+                  ? activeBridges.find(
+                      (b) =>
+                        b.state === "active" &&
+                        (b.from_id === session.terminalId || b.to_id === session.terminalId)
+                    ) || null
+                  : null;
+
+                // Find an active channel involving this session's terminalId
+                const activeChannel = getChannelForTerminal(session.terminalId);
+
+                // Glow state lives on the SLOT wrapper, not inside TerminalPane:
+                // the slot's overflow:hidden clips any child's outer box-shadow,
+                // but an element's own overflow never clips its own shadow.
+                const actState = session.activityState || (session.status === "running" ? "idle" : session.status);
+                const glowState =
+                  actState === "busy" ? "working"
+                  : ["thinking", "waiting", "error"].includes(actState) ? actState
+                  : "idle";
+
+                return (
+                  <div
+                    key={session.id}
+                    data-glowable
+                    data-state={glowState}
+                    onFocusCapture={() => setFocusedIndex(idx)}
+                    onMouseDownCapture={() => setFocusedIndex(idx)}
+                    style={{
+                      borderRadius: 10,
+                      overflow: "hidden",
+                      minHeight: 0,
+                      minWidth: 0,
+                      position: "relative",
+                      ...slotPlacement,
+                      opacity: dragSource === idx ? 0.4 : 1,
+                      transition: "opacity 0.2s ease",
+                    }}
+                    {...dndHandlers}
+                  >
+                    {dropOverlay}
+                    {isPopped ? (
+                      <div className="popout-placeholder">
+                        <ExternalLink size={20} style={{ color: "var(--text-muted)" }} />
+                        <span className="popout-placeholder-name">{session.name}</span>
+                        <span className="popout-placeholder-label">Terminal open in separate window</span>
+                        <button
+                          type="button"
+                          className="popout-reclaim-btn"
+                          onClick={async () => {
+                            // Post RECLAIM so the popout window can self-close (browser path)
+                            const bc = new BroadcastChannel("cockpit-popout");
+                            bc.postMessage({ type: "RECLAIM", terminalId: session.terminalId });
+                            bc.close();
+                            // Optimistically clear the placeholder immediately
+                            setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.terminalId); return next; });
+                            // Under Tauri, window.close() in a WebviewWindow has no effect —
+                            // close the popout window directly via the Tauri window API.
+                            if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+                              try {
+                                const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+                                const label = `popout-${session.terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+                                const w = await WebviewWindow.getByLabel(label);
+                                await w?.close();
+                              } catch {
+                                // fall back: BroadcastChannel RECLAIM already posted above
+                              }
+                            }
+                          }}
+                        >
+                          Reclaim
+                        </button>
+                      </div>
+                    ) : (
+                      <TerminalPane
+                        ref={(el) => { paneRefs.current[idx] = el; }}
+                        session={session}
+                        onClose={() => removeSession(session.id)}
+                        paneIndex={idx}
+                        onSwap={layout > 1 ? swapPanes : undefined}
+                        onMakeFeatured={
+                          FEATURED_LAYOUTS.has(layout) && !isFeaturedSlot
+                            ? () => setFeaturedIndex(idx)
+                            : undefined
+                        }
+                        onDragSourceChange={layout > 1 ? setDragSource : undefined}
+                        terminalZoom={terminalZoom}
+                        toast={toast}
+                        onFork={() => forkSession(session.id)}
+                        onOpenBridge={() => handleOpenBridge(session.id)}
+                        activeBridge={activeBridge}
+                        onEndBridge={handleEndBridge}
+                        onPopout={session.terminalId ? handlePopout : undefined}
+                        workflowSummary={workflowsByTerminal[session.terminalId] || null}
+                        usage={usageByTerminal[session.terminalId] || null}
+                        onRenameSession={(newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
+                      />
+                    )}
+                    {/* Channel overlay — shown when pane is part of an active channel */}
+                    {activeChannel && (
+                      <div
+                        className="channel-active-glow"
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "4px 10px",
+                          backgroundColor: "rgba(255, 140, 0, 0.12)",
+                          borderBottom: "1px solid rgba(255, 140, 0, 0.5)",
+                          zIndex: 5,
+                          pointerEvents: "none",
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: "10px",
+                            fontWeight: 700,
+                            letterSpacing: "0.06em",
+                            color: "#ff8c00",
+                            textShadow: "0 0 8px rgba(255,140,0,0.7)",
+                          }}
+                        >
+                          {activeChannel.isLead ? "CHANNEL LEAD" : "CHANNEL WORKER"} &middot; turn {activeChannel.turns_used}/{activeChannel.max_turns}
+                        </span>
+                        <button
+                          type="button"
+                          style={{
+                            pointerEvents: "all",
+                            fontSize: "10px",
+                            fontWeight: 600,
+                            color: "#ff8c00",
+                            border: "1px solid rgba(255,140,0,0.6)",
+                            borderRadius: 4,
+                            padding: "1px 7px",
+                            backgroundColor: "rgba(255,140,0,0.15)",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => handleEndChannel(activeChannel.channel_id)}
+                        >
+                          Stop
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={`empty-${idx}`}
+                  className="flex items-center justify-center"
+                  style={{
+                    color: "var(--cc-muted, var(--text-muted))",
+                    position: "relative",
+                    ...slotPlacement,
+                    borderRadius: 12,
+                    border: "1px dashed var(--cc-border, var(--border-color))",
+                    background: "color-mix(in srgb, var(--cc-surface, var(--bg-surface)) 40%, transparent)",
+                  }}
+                  {...dndHandlers}
+                >
+                  {dropOverlay}
+                  <button
+                    onClick={() => setShowNewDialog(true)}
+                    className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
+                    style={{ border: "1px solid var(--cc-border, var(--border-color))" }}
+                  >
+                    + New Session
+                  </button>
+                </div>
+              );
+  };
+
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden relative" style={{ background: "var(--cc-bg)" }}>
         {/* The rail is now FULL HEIGHT and the command bar / status strip live
@@ -1890,6 +2264,8 @@ export default function App() {
                 setSidebarOpen={setSidebarOpen}
                 inspectorOpen={inspectorOpen}
                 setInspectorOpen={setInspectorOpen}
+                layoutMode={layoutMode}
+                setLayoutMode={setLayoutMode}
                 user={user}
                 onToast={toast}
                 localEnabled={localEnabled}
@@ -1933,8 +2309,9 @@ export default function App() {
               >
                 <Sidebar
                   sessions={sessions}
-                  activeIds={activeIds.slice(0, layout).filter((id) => id != null)}
+                  activeIds={(scrollMode ? activeIds : activeIds.slice(0, layout)).filter((id) => id != null)}
                   onSelect={selectSession}
+                  onFocusFolder={scrollToFolder}
                   onNew={() => setShowNewDialog(true)}
                   onNewAt={(dir) => createSession("", dir, undefined, { bypassPermissions: getLocationBypass(dir) })}
                   onToggleLocationBypass={toggleLocationBypass}
@@ -2034,11 +2411,24 @@ export default function App() {
             {/* Pane grid — always mounted, terminals never unmount. Hidden
                 (NOT unmounted — xterm/WS must survive) while a view is open. */}
             <main
+              ref={stageRef}
               className="flex-1 min-w-0"
               style={{
                 display: activeSection === "work" ? "grid" : "none",
-                gridTemplateColumns: gridLayout.cols,
-                gridTemplateRows: gridLayout.rows,
+                // Scroll mode is a plain overflow container, NOT a virtualized
+                // list: windowing would unmount off-screen panes and take live
+                // scrollback and the WebSocket with them.
+                ...(scrollMode
+                  ? {
+                      gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+                      gridAutoRows: "minmax(230px, auto)",
+                      alignContent: "start",
+                      overflowY: "auto",
+                    }
+                  : {
+                      gridTemplateColumns: gridLayout.cols,
+                      gridTemplateRows: gridLayout.rows,
+                    }),
                 gap: 14,
                 padding: 14,
                 background: "var(--cc-bg)",
@@ -2046,260 +2436,18 @@ export default function App() {
               onDragEnd={() => { setDragSource(null); setDragOverSlot(null); }}
             >
               {/* Slot-based rendering: each slot is either a session pane or an empty placeholder */}
-              {Array.from({ length: layout }).map((_, idx) => {
-                const sessionId = idx < activeIds.length ? activeIds[idx] : null;
-                const session = sessionId != null ? sessions.find((s) => s.id === sessionId) : null;
-                // Grid placement from the adaptive layout engine. `paneOrder`
-                // lists SLOTS in CELL order, so this slot's cell index is its
-                // position in paneOrder; cell 0 is the big featured cell in
-                // 3/5/7. Hence "featured cell" === "slot paneOrder[0]".
-                const cellIndex = paneOrder.indexOf(idx);
-                const area = gridLayout.areas[cellIndex] || gridLayout.areas[idx] || { col: "auto", row: "auto" };
-                const slotPlacement = { gridColumn: area.col, gridRow: area.row };
-                // Dropping a pane onto this slot moves that session INTO the
-                // slot (swapPanes/placeSession act on slots), so when this is
-                // the featured slot the dragged pane lands in the big cell —
-                // "it should be whatever we drag", with no extra state write.
-                const isFeaturedSlot = FEATURED_LAYOUTS.has(layout) && cellIndex === 0;
-
-                // Shared drop handlers for all slots
-                const dndHandlers = {
-                  onDragOver: (e) => {
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = "move";
-                    if (dragOverSlot !== idx) setDragOverSlot(idx);
-                  },
-                  onDragLeave: (e) => {
-                    if (!e.currentTarget.contains(e.relatedTarget)) {
-                      setDragOverSlot(null);
-                    }
-                  },
-                  onDrop: (e) => {
-                    e.preventDefault();
-                    setDragOverSlot(null);
-                    setDragSource(null);
-                    const data = e.dataTransfer.getData("text/plain");
-                    if (data.startsWith("session:")) {
-                      placeSession(parseInt(data.slice(8), 10), idx);
-                    } else if (data.startsWith("pane:")) {
-                      const from = parseInt(data.slice(5), 10);
-                      if (!isNaN(from) && from !== idx) swapPanes(from, idx);
-                    }
-                  },
-                };
-
-                // Drop target overlay (shared between filled and empty slots)
-                const dropOverlay = dragOverSlot === idx && dragSource !== idx && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 4,
-                      border: "2px dashed var(--accent)",
-                      borderRadius: 8,
-                      backgroundColor: "rgba(122, 162, 247, 0.08)",
-                      animation: "drop-target-pulse 1.5s ease-in-out infinite",
-                      zIndex: 10,
-                      pointerEvents: "none",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <span
-                      className="text-xs font-semibold px-3 py-1.5 rounded-full"
-                      style={{
-                        backgroundColor: "var(--bg-elevated)",
-                        color: "var(--accent)",
-                        border: "1px solid var(--accent)",
-                        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-                      }}
-                    >
-                      {isFeaturedSlot
-                        ? "Drop to feature"
-                        : dragSource != null ? "Drop to swap" : "Drop here"}
-                    </span>
+              {renderItems.map((item) =>
+                item.type === "header" ? (
+                  <div key={`hdr-${item.folder}`} data-folder-head={item.folder} className="pane-group-head" style={{ gridColumn: "1 / -1" }}>
+                    <span className="pane-group-name">{item.label}</span>
+                    {item.branch && <span className="pane-group-branch">&#9095; {item.branch}</span>}
+                    <span className="pane-group-count">{item.count}</span>
+                    <span className="pane-group-rule" />
                   </div>
-                );
-
-                if (session) {
-                  const isPopped = poppedOutIds.has(session.terminalId);
-
-                  // Find an active bridge involving this session's terminalId
-                  const activeBridge = session.terminalId
-                    ? activeBridges.find(
-                        (b) =>
-                          b.state === "active" &&
-                          (b.from_id === session.terminalId || b.to_id === session.terminalId)
-                      ) || null
-                    : null;
-
-                  // Find an active channel involving this session's terminalId
-                  const activeChannel = getChannelForTerminal(session.terminalId);
-
-                  // Glow state lives on the SLOT wrapper, not inside TerminalPane:
-                  // the slot's overflow:hidden clips any child's outer box-shadow,
-                  // but an element's own overflow never clips its own shadow.
-                  const actState = session.activityState || (session.status === "running" ? "idle" : session.status);
-                  const glowState =
-                    actState === "busy" ? "working"
-                    : ["thinking", "waiting", "error"].includes(actState) ? actState
-                    : "idle";
-
-                  return (
-                    <div
-                      key={session.id}
-                      data-glowable
-                      data-state={glowState}
-                      onFocusCapture={() => setFocusedIndex(idx)}
-                      onMouseDownCapture={() => setFocusedIndex(idx)}
-                      style={{
-                        borderRadius: 10,
-                        overflow: "hidden",
-                        minHeight: 0,
-                        minWidth: 0,
-                        position: "relative",
-                        ...slotPlacement,
-                        opacity: dragSource === idx ? 0.4 : 1,
-                        transition: "opacity 0.2s ease",
-                      }}
-                      {...dndHandlers}
-                    >
-                      {dropOverlay}
-                      {isPopped ? (
-                        <div className="popout-placeholder">
-                          <ExternalLink size={20} style={{ color: "var(--text-muted)" }} />
-                          <span className="popout-placeholder-name">{session.name}</span>
-                          <span className="popout-placeholder-label">Terminal open in separate window</span>
-                          <button
-                            type="button"
-                            className="popout-reclaim-btn"
-                            onClick={async () => {
-                              // Post RECLAIM so the popout window can self-close (browser path)
-                              const bc = new BroadcastChannel("cockpit-popout");
-                              bc.postMessage({ type: "RECLAIM", terminalId: session.terminalId });
-                              bc.close();
-                              // Optimistically clear the placeholder immediately
-                              setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.terminalId); return next; });
-                              // Under Tauri, window.close() in a WebviewWindow has no effect —
-                              // close the popout window directly via the Tauri window API.
-                              if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
-                                try {
-                                  const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-                                  const label = `popout-${session.terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
-                                  const w = await WebviewWindow.getByLabel(label);
-                                  await w?.close();
-                                } catch {
-                                  // fall back: BroadcastChannel RECLAIM already posted above
-                                }
-                              }
-                            }}
-                          >
-                            Reclaim
-                          </button>
-                        </div>
-                      ) : (
-                        <TerminalPane
-                          ref={(el) => { paneRefs.current[idx] = el; }}
-                          session={session}
-                          onClose={() => removeSession(session.id)}
-                          paneIndex={idx}
-                          onSwap={layout > 1 ? swapPanes : undefined}
-                          onMakeFeatured={
-                            FEATURED_LAYOUTS.has(layout) && !isFeaturedSlot
-                              ? () => setFeaturedIndex(idx)
-                              : undefined
-                          }
-                          onDragSourceChange={layout > 1 ? setDragSource : undefined}
-                          terminalZoom={terminalZoom}
-                          toast={toast}
-                          onFork={() => forkSession(session.id)}
-                          onOpenBridge={() => handleOpenBridge(session.id)}
-                          activeBridge={activeBridge}
-                          onEndBridge={handleEndBridge}
-                          onPopout={session.terminalId ? handlePopout : undefined}
-                          workflowSummary={workflowsByTerminal[session.terminalId] || null}
-                          usage={usageByTerminal[session.terminalId] || null}
-                          onRenameSession={(newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
-                        />
-                      )}
-                      {/* Channel overlay — shown when pane is part of an active channel */}
-                      {activeChannel && (
-                        <div
-                          className="channel-active-glow"
-                          style={{
-                            position: "absolute",
-                            top: 0,
-                            left: 0,
-                            right: 0,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            padding: "4px 10px",
-                            backgroundColor: "rgba(255, 140, 0, 0.12)",
-                            borderBottom: "1px solid rgba(255, 140, 0, 0.5)",
-                            zIndex: 5,
-                            pointerEvents: "none",
-                          }}
-                        >
-                          <span
-                            style={{
-                              fontSize: "10px",
-                              fontWeight: 700,
-                              letterSpacing: "0.06em",
-                              color: "#ff8c00",
-                              textShadow: "0 0 8px rgba(255,140,0,0.7)",
-                            }}
-                          >
-                            {activeChannel.isLead ? "CHANNEL LEAD" : "CHANNEL WORKER"} &middot; turn {activeChannel.turns_used}/{activeChannel.max_turns}
-                          </span>
-                          <button
-                            type="button"
-                            style={{
-                              pointerEvents: "all",
-                              fontSize: "10px",
-                              fontWeight: 600,
-                              color: "#ff8c00",
-                              border: "1px solid rgba(255,140,0,0.6)",
-                              borderRadius: 4,
-                              padding: "1px 7px",
-                              backgroundColor: "rgba(255,140,0,0.15)",
-                              cursor: "pointer",
-                            }}
-                            onClick={() => handleEndChannel(activeChannel.channel_id)}
-                          >
-                            Stop
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-
-                return (
-                  <div
-                    key={`empty-${idx}`}
-                    className="flex items-center justify-center"
-                    style={{
-                      color: "var(--cc-muted, var(--text-muted))",
-                      position: "relative",
-                      ...slotPlacement,
-                      borderRadius: 12,
-                      border: "1px dashed var(--cc-border, var(--border-color))",
-                      background: "color-mix(in srgb, var(--cc-surface, var(--bg-surface)) 40%, transparent)",
-                    }}
-                    {...dndHandlers}
-                  >
-                    {dropOverlay}
-                    <button
-                      onClick={() => setShowNewDialog(true)}
-                      className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
-                      style={{ border: "1px solid var(--cc-border, var(--border-color))" }}
-                    >
-                      + New Session
-                    </button>
-                  </div>
-                );
-              })}
+                ) : (
+                  renderSlot(item.idx)
+                )
+              )}
             </main>
 
             {/* Settings owns INTENT (Phase 4). It renders instead of the panes +

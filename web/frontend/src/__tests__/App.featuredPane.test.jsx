@@ -229,15 +229,38 @@ describe("terminals do not remount when the featured pane changes", () => {
     // i.e. the inline gridColumn/gridRow style. Changing featuredIndex
     // therefore changes CSS placement only — the element identity React
     // reconciles against is unchanged, so xterm and its WebSocket survive.
-    expect(APP_SRC).toMatch(/\{Array\.from\(\{ length: layout \}\)\.map\(\(_, idx\) => \{/);
+    //
+    // The loop moved into `renderSlot` when scroll mode landed, so these
+    // assertions track the new shape. GRID's item list is still exactly
+    // `layout` slots, which is the part that must not drift.
+    expect(APP_SRC).toMatch(/const renderSlot = \(idx\) => \{/);
+    expect(APP_SRC).toMatch(
+      /return Array\.from\(\{ length: layout \}, \(_, idx\) => \(\{ type: "slot", idx \}\)\);/,
+    );
     expect(APP_SRC).toMatch(/key=\{session\.id\}/);
-    // paneOrder is consumed exactly once in the render body, for the cell index.
+    // paneOrder is consumed exactly once in the slot renderer, for the cell index.
     expect(APP_SRC).toMatch(/const cellIndex = paneOrder\.indexOf\(idx\);/);
-    const renderBody = APP_SRC.slice(APP_SRC.indexOf("Slot-based rendering"))
+    const renderBody = APP_SRC.slice(APP_SRC.indexOf("const renderSlot = (idx) =>"))
       .split("\n")
       .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
       .join("\n");
     expect((renderBody.match(/paneOrder/g) || []).length).toBe(1);
+  });
+
+  it("scroll mode emits panes as DIRECT children — no per-group wrapper", () => {
+    // The trap this pins: grouping by folder invites wrapping each group in a
+    // <section>. That re-parents the pane, which React reconciles as an
+    // unmount + mount — killing live scrollback and the WebSocket. Group
+    // headers must therefore be SIBLINGS, and the branch that emits a slot
+    // must call renderSlot directly with nothing around it.
+    expect(APP_SRC).toMatch(/item\.type === "header" \? \(/);
+    // The slot branch is renderSlot() and nothing else — no wrapper element,
+    // no keyed Fragment (a Fragment keyed per slot would remount on a swap).
+    expect(APP_SRC).toMatch(/\) : \(\s+renderSlot\(item\.idx\)\s+\)/);
+    // Featured placement must not leak into scroll mode.
+    expect(APP_SRC).toMatch(
+      /const slotPlacement = scrollMode \? \{\} : \{ gridColumn: area\.col, gridRow: area\.row \};/,
+    );
   });
 
   it("a child keyed by session id is not remounted when placement changes", () => {
