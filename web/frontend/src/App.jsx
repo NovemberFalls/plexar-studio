@@ -2071,7 +2071,15 @@ export default function App() {
                       minWidth: 0,
                       position: "relative",
                       ...slotPlacement,
-                      opacity: dragSource === idx ? 0.4 : 1,
+                      // 0.4 = the pane being dragged. 0.28 = a pane in ANOTHER
+                      // folder while a drag is in flight: scroll mode refuses
+                      // cross-folder drops, so the rule is shown rather than
+                      // only discovered by trying and getting a toast.
+                      opacity:
+                        dragSource === idx ? 0.4
+                        : scrollMode && dragSource != null
+                          && folderBySlot.get(dragSource) !== folderBySlot.get(idx) ? 0.28
+                        : 1,
                       transition: "opacity 0.2s ease",
                     }}
                     {...dndHandlers}

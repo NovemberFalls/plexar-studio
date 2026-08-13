@@ -495,16 +495,61 @@ export default function SessionDefaultsSettings({ get, setField, isDirty }) {
           </div>
         )}
 
+        {/* Concurrent-session cap. UNLIKE the four fields above, this one IS
+            enforced -- pty_manager resolves it at startup -- so it gets its own
+            note rather than sitting under the blanket "not in force" one. */}
+        <FieldRow
+          label="Maximum sessions"
+          hint="How many can run at once"
+        >
+          <input
+            type="number"
+            min={1}
+            max={64}
+            step={1}
+            value={get("sessions.max_sessions", 8)}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              // Clamp here so the field cannot submit a value the server will
+              // reject wholesale -- a 400 discards the ENTIRE patch, taking the
+              // user's other edits on this page with it.
+              if (Number.isFinite(n)) setField("sessions.max_sessions", Math.min(64, Math.max(1, n)));
+            }}
+            aria-label="Maximum concurrent sessions"
+            data-testid="field-sessions.max_sessions"
+            data-dirty={isDirty("sessions.max_sessions") ? "true" : "false"}
+            style={{
+              width: 72,
+              height: 26,
+              padding: "0 8px",
+              fontSize: 11,
+              borderRadius: 7,
+              color: "var(--cc-fg)",
+              background: "var(--cc-bg2, var(--bg-surface))",
+              border: `1px solid ${isDirty("sessions.max_sessions") ? DIRTY : "var(--cc-border)"}`,
+            }}
+          />
+        </FieldRow>
+
+        <Callout token="var(--cc-dim)" icon={Info} testId="max-sessions-restart">
+          The cap <strong>is enforced</strong>, but it is read once when Plexar Studio starts,
+          so a change here applies after you restart the app. The grid shows at most 8 panes;
+          the scrolling layout is what makes a higher cap useful.
+        </Callout>
+
         {/* The honesty note. Same pattern as ProvidersSettings' NotEnforcedNote,
-            but tinted --cc-waiting because here the stored value has NO effect at
-            all yet, not merely a delayed one. */}
+            but tinted --cc-waiting because for THESE FOUR fields the stored value
+            has NO effect at all yet, not merely a delayed one. Deliberately
+            narrowed from "nothing reads sessions.*", which stopped being true
+            when max_sessions above became live. */}
         <Callout token={DIRTY} icon={Info} testId="not-read-sessions">
-          Saved, but <strong>not in force yet</strong>. Plexar Studio still takes a new session&apos;s
-          model, permission mode, effort and fast flag from the command bar&apos;s DEFAULTS pill,
-          which keeps its own selection for this workspace. Nothing reads{" "}
-          <code>sessions.*</code> at startup today, so changing these values here does not yet
-          change what the next session spawns with. This note disappears once the shell reads
-          these on boot.
+          The four fields above are saved but <strong>not in force yet</strong>. Plexar Studio
+          still takes a new session&apos;s model, permission mode, effort and fast flag from the
+          command bar&apos;s DEFAULTS pill, which keeps its own selection for this workspace.
+          Nothing reads <code>sessions.model</code>, <code>permission_mode</code>,{" "}
+          <code>effort</code> or <code>fast</code> at startup today, so changing them here does
+          not yet change what the next session spawns with. This note disappears once the shell
+          reads these on boot.
         </Callout>
       </div>
     </div>

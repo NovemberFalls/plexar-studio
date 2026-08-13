@@ -112,6 +112,14 @@ describe("the rules scroll mode must not break", () => {
     expect(APP_SRC).not.toMatch(/react-window|react-virtual|useVirtualizer/);
   });
 
+  it("shows the folder-scoped drag rule instead of only enforcing it", () => {
+    // The refusal alone is discoverable only by trying and getting a toast.
+    // Dimming out-of-folder panes during a drag states the rule up front.
+    expect(APP_SRC).toMatch(
+      /scrollMode && dragSource != null\s+&& folderBySlot\.get\(dragSource\) !== folderBySlot\.get\(idx\) \? 0\.28/,
+    );
+  });
+
   it("persists the mode beside the other layout decisions", () => {
     expect(APP_SRC).toMatch(/const LAYOUT_MODE_KEY = "cockpit-layout-mode";/);
     expect(APP_SRC).toMatch(/lsSave\(LAYOUT_MODE_KEY, layoutMode\)/);

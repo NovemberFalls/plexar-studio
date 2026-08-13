@@ -195,6 +195,34 @@ describe("SessionDefaultsSettings — honesty", () => {
     expect(note).toHaveAttribute("role", "note");
     expect(note.textContent).toMatch(/not in force yet/i);
     expect(note.textContent).toMatch(/DEFAULTS pill/);
+    // The claim is scoped to the four unread fields. It used to read "nothing
+    // reads sessions.*", which stopped being true when max_sessions became
+    // live -- a blanket claim that quietly turns false is the failure this
+    // repo keeps chasing.
+    expect(note.textContent).not.toMatch(/Nothing reads sessions\.\*/i);
+    expect(note.textContent).toMatch(/four fields above/i);
+  });
+
+  it("offers the session cap, and says it is enforced but needs a restart", () => {
+    renderPage(makeShell());
+    const field = screen.getByTestId("field-sessions.max_sessions");
+    expect(field).toHaveValue(8);
+    // Not under the "not in force" umbrella -- this one IS read at startup.
+    const note = screen.getByTestId("max-sessions-restart");
+    expect(note.textContent).toMatch(/is enforced/i);
+    expect(note.textContent).toMatch(/restart/i);
+  });
+
+  it("clamps the cap to the server's bound so one bad value cannot discard the whole patch", () => {
+    // A PUT is validated all-or-nothing: an out-of-range max_sessions 400s and
+    // NOTHING on the page is written, silently losing the user's other edits.
+    const shell = makeShell();
+    renderPage(shell);
+    const field = screen.getByTestId("field-sessions.max_sessions");
+    fireEvent.change(field, { target: { value: "900" } });
+    expect(shell.setField).toHaveBeenCalledWith("sessions.max_sessions", 64);
+    fireEvent.change(field, { target: { value: "0" } });
+    expect(shell.setField).toHaveBeenCalledWith("sessions.max_sessions", 1);
   });
 
   it("does not offer fast mode as live for a non-Opus model", () => {
