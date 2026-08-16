@@ -144,4 +144,18 @@ describe("the rules scroll mode must not break", () => {
     // An unknown persisted value must not brick the workspace.
     expect(APP_SRC).toMatch(/LAYOUT_MODES\.has\(v\) \? v : "grid"/);
   });
+
+  it("has ONE bar — TopBar is embedded in the command bar, not a drop-down", () => {
+    // Studio used to render TWO bars: the command bar showed a DEFAULTS pill
+    // reading `claude-opus-5[1m] bypassPermissions low` as dead text, and
+    // clicking it dropped a whole second bar carrying the pickers for those
+    // very same three values. The scaffold comment admitted it ("PHASE-1
+    // SCAFFOLD ... Phase 4 dissolves TopBar"). This is Phase 4.
+    expect(APP_SRC).toMatch(/<TopBar\s+embedded/);
+    expect(APP_SRC).toMatch(/controls=\{/);
+    // No absolutely-positioned overlay bar, and no state gating one.
+    expect(APP_SRC).not.toMatch(/PHASE-1 SCAFFOLD/);
+    expect(APP_SRC).not.toMatch(/defaultsOpen/);
+    expect(APP_SRC).not.toMatch(/onOpenDefaults/);
+  });
 });

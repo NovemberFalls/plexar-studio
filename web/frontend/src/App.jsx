@@ -324,7 +324,11 @@ export default function App() {
   const [paneSlotBySession, setPaneSlotBySession] = useState(() => new Map());
   const showFleetView = activeSection === "fleet";
   const showLocalBroker = activeSection === "engine";
-  const [defaultsOpen, setDefaultsOpen] = useState(false);
+  // True while the model picker's drop-down is open. Named for what it is now:
+  // it used to gate a whole "DEFAULTS" drop-down bar, which no longer exists.
+  // Its one remaining job is telling useLocalModels to poll on the fast cadence
+  // while a human is actually looking at the list.
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   // Local model broker (machine-global): queue + metrics. Polling is gated on
   // localEnabled so a disabled feature does zero background work.
   const [localEnabled, setLocalEnabled] = useState(() => {
@@ -1200,7 +1204,7 @@ export default function App() {
   } = useLocalModelsPoller({
     enabled: backendReady && localEnabled,
     provider: selectedProvider,
-    watching: showLocalBroker || defaultsOpen,
+    watching: showLocalBroker || modelPickerOpen,
     onToast: toast,
   });
 
@@ -1644,13 +1648,10 @@ export default function App() {
       setSidebarOpen((v) => !v);
       return;
     }
-    // Close the DEFAULTS drop-down on any destination change. It is the Phase-1
-    // TopBar scaffold rendered as an absolutely-positioned overlay, so leaving it
-    // open while navigating to Engine/Reports/Settings drops a full-width bar on
-    // top of that view's own header -- it reads as the app double-rendering its
-    // chrome. The panel belongs to Workspace's defaults, so it should not
-    // survive leaving Workspace.
-    setDefaultsOpen(false);
+    // (The DEFAULTS drop-down used to be force-closed here: it was an
+    // absolutely-positioned full-width overlay that would otherwise land on top
+    // of Engine/Reports/Settings' own header. It is gone -- the controls live in
+    // the command bar now, and their popovers close on outside click.)
     setActiveSection((prev) => (prev === section ? "work" : section));
   }, []);
 
@@ -2245,54 +2246,37 @@ export default function App() {
               title={SECTION_TITLES[activeSection] || "Workspace"}
               workspaceName={activeWorkspaceName}
               onOpenPalette={openPalette}
-              model={model}
-              permissionMode={permissionMode}
-              effort={effort}
-              onOpenDefaults={() => setDefaultsOpen((v) => !v)}
+              controls={
+                <TopBar
+                  embedded
+                  model={model}
+                  setModel={setModel}
+                  permissionMode={permissionMode}
+                  setPermissionMode={setPermissionMode}
+                  effort={effort}
+                  setEffort={setEffort}
+                  fast={fast}
+                  setFast={setFast}
+                  sidebarOpen={sidebarOpen}
+                  setSidebarOpen={setSidebarOpen}
+                  inspectorOpen={inspectorOpen}
+                  setInspectorOpen={setInspectorOpen}
+                  layoutMode={layoutMode}
+                  setLayoutMode={setLayoutMode}
+                  user={user}
+                  onToast={toast}
+                  localEnabled={localEnabled}
+                  setLocalEnabled={setLocalEnabled}
+                  localLaunchEnabled={localEnabled}
+                  localMetrics={localMetrics}
+                  localStatus={localStatus}
+                  onOpenLocalBroker={() => setActiveSection("engine")}
+                  onLoadLocalModel={loadOrRestartLocalModel}
+                  localBusyModelId={localBusyModelId}
+                  onPickerOpenChange={setModelPickerOpen}
+                />
+              }
             />
-
-            {/* PHASE-1 SCAFFOLD: the Defaults pill opens the existing TopBar as a
-                drop-down so every picker it owns (model, permission, effort,
-                fast, OpenRouter key, local-engine pill) keeps working unchanged.
-                Phase 4 dissolves TopBar into Settings + a purpose-built popover;
-                until then this is how those controls stay reachable rather than
-                being dropped on the floor by the shell restructure. */}
-            {/* ABSOLUTELY POSITIONED on purpose. As an in-flow block this row
-                changed the height available to the pane grid, so every xterm in
-                every pane refit on each open AND close — visibly reflowing
-                output in up to 8 terminals to show a picker. */}
-            {defaultsOpen && (
-              <div style={{ position: "relative", zIndex: 40 }}>
-                <div style={{ position: "absolute", top: 0, left: 0, right: 0, background: "var(--cc-bg2)", borderBottom: "1px solid var(--cc-border)", boxShadow: "0 12px 32px rgba(0,0,0,.45)" }}>
-              <TopBar
-                model={model}
-                setModel={setModel}
-                permissionMode={permissionMode}
-                setPermissionMode={setPermissionMode}
-                effort={effort}
-                setEffort={setEffort}
-                fast={fast}
-                setFast={setFast}
-                sidebarOpen={sidebarOpen}
-                setSidebarOpen={setSidebarOpen}
-                inspectorOpen={inspectorOpen}
-                setInspectorOpen={setInspectorOpen}
-                layoutMode={layoutMode}
-                setLayoutMode={setLayoutMode}
-                user={user}
-                onToast={toast}
-                localEnabled={localEnabled}
-                setLocalEnabled={setLocalEnabled}
-                localLaunchEnabled={localEnabled}
-                localMetrics={localMetrics}
-                localStatus={localStatus}
-                onOpenLocalBroker={() => setActiveSection("engine")}
-                onLoadLocalModel={loadOrRestartLocalModel}
-                localBusyModelId={localBusyModelId}
-              />
-                </div>
-              </div>
-            )}
 
             <LaneStrip
               sessions={sessions}

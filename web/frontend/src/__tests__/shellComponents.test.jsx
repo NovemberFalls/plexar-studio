@@ -318,20 +318,24 @@ describe("Rail and CommandBar smoke render (basic prop contracts)", () => {
     expect(screen.getByText("?")).toBeInTheDocument();
   });
 
-  it("CommandBar renders title and defaults pill without a workspaceName", () => {
+  it("CommandBar renders its title and hosts the session controls inline", () => {
+    /**
+     * The DEFAULTS pill is GONE. It displayed model / permission / effort as
+     * dead text while the controls that set them lived in a TopBar that only
+     * appeared as a drop-down underneath it -- the same three values in two
+     * places, one of them unclickable. The bar now hosts the real controls.
+     */
     render(
       <CommandBar
         title="Workspace"
         workspaceName={null}
         onOpenPalette={() => {}}
-        model="opus"
-        permissionMode="default"
-        effort="auto"
-        onOpenDefaults={() => {}}
+        controls={<button type="button">model-picker</button>}
       />
     );
     expect(screen.getByText("Workspace")).toBeInTheDocument();
-    expect(screen.getByText("opus")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "model-picker" })).toBeInTheDocument();
+    expect(screen.queryByText("DEFAULTS")).not.toBeInTheDocument();
   });
 
   it("CommandBar carries the subscription usage pill on the always-visible bar", () => {

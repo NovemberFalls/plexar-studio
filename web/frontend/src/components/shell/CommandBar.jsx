@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, ChevronDown } from "lucide-react";
+import { Search } from "lucide-react";
 import UsageLimitsPill from "../UsageLimitsPill";
 
 // Presentational-only command bar for the Workspace shell. All click handlers
@@ -68,74 +68,24 @@ function PaletteTrigger({ onOpenPalette }) {
   );
 }
 
-function DefaultsPill({ model, permissionMode, effort, onOpenDefaults }) {
-  return (
-    <button
-      type="button"
-      className="hover-bg-elevated"
-      onClick={onOpenDefaults}
-      title={`Session defaults — ${model} · ${permissionMode} · ${effort}`}
-      aria-label="Open session defaults"
-      style={{
-        height: 26,
-        borderRadius: 8,
-        background: "var(--cc-surface)",
-        border: "1px solid var(--cc-border)",
-        display: "flex",
-        alignItems: "center",
-        cursor: "pointer",
-        color: "var(--cc-fg)",
-        fontFamily: "inherit",
-        padding: 0,
-        overflow: "hidden",
-      }}
-    >
-      <span
-        style={{
-          fontSize: 9,
-          fontWeight: 800,
-          letterSpacing: ".06em",
-          color: "var(--cc-muted)",
-          padding: "0 8px",
-        }}
-      >
-        DEFAULTS
-      </span>
-      <span style={{ width: 1, alignSelf: "stretch", background: "var(--cc-line)" }} />
-      <span style={{ fontSize: 11, color: "var(--cc-fg)", padding: "0 8px", whiteSpace: "nowrap" }}>
-        {model}
-      </span>
-      <span style={{ width: 1, alignSelf: "stretch", background: "var(--cc-line)" }} />
-      <span style={{ fontSize: 11, color: "var(--cc-accent)", padding: "0 8px", whiteSpace: "nowrap" }}>
-        {permissionMode}
-      </span>
-      <span style={{ width: 1, alignSelf: "stretch", background: "var(--cc-line)" }} />
-      <span style={{ fontSize: 11, color: "var(--cc-fg)", padding: "0 8px", whiteSpace: "nowrap" }}>
-        {effort}
-      </span>
-      <span style={{ width: 1, alignSelf: "stretch", background: "var(--cc-line)" }} />
-      <span style={{ padding: "0 7px", display: "flex", alignItems: "center", color: "var(--cc-muted)" }}>
-        <ChevronDown size={12} />
-      </span>
-    </button>
-  );
-}
-
 export default function CommandBar({
   title,
   workspaceName,
   onOpenPalette,
-  model,
-  permissionMode,
-  effort,
-  onOpenDefaults,
+  // The session controls (model, permission mode, effort, fast, engine, key,
+  // avatar, panel toggles) rendered inline. Previously these lived in a TopBar
+  // that only appeared as a DROP-DOWN under a "DEFAULTS" pill -- so the bar
+  // showed `claude-opus-5[1m] bypassPermissions low` as dead text while the
+  // controls that set them were hidden one click away. One bar, one copy of
+  // each control.
+  controls,
 }) {
   const [limitsOpen, setLimitsOpen] = useState(false);
 
   return (
     <div
       style={{
-        height: 44,
+        height: 46,
         flexShrink: 0,
         padding: "0 12px 0 14px",
         display: "flex",
@@ -182,12 +132,7 @@ export default function CommandBar({
           onToggle={() => setLimitsOpen((v) => !v)}
           onClose={() => setLimitsOpen(false)}
         />
-        <DefaultsPill
-          model={model}
-          permissionMode={permissionMode}
-          effort={effort}
-          onOpenDefaults={onOpenDefaults}
-        />
+        {controls}
       </div>
     </div>
   );
