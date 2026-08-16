@@ -492,3 +492,15 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .pane-group-rule { flex: 1; }
+
+/* Grip on a scroll-mode folder header. The header itself is draggable — this
+   is the affordance that says so, not the only handle. */
+.pane-group-grip {
+  color: var(--cc-muted, var(--text-muted));
+  cursor: grab;
+  font-size: 11px;
+  line-height: 1;
+  user-select: none;
+}
+.pane-group-head:hover .pane-group-grip { color: var(--cc-accent, var(--accent)); }
+.pane-group-head:active { cursor: grabbing; }

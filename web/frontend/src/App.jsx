@@ -45,6 +45,7 @@ const FEATURED_KEY = "cockpit-featured-slot";
 const INSPECTOR_KEY = "cockpit-inspector-open";
 const LAYOUT_MODE_KEY = "cockpit-layout-mode";
 const FILL_WIDTH_KEY = "cockpit-scroll-fill";
+const GROUP_ORDER_KEY = "cockpit-group-order";
 
 /** Layout modes. `grid` is the fixed-slot grid that has always shipped;
  *  `scroll` is one row per working folder, scrolled vertically.
@@ -340,6 +341,28 @@ export default function App() {
    *  hence a toggle rather than a ruling. */
   const [fillWidth, setFillWidth] = useState(() => lsLoad(FILL_WIDTH_KEY, true) !== false);
   useEffect(() => { lsSave(FILL_WIDTH_KEY, fillWidth); }, [fillWidth]);
+  /**
+   * User-chosen order of the folder groups, as normalized workdir keys.
+   *
+   * This IS stored state, unlike the grouping itself — and the distinction is
+   * the point. Group MEMBERSHIP stays derived from each session's `workdir`
+   * (storing it would be a second source of truth about where a session
+   * lives). Group ORDER has no derivation to disagree with: nothing else in
+   * the app has an opinion about whether browser-rpg sits above l2j-dev.
+   *
+   * Folders absent from the list sort last in first-appearance order, so a new
+   * folder appears at the bottom instead of jumping into the middle, and a
+   * folder whose sessions all close leaves its position behind for when it
+   * comes back.
+   */
+  const [groupOrder, setGroupOrder] = useState(() => {
+    const v = lsLoad(GROUP_ORDER_KEY, []);
+    return Array.isArray(v) ? v.filter((k) => typeof k === "string") : [];
+  });
+  useEffect(() => { lsSave(GROUP_ORDER_KEY, groupOrder); }, [groupOrder]);
+  /** Folder key currently being dragged by its header, or null. */
+  const [dragGroup, setDragGroup] = useState(null);
+  const [dragOverGroup, setDragOverGroup] = useState(null);
   /** The pane container, so a folder click can scroll it. */
   const stageRef = useRef(null);
   /** Slot ceiling when looking for somewhere to put a session. The grid can
@@ -764,14 +787,22 @@ export default function App() {
       }
       groups.get(key).slots.push(idx);
     }
-    const sizes = [...groups.values()].map((g) => g.slots.length);
+    // Apply the user's order. Unknown folders keep first-appearance order and
+    // sort after the known ones -- a Map preserves insertion order, so the
+    // sort only has to be STABLE, which Array#sort is.
+    const rank = new Map(groupOrder.map((k, i) => [k, i]));
+    const ordered = [...groups.entries()].sort(
+      (a, b) => (rank.get(a[0]) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b[0]) ?? Number.MAX_SAFE_INTEGER),
+    );
+
+    const sizes = ordered.map(([, g]) => g.slots.length);
     const { tracks, exact } = fillWidth
       ? computeFillTracks(layout, sizes)
       : { tracks: layout, exact: true };
 
     const items = [];
     const spans = new Map();
-    for (const [key, g] of groups) {
+    for (const [key, g] of ordered) {
       items.push({ type: "header", folder: key, label: g.label, branch: g.branch, count: g.slots.length });
       // Columns this group gets. Never more than `layout` -- the 1-8 control is
       // still the ceiling on panes per row; fill-width only stops a SHORT group
@@ -784,9 +815,28 @@ export default function App() {
       }
     }
     return { items, tracks, spans };
-  }, [scrollMode, layout, activeIds, sessions, gitStatuses, fillWidth]);
+  }, [scrollMode, layout, activeIds, sessions, gitStatuses, fillWidth, groupOrder]);
 
   const { items: renderRows, tracks: gridTracks, spans: spanBySlot } = renderItems;
+
+  /** The folder keys in the order they are currently rendered. */
+  const orderedGroupKeys = useMemo(
+    () => renderRows.filter((i) => i.type === "header").map((i) => i.folder),
+    [renderRows],
+  );
+
+  /** Move a folder group so it takes `toKey`'s position. Writes the WHOLE
+   *  visible order, not just the moved pair, so the stored list always
+   *  describes what the user is looking at. */
+  const moveGroup = useCallback((fromKey, toKey) => {
+    if (!fromKey || !toKey || fromKey === toKey) return;
+    const keys = [...orderedGroupKeys];
+    const fi = keys.indexOf(fromKey);
+    const ti = keys.indexOf(toKey);
+    if (fi < 0 || ti < 0) return;
+    keys.splice(ti, 0, keys.splice(fi, 1)[0]);
+    setGroupOrder(keys);
+  }, [orderedGroupKeys]);
 
   /** Slot index -> normalized folder, so a drop can be refused across groups
    *  without recomputing the grouping inside an event handler. */
@@ -2510,7 +2560,55 @@ export default function App() {
               {/* Slot-based rendering: each slot is either a session pane or an empty placeholder */}
               {renderRows.map((item) =>
                 item.type === "header" ? (
-                  <div key={`hdr-${item.folder}`} data-folder-head={item.folder} className="pane-group-head" style={{ gridColumn: "1 / -1" }}>
+                  <div
+                    key={`hdr-${item.folder}`}
+                    data-folder-head={item.folder}
+                    className="pane-group-head"
+                    style={{
+                      gridColumn: "1 / -1",
+                      opacity: dragGroup === item.folder ? 0.4 : 1,
+                      // The insertion line goes on TOP because a drop puts the
+                      // dragged folder AT this one's position, pushing it down.
+                      borderTop:
+                        dragOverGroup === item.folder && dragGroup !== item.folder
+                          ? "2px solid var(--cc-accent)"
+                          : "2px solid transparent",
+                    }}
+                    // Whole-header drag: the grip is an affordance, not the
+                    // only handle -- a one-line strip is a small target.
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = "move";
+                      // Distinct prefix from "pane:"/"session:" so the slot drop
+                      // handlers ignore this and vice versa.
+                      e.dataTransfer.setData("text/plain", `group:${item.folder}`);
+                      setDragGroup(item.folder);
+                    }}
+                    onDragEnd={() => { setDragGroup(null); setDragOverGroup(null); }}
+                    onDragOver={(e) => {
+                      // Only react to a GROUP drag. Without this the header
+                      // would light up while a pane is being dragged past it
+                      // and promise a drop it does not accept.
+                      if (!dragGroup) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      e.dataTransfer.dropEffect = "move";
+                      if (dragOverGroup !== item.folder) setDragOverGroup(item.folder);
+                    }}
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget)) setDragOverGroup(null);
+                    }}
+                    onDrop={(e) => {
+                      if (!dragGroup) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      moveGroup(dragGroup, item.folder);
+                      setDragGroup(null);
+                      setDragOverGroup(null);
+                    }}
+                    title="Drag to reorder this folder"
+                  >
+                    <span className="pane-group-grip" aria-hidden="true">&#10283;</span>
                     <span className="pane-group-name">{item.label}</span>
                     {item.branch && <span className="pane-group-branch">&#9095; {item.branch}</span>}
                     <span className="pane-group-count">{item.count}</span>
