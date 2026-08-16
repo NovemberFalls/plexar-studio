@@ -112,6 +112,24 @@ describe("the rules scroll mode must not break", () => {
     expect(APP_SRC).not.toMatch(/react-window|react-virtual|useVirtualizer/);
   });
 
+  it("takes its columns from the SAME 1-8 layout control the grid uses", () => {
+    // auto-fill derived the count from pane width, so the number the user
+    // picked in the status strip did nothing and the row capped at whatever
+    // happened to fit (5 on a 4K window).
+    expect(APP_SRC).toMatch(
+      /gridTemplateColumns: `repeat\(\$\{Math\.max\(1, layout\)\}, minmax\(0, 1fr\)\)`/,
+    );
+    expect(APP_SRC).not.toMatch(/repeat\(auto-fill/);
+  });
+
+  it("does not put a height floor on implicit rows — that padded every folder header", () => {
+    // gridAutoRows applies to EVERY implicit row, headers included, so a
+    // minmax() floor turned each one-line header into a band of dead space.
+    // Height belongs on the pane, not on the row.
+    expect(APP_SRC).toMatch(/gridAutoRows: "min-content"/);
+    expect(APP_SRC).toMatch(/minHeight: scrollMode \? "clamp\(240px, 42vh, 560px\)" : 0/);
+  });
+
   it("shows the folder-scoped drag rule instead of only enforcing it", () => {
     // The refusal alone is discoverable only by trying and getting a toast.
     // Dimming out-of-folder panes during a drag states the rule up front.

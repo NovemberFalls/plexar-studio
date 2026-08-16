@@ -2067,7 +2067,12 @@ export default function App() {
                     style={{
                       borderRadius: 10,
                       overflow: "hidden",
-                      minHeight: 0,
+                      // Scroll mode's rows are min-content, so the pane states
+                      // its own height. Viewport-relative so a taller window
+                      // gets taller terminals rather than more dead space,
+                      // clamped so it stays usable on a laptop and does not
+                      // become a single pane per screen on a 4K display.
+                      minHeight: scrollMode ? "clamp(240px, 42vh, 560px)" : 0,
                       minWidth: 0,
                       position: "relative",
                       ...slotPlacement,
@@ -2428,8 +2433,17 @@ export default function App() {
                 // scrollback and the WebSocket with them.
                 ...(scrollMode
                   ? {
-                      gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-                      gridAutoRows: "minmax(230px, auto)",
+                      // Panes per ROW come from the SAME 1-8 control the grid
+                      // uses (StatusStrip's layout cells). auto-fill was wrong:
+                      // it derived a column count from pane width instead, so
+                      // the number the user picked did nothing and the row
+                      // silently capped at whatever fitted -- 5 on a 4K window.
+                      gridTemplateColumns: `repeat(${Math.max(1, layout)}, minmax(0, 1fr))`,
+                      // min-content, NOT a minmax floor. A floor applies to
+                      // EVERY implicit row including the folder headers, which
+                      // is what padded each header out to a 230px band of dead
+                      // space. Panes carry their own height instead (below).
+                      gridAutoRows: "min-content",
                       alignContent: "start",
                       overflowY: "auto",
                     }
