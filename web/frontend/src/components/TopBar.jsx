@@ -5,7 +5,7 @@
    the single source for the model, permission-mode and effort vocabularies a
    session can be configured with. */
 import { useState, useEffect } from "react";
-import { PanelLeft, PanelRight, ChevronDown, KeyRound, Cpu, LayoutGrid, Rows3 } from "lucide-react";
+import { PanelLeft, PanelRight, ChevronDown, KeyRound, Cpu, LayoutGrid, Rows3, StretchHorizontal } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 import {
@@ -60,6 +60,9 @@ export default function TopBar({
   // "grid" | "scroll". Optional: hosts that render no pane area omit it.
   layoutMode,
   setLayoutMode,
+  // Scroll mode only: whether each folder's panes divide the full width.
+  fillWidth,
+  setFillWidth,
   // Render as a bare control cluster for the command bar to host inline,
   // instead of as a standalone <header>. See the note above the return.
   embedded = false,
@@ -204,6 +207,35 @@ export default function TopBar({
             </button>
           ))}
         </div>
+  );
+
+  // Only meaningful in scroll mode -- the grid has fixed cells, so there is no
+  // short row for a group to fill. Hidden rather than disabled: a permanently
+  // dead control in the main bar is worse than no control.
+  const fillToggle = !setFillWidth || layoutMode !== "scroll" ? null : (
+    <button
+      onClick={() => setFillWidth((v) => !v)}
+      className="transition-colors hover-bg-surface"
+      style={{
+        display: "flex",
+        padding: 4,
+        borderRadius: 999,
+        color: fillWidth ? "var(--cc-accent, var(--accent))" : "var(--cc-dim, var(--text-secondary))",
+        background: fillWidth
+          ? "color-mix(in srgb, var(--cc-accent, #4ea1e8) 18%, transparent)"
+          : "transparent",
+        border: "1px solid var(--cc-border, var(--border-color))",
+      }}
+      title={
+        fillWidth
+          ? "Each folder fills the width — a folder with one session gets the whole row"
+          : "Every folder shares one column rhythm, so short folders leave a gap"
+      }
+      aria-label="Fill width per folder"
+      aria-pressed={Boolean(fillWidth)}
+    >
+      <StretchHorizontal size={15} />
+    </button>
   );
 
   const controls = (
@@ -784,6 +816,7 @@ export default function TopBar({
     return (
       <div className="flex items-center relative" style={{ gap: 7 }}>
         {layoutToggle}
+        {fillToggle}
         {controls}
         {sidebarToggle}
         {inspectorToggle}
@@ -800,6 +833,7 @@ export default function TopBar({
       <div className="flex items-center" style={{ gap: 11 }}>
         {sidebarToggle}
         {layoutToggle}
+        {fillToggle}
         <LogoMark size={25} />
       </div>
       <div className="flex items-center" style={{ gap: 7 }}>{controls}{inspectorToggle}</div>

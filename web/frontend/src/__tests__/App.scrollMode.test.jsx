@@ -116,9 +116,13 @@ describe("the rules scroll mode must not break", () => {
     // auto-fill derived the count from pane width, so the number the user
     // picked in the status strip did nothing and the row capped at whatever
     // happened to fit (5 on a 4K window).
+    // The track count is now derived (fill-width packs groups into an LCM of
+    // their column counts), but `layout` is still its ceiling and its base --
+    // computeFillTracks starts from it and never gives a group more columns.
     expect(APP_SRC).toMatch(
-      /gridTemplateColumns: `repeat\(\$\{Math\.max\(1, layout\)\}, minmax\(0, 1fr\)\)`/,
+      /gridTemplateColumns: `repeat\(\$\{Math\.max\(1, gridTracks\)\}, minmax\(0, 1fr\)\)`/,
     );
+    expect(APP_SRC).toMatch(/const cols = Math\.min\(Math\.max\(1, g\.slots\.length\), layout\);/);
     expect(APP_SRC).not.toMatch(/repeat\(auto-fill/);
   });
 

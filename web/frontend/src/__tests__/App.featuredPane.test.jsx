@@ -235,7 +235,7 @@ describe("terminals do not remount when the featured pane changes", () => {
     // `layout` slots, which is the part that must not drift.
     expect(APP_SRC).toMatch(/const renderSlot = \(idx\) => \{/);
     expect(APP_SRC).toMatch(
-      /return Array\.from\(\{ length: layout \}, \(_, idx\) => \(\{ type: "slot", idx \}\)\);/,
+      /items: Array\.from\(\{ length: layout \}, \(_, idx\) => \(\{ type: "slot", idx \}\)\),/,
     );
     expect(APP_SRC).toMatch(/key=\{session\.id\}/);
     // paneOrder is consumed exactly once in the slot renderer, for the cell index.
@@ -258,9 +258,9 @@ describe("terminals do not remount when the featured pane changes", () => {
     // no keyed Fragment (a Fragment keyed per slot would remount on a swap).
     expect(APP_SRC).toMatch(/\) : \(\s+renderSlot\(item\.idx\)\s+\)/);
     // Featured placement must not leak into scroll mode.
-    expect(APP_SRC).toMatch(
-      /const slotPlacement = scrollMode \? \{\} : \{ gridColumn: area\.col, gridRow: area\.row \};/,
-    );
+    // Scroll mode places by SPAN; the featured cell's area is grid-only.
+    expect(APP_SRC).toMatch(/gridColumn: `span \$\{spanBySlot\.get\(idx\) \|\| 1\}`/);
+    expect(APP_SRC).toMatch(/: \{ gridColumn: area\.col, gridRow: area\.row \};/);
   });
 
   it("a child keyed by session id is not remounted when placement changes", () => {

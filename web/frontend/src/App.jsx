@@ -44,6 +44,7 @@ const FLIP_KEY = "cockpit-flip";
 const FEATURED_KEY = "cockpit-featured-slot";
 const INSPECTOR_KEY = "cockpit-inspector-open";
 const LAYOUT_MODE_KEY = "cockpit-layout-mode";
+const FILL_WIDTH_KEY = "cockpit-scroll-fill";
 
 /** Layout modes. `grid` is the fixed-slot grid that has always shipped;
  *  `scroll` is one row per working folder, scrolled vertically.
@@ -56,6 +57,40 @@ const LAYOUT_MODE_KEY = "cockpit-layout-mode";
  *  what App.jsx's "terminals never unmount" rule exists to prevent. Group
  *  headers are therefore siblings of the panes, never their parents. */
 const LAYOUT_MODES = new Set(["grid", "scroll"]);
+
+/** Greatest common divisor / least common multiple, for the fill-width track
+ *  count below. */
+function gcd(a, b) { return b === 0 ? a : gcd(b, a % b); }
+function lcm(a, b) { return (a * b) / gcd(a, b); }
+
+/**
+ * Scroll mode's grid track count, and each group's per-pane span.
+ *
+ * Every pane is a direct child of ONE grid (re-parenting remounts terminals),
+ * so a single column template has to serve every folder at once. With
+ * fill-width on, a group of G sessions wants G equal columns across the full
+ * width -- and G differs per group.
+ *
+ * Solved with a track count that is the LCM of every column count present, so
+ * each group's panes span an exact whole number of tracks and come out
+ * EXACTLY equal. Picking a fixed base instead (say `layout` tracks) forces
+ * uneven panes whenever G does not divide it -- 3 sessions in 4 columns would
+ * render 50/25/25, which reads as a bug rather than as a layout.
+ *
+ * The LCM is capped: pathological mixes (5 and 7 and 8 at once) would demand
+ * hundreds of tracks, and beyond the cap it falls back to `layout` columns,
+ * accepting the ragged edge rather than making the browser lay out 840 tracks.
+ */
+const MAX_FILL_TRACKS = 120;
+function computeFillTracks(layout, groupSizes) {
+  const cols = groupSizes.map((n) => Math.min(Math.max(1, n), layout));
+  let tracks = layout;
+  for (const c of cols) {
+    tracks = lcm(tracks, c);
+    if (tracks > MAX_FILL_TRACKS) return { tracks: layout, exact: false };
+  }
+  return { tracks, exact: true };
+}
 
 /** Canonical key for a working directory in path-keyed maps (`gitStatuses`).
  *  Backslash-normalized with any trailing separator stripped. Both the writer
@@ -298,6 +333,13 @@ export default function App() {
   });
   useEffect(() => { lsSave(LAYOUT_MODE_KEY, layoutMode); }, [layoutMode]);
   const scrollMode = layoutMode === "scroll";
+  /** Scroll mode only: let each folder's panes divide the FULL width, instead
+   *  of every group sharing one column rhythm. A folder with one session then
+   *  gets the whole row rather than 1/layout of it with dead space beside it.
+   *  Off restores the shared rhythm, which is easier to scan across folders --
+   *  hence a toggle rather than a ruling. */
+  const [fillWidth, setFillWidth] = useState(() => lsLoad(FILL_WIDTH_KEY, true) !== false);
+  useEffect(() => { lsSave(FILL_WIDTH_KEY, fillWidth); }, [fillWidth]);
   /** The pane container, so a folder click can scroll it. */
   const stageRef = useRef(null);
   /** Slot ceiling when looking for somewhere to put a session. The grid can
@@ -700,7 +742,11 @@ export default function App() {
    */
   const renderItems = useMemo(() => {
     if (!scrollMode) {
-      return Array.from({ length: layout }, (_, idx) => ({ type: "slot", idx }));
+      return {
+        items: Array.from({ length: layout }, (_, idx) => ({ type: "slot", idx })),
+        tracks: layout,
+        spans: new Map(),
+      };
     }
     const groups = new Map(); // normalized dir -> {label, branch, slots[]}
     for (let idx = 0; idx < activeIds.length; idx++) {
@@ -718,13 +764,29 @@ export default function App() {
       }
       groups.get(key).slots.push(idx);
     }
+    const sizes = [...groups.values()].map((g) => g.slots.length);
+    const { tracks, exact } = fillWidth
+      ? computeFillTracks(layout, sizes)
+      : { tracks: layout, exact: true };
+
     const items = [];
+    const spans = new Map();
     for (const [key, g] of groups) {
       items.push({ type: "header", folder: key, label: g.label, branch: g.branch, count: g.slots.length });
-      for (const idx of g.slots) items.push({ type: "slot", idx });
+      // Columns this group gets. Never more than `layout` -- the 1-8 control is
+      // still the ceiling on panes per row; fill-width only stops a SHORT group
+      // from leaving the rest of its row empty.
+      const cols = Math.min(Math.max(1, g.slots.length), layout);
+      const span = fillWidth && exact ? tracks / cols : tracks / layout;
+      for (const idx of g.slots) {
+        items.push({ type: "slot", idx });
+        spans.set(idx, Math.max(1, Math.round(span)));
+      }
     }
-    return items;
-  }, [scrollMode, layout, activeIds, sessions, gitStatuses]);
+    return { items, tracks, spans };
+  }, [scrollMode, layout, activeIds, sessions, gitStatuses, fillWidth]);
+
+  const { items: renderRows, tracks: gridTracks, spans: spanBySlot } = renderItems;
 
   /** Slot index -> normalized folder, so a drop can be refused across groups
    *  without recomputing the grouping inside an event handler. */
@@ -1960,7 +2022,9 @@ export default function App() {
               // auto-flow places panes and `featuredIndex` is left untouched --
               // reinterpreting it here would give the slot/cell/order triple a
               // fourth meaning, which is how that code rots.
-              const slotPlacement = scrollMode ? {} : { gridColumn: area.col, gridRow: area.row };
+              const slotPlacement = scrollMode
+                ? { gridColumn: `span ${spanBySlot.get(idx) || 1}` }
+                : { gridColumn: area.col, gridRow: area.row };
               // Dropping a pane onto this slot moves that session INTO the
               // slot (swapPanes/placeSession act on slots), so when this is
               // the featured slot the dragged pane lands in the big cell —
@@ -2263,6 +2327,8 @@ export default function App() {
                   setInspectorOpen={setInspectorOpen}
                   layoutMode={layoutMode}
                   setLayoutMode={setLayoutMode}
+                  fillWidth={fillWidth}
+                  setFillWidth={setFillWidth}
                   user={user}
                   onToast={toast}
                   localEnabled={localEnabled}
@@ -2422,7 +2488,7 @@ export default function App() {
                       // it derived a column count from pane width instead, so
                       // the number the user picked did nothing and the row
                       // silently capped at whatever fitted -- 5 on a 4K window.
-                      gridTemplateColumns: `repeat(${Math.max(1, layout)}, minmax(0, 1fr))`,
+                      gridTemplateColumns: `repeat(${Math.max(1, gridTracks)}, minmax(0, 1fr))`,
                       // min-content, NOT a minmax floor. A floor applies to
                       // EVERY implicit row including the folder headers, which
                       // is what padded each header out to a 230px band of dead
@@ -2442,7 +2508,7 @@ export default function App() {
               onDragEnd={() => { setDragSource(null); setDragOverSlot(null); }}
             >
               {/* Slot-based rendering: each slot is either a session pane or an empty placeholder */}
-              {renderItems.map((item) =>
+              {renderRows.map((item) =>
                 item.type === "header" ? (
                   <div key={`hdr-${item.folder}`} data-folder-head={item.folder} className="pane-group-head" style={{ gridColumn: "1 / -1" }}>
                     <span className="pane-group-name">{item.label}</span>
