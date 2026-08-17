@@ -851,19 +851,38 @@ export default function App() {
   }, [activeIds, sessions]);
 
   // Explicitly place a session into a specific pane slot index
-  const placeSession = useCallback((sessionId, slotIndex) => {
+  /**
+   * Put a session into a pane slot.
+   *
+   * `insert` decides what happens when the session is NOT already on screen,
+   * and the two modes want opposite things:
+   *
+   * - GRID (insert=false): write into the target slot. The grid DRAWS its
+   *   empty slots, so the user aims at a gap; landing on an occupied slot is
+   *   a deliberate replace.
+   * - SCROLL (insert=true): SPLICE in. Scroll mode omits empty slots -- there
+   *   is nothing to aim at but occupied panes -- so an overwrite is never what
+   *   the user meant. It silently evicted the pane they dropped onto, which is
+   *   why adding a second session to a folder looked impossible without
+   *   closing and reopening one.
+   */
+  const placeSession = useCallback((sessionId, slotIndex, { insert = false } = {}) => {
     setActiveIds((prev) => {
       const from = prev.indexOf(sessionId);
       if (from === slotIndex) return prev;
       const next = [...prev];
-      while (next.length <= slotIndex) next.push(null);
       if (from !== -1) {
-        // Already in activeIds: swap positions (target may be null = empty slot)
+        // Already on screen: swap positions (target may be null = empty slot).
+        while (next.length <= slotIndex) next.push(null);
         const tmp = next[slotIndex];
         next[slotIndex] = sessionId;
         next[from] = tmp;
+      } else if (insert) {
+        // Lands exactly where dropped and displaces NOTHING; slots after it
+        // shift along by one.
+        next.splice(Math.max(0, Math.min(slotIndex, next.length)), 0, sessionId);
       } else {
-        // Not in activeIds: place directly into target slot
+        while (next.length <= slotIndex) next.push(null);
         next[slotIndex] = sessionId;
       }
       return next;
@@ -2099,7 +2118,20 @@ export default function App() {
                   setDragSource(null);
                   const data = e.dataTransfer.getData("text/plain");
                   if (data.startsWith("session:")) {
-                    placeSession(parseInt(data.slice(8), 10), idx);
+                    const droppedId = parseInt(data.slice(8), 10);
+                    placeSession(droppedId, idx, { insert: scrollMode });
+                    // A session's GROUP follows its working directory, so
+                    // dropping one into another folder's row does not re-home
+                    // it -- it appears under its own folder. Say so, rather
+                    // than letting the pane seem to jump somewhere random.
+                    if (scrollMode) {
+                      const dropped = sessions.find((x) => x.id === droppedId);
+                      const targetFolder = folderBySlot.get(idx);
+                      const ownFolder = dropped ? normalizeWorkdir(dropped.workdir) || "" : null;
+                      if (dropped && targetFolder != null && ownFolder !== targetFolder) {
+                        toast(`"${dropped.name}" stays under its own folder — a group follows the session's directory`, "info");
+                      }
+                    }
                   } else if (data.startsWith("pane:")) {
                     const from = parseInt(data.slice(5), 10);
                     if (isNaN(from) || from === idx) return;
