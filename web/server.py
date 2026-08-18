@@ -298,6 +298,17 @@ else:
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+#: The upload dir is a CACHE, not a store with a ceiling. This is the size at
+#: which the OLDEST entries are evicted to make room -- not a point past which
+#: uploads are refused. It used to be the latter, and that was a one-way
+#: ratchet: nothing in the app ever called DELETE /api/upload, so a long-lived
+#: session (which is the usage Studio is designed for) accumulated screenshots
+#: until EVERY subsequent paste failed, including a 200KB one, because the
+#: check is on the directory total rather than the file. Only a restart cleared
+#: it, since UPLOAD_DIR is an mkdtemp recreated per process. Files here are
+#: scratch paths handed to a `claude` session; the oldest belong to
+#: conversations that ended hours ago, so dropping them costs nothing that
+#: refusing the user's next paste does not cost more.
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
 _upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
 # Lock serialises the quota-check-then-write sequence in upload_files().
@@ -459,6 +470,54 @@ async def me():
 # ── File Upload ──────────────────────────────────────────
 
 
+def _evict_for_locked(needed: int) -> int:
+    """Delete oldest uploads until `needed` more bytes fit. Returns count freed.
+
+    CALLER MUST HOLD `_upload_lock`. It does not take the lock itself because
+    its only caller is already inside the quota-check-and-write critical
+    section, and re-entering an asyncio.Lock deadlocks. Oldest-first by mtime,
+    the same order `clear_upload_dir` uses.
+
+    Deletion is confined to UPLOAD_DIR by construction -- it iterates that dir
+    and unlinks nothing it did not find there. A file that vanished underneath
+    us (or that Windows has open) is skipped rather than raising: eviction is
+    best-effort, and failing an upload because a stale temp file could not be
+    removed reintroduces the refusal this exists to prevent.
+    """
+    global _upload_dir_size
+    if _upload_dir_size + needed <= MAX_UPLOAD_DIR_SIZE:
+        return 0
+
+    try:
+        entries = sorted(
+            (f for f in UPLOAD_DIR.iterdir() if f.is_file()),
+            key=lambda p: p.stat().st_mtime,
+        )
+    except OSError:
+        logger.warning("Upload eviction: could not list %s", UPLOAD_DIR, exc_info=True)
+        return 0
+
+    freed = 0
+    for f in entries:
+        if _upload_dir_size + needed <= MAX_UPLOAD_DIR_SIZE:
+            break
+        try:
+            size = f.stat().st_size
+            f.unlink()
+        except OSError:
+            logger.debug("Upload eviction: could not delete %s", f, exc_info=True)
+            continue
+        _upload_dir_size = max(0, _upload_dir_size - size)
+        freed += 1
+
+    if freed:
+        logger.info(
+            "Upload cache: evicted %d oldest file(s) to fit %d bytes (now %d/%d)",
+            freed, needed, _upload_dir_size, MAX_UPLOAD_DIR_SIZE,
+        )
+    return freed
+
+
 @app.post("/api/upload")
 async def upload_files(request: Request, files: list[UploadFile] = File(...)):
     """Accept multipart file uploads, save to temp dir, return paths."""
@@ -493,8 +552,16 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         # two concurrent requests could both read the same _upload_dir_size,
         # both pass the check, and together exceed the 200MB limit.
         async with _upload_lock:
+            # Make room rather than refuse -- see MAX_UPLOAD_DIR_SIZE.
+            _evict_for_locked(file_size)
             if _upload_dir_size + file_size > MAX_UPLOAD_DIR_SIZE:
-                errors.append(f"Rejected '{upload.filename}': upload directory full (200MB limit)")
+                # Only reachable if eviction could not free enough, which means
+                # the dir is full of files we failed to delete. Say that, rather
+                # than "full": the remedy is different.
+                errors.append(
+                    f"Rejected '{upload.filename}': upload cache is full and could not "
+                    f"be cleared. Restart Plexar Studio to reset it."
+                )
                 continue
 
             safe_name = f"{uuid.uuid4().hex[:8]}_{stripped_name}"

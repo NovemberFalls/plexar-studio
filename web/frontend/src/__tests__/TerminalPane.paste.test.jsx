@@ -221,6 +221,7 @@ async function renderPane({ toastSpy } = {}) {
   const { default: TerminalPane } = await import("../components/TerminalPane.jsx");
 
   let unmount;
+  let container;
   await act(async () => {
     const result = render(
       React.createElement(TerminalPane, {
@@ -233,9 +234,10 @@ async function renderPane({ toastSpy } = {}) {
       }),
     );
     unmount = result.unmount;
+    container = result.container;
   });
 
-  return { wsSendSpy: _wsSendSpy, unmount };
+  return { wsSendSpy: _wsSendSpy, unmount, container };
 }
 
 // ---------------------------------------------------------------------------
@@ -744,5 +746,105 @@ describe("TerminalPane paste handler", () => {
 
     // CanvasAddon constructor must NOT have been called (guard prevented it)
     expect(CanvasAddon).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// File-drop error reporting
+//
+// The bug: the drop handler checked `data.error` (singular), a key the server
+// never returns -- rejections come back as `errors`, an array, because one file
+// in a multi-file drop can be refused while its siblings succeed. A wholly
+// rejected drop therefore fell through every branch and reported NOTHING: no
+// path pasted, no toast, indistinguishable from a drop that never registered.
+// ---------------------------------------------------------------------------
+
+describe("TerminalPane file drop — server rejections", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    capturedPasteHandler = null;
+    capturedKeyHandler = null;
+    // Rebuild the Terminal mock so mockTermPaste is a fresh spy bound to the
+    // implementation this test's render will use. Without this the variable
+    // points at a previous test's spy and never records the call.
+    await setupTerminalMock();
+  });
+
+  function dropFiles(container, files) {
+    // The file-drop handlers live on the terminal-area div, which is the
+    // deepest element the pane renders. Dispatch there so React's synthetic
+    // onDrop fires with our dataTransfer.
+    // The onDrop/onDragOver pair sits on the flex-1 wrapper around the xterm
+    // mount point (TerminalPane.jsx ~1140). Dispatch on the xterm div inside
+    // it so the event bubbles through the real handler.
+    const target = container.querySelector(".flex-1.min-h-0 > div")
+      || container.querySelector(".flex-1.min-h-0");
+    if (!target) throw new Error("drop target not found in rendered pane");
+    const ev = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "dataTransfer", {
+      value: { files, types: ["Files"] },
+    });
+    target.dispatchEvent(ev);
+  }
+
+  it("drop_rejected_by_server_shows_the_server_reason", async () => {
+    const toastSpy = vi.fn();
+    const { container, unmount } = await renderPane({ toastSpy });
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        paths: [],
+        errors: ["Rejected 'big.png': exceeds 50MB limit"],
+      }),
+    });
+
+    const file = new File([new Uint8Array(4)], "big.png", { type: "image/png" });
+    await act(async () => {
+      dropFiles(container, [file]);
+    });
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        expect.stringContaining("exceeds 50MB limit"),
+        "error",
+      );
+    });
+
+    unmount();
+  });
+
+  it("drop_partially_rejected_still_pastes_the_files_that_landed", async () => {
+    const toastSpy = vi.fn();
+    const { container, unmount } = await renderPane({ toastSpy });
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        paths: ["C:\\uploads\\ok.png"],
+        errors: ["Rejected 'evil.exe': unsupported file type '.exe'"],
+      }),
+    });
+
+    const good = new File([new Uint8Array(2)], "ok.png", { type: "image/png" });
+    const bad = new File([new Uint8Array(2)], "evil.exe", { type: "application/octet-stream" });
+    await act(async () => {
+      dropFiles(container, [good, bad]);
+    });
+
+    // The error is reported...
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        expect.stringContaining("unsupported file type"),
+        "error",
+      );
+    });
+    // ...and the accepted file's path is still pasted. Reporting the failure
+    // must not discard the sibling that succeeded.
+    await waitFor(() => {
+      expect(mockTermPaste).toHaveBeenCalledWith("C:\\uploads\\ok.png");
+    });
+
+    unmount();
   });
 });

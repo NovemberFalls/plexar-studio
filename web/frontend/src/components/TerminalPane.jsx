@@ -629,9 +629,14 @@ const TerminalPane = forwardRef(function TerminalPane({
     try {
       const res = await fetch("/api/upload", { method: "POST", body: formData });
       const data = await res.json();
-      if (data.error) {
-        toast?.(`Upload failed: ${data.error}`, "error");
-        return;
+      // The server reports per-file rejections as `errors` (an array), never
+      // `error` — a file can be refused while its siblings in the same drop
+      // succeed. Checking only the singular key meant a wholly-rejected drop
+      // fell through every branch below and reported NOTHING: no path pasted,
+      // no toast, indistinguishable from a drop that never registered.
+      if (data.errors?.length) {
+        toast?.(`Upload failed: ${data.errors[0]}`, "error");
+        if (!data.paths?.length) return;
       }
       if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
         // Paste file paths into the terminal (quote paths with spaces)

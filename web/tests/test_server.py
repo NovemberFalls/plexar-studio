@@ -235,10 +235,15 @@ async def test_upload_file_too_large(client):
 
 
 @pytest.mark.asyncio
-async def test_upload_quota_exceeded_sequentially(client):
+async def test_upload_past_quota_evicts_rather_than_rejecting(client):
     """
-    Sequential uploads that together exceed MAX_UPLOAD_DIR_SIZE are rejected
-    once the quota is full.
+    Sequential uploads that together exceed MAX_UPLOAD_DIR_SIZE keep SUCCEEDING;
+    the oldest entries are evicted to make room.
+
+    This test previously asserted the opposite -- that the second upload was
+    refused. That was the ratchet bug: nothing ever called DELETE /api/upload,
+    so once the total was reached every later paste failed until a restart. The
+    limit is a cache size, not a ceiling. See test_upload_eviction.py.
 
     Uses a patched MAX_UPLOAD_DIR_SIZE of 50 bytes so the test runs quickly.
     """
@@ -261,15 +266,17 @@ async def test_upload_quota_exceeded_sequentially(client):
             data1 = res1.json()
             assert len(data1["paths"]) == 1, "first upload should succeed"
 
-            # Second upload: 30 + 30 = 60 > 50 → rejected
+            # Second upload: 30 + 30 = 60 > 50 → the first is evicted, this lands
             res2 = await client.post(
                 "/api/upload",
                 files=[("files", ("second.txt", chunk, "text/plain"))],
             )
             data2 = res2.json()
-            assert data2["paths"] == [], "second upload should be rejected (quota full)"
-            assert "errors" in data2
-            assert "200MB" in data2["errors"][0]
+            assert len(data2["paths"]) == 1, (
+                f"second upload must succeed via eviction, not be refused: {data2}"
+            )
+            assert "errors" not in data2, data2
+            assert server._upload_dir_size <= small_quota
         finally:
             server._upload_dir_size = original_size
 
@@ -277,13 +284,17 @@ async def test_upload_quota_exceeded_sequentially(client):
 @pytest.mark.asyncio
 async def test_upload_concurrent_quota_enforcement(client):
     """
-    Two concurrent uploads that together exceed MAX_UPLOAD_DIR_SIZE must result
-    in exactly one success and one rejection — not both succeeding.
+    Two concurrent uploads that together exceed MAX_UPLOAD_DIR_SIZE must BOTH
+    succeed (eviction makes room) while the directory total never exceeds the
+    quota.
 
-    This is the race-condition regression test for Fix 2.
-    Would have been RED before Fix 2: without _upload_lock, both coroutines
-    could read the same (non-full) _upload_dir_size value, both pass the check,
-    and both write, exceeding the quota.
+    This is still the race-condition regression test for _upload_lock -- what
+    changed is the observable it asserts. It used to key on "exactly one is
+    rejected", which stopped being the lock's guarantee once the full path
+    evicts instead of refusing. The lock's actual job is unchanged and is what
+    is pinned here: check-evict-write is one atomic unit, so two coroutines
+    cannot both read a stale _upload_dir_size, both pass, and together overrun
+    the quota. Asserting a rejection count would now pass for the wrong reason.
     """
     import asyncio
     import server
@@ -316,13 +327,24 @@ async def test_upload_concurrent_quota_enforcement(client):
             total_accepted = len(paths_a) + len(paths_b)
             total_rejected = len(errors_a) + len(errors_b)
 
-            # Exactly one must succeed and one must fail
-            assert total_accepted == 1, (
-                f"Expected exactly 1 accepted upload, got {total_accepted}. "
-                "This suggests the race condition (Fix 2) is not working."
+            # Both land -- neither caller is refused for the other's bytes.
+            assert total_accepted == 2, (
+                f"Expected both uploads accepted, got {total_accepted}. "
+                f"errors: {errors_a + errors_b}"
             )
-            assert total_rejected == 1, (
-                f"Expected exactly 1 rejected upload, got {total_rejected}."
+            assert total_rejected == 0, f"unexpected rejection: {errors_a + errors_b}"
+
+            # The lock's real guarantee: the quota is never overrun. Without it
+            # the two coroutines interleave check and write, both pass a stale
+            # check, and the total lands at 70 against a 50-byte quota.
+            #
+            # NOT asserted here: that the counter equals the bytes on disk.
+            # This test shares the process-wide UPLOAD_DIR with every other
+            # upload test and zeroes the counter without clearing the dir, so
+            # the two legitimately disagree. That invariant is pinned in
+            # test_upload_eviction.py, which gets an isolated dir.
+            assert server._upload_dir_size <= small_quota, (
+                f"quota overrun: {server._upload_dir_size} > {small_quota}"
             )
         finally:
             server._upload_dir_size = original_size
