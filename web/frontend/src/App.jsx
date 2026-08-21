@@ -17,7 +17,8 @@ import ProviderPicker from "./components/ProviderPicker";
 import EngineView from "./components/engine/EngineView";
 import ReportsView from "./components/reports/ReportsView";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
-import { computeEndEvents, formatEndEventToast, buildBusyTerminalIds, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
+import { computeEndEvents, computePauseEvents, formatEndEventToast, buildBusyTerminalIds, isTerminalState, BRIDGE_KIND, CHANNEL_KIND, MAILBOX_KIND } from "./utils/bridgeEvents";
+import MailboxOverlay from "./components/MailboxOverlay";
 // Redesigned shell chrome (design handoff "Workspace — the approved shell").
 import Rail from "./components/shell/Rail";
 import CommandBar from "./components/shell/CommandBar";
@@ -297,6 +298,7 @@ export default function App() {
   const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
   const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
   const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
+  const [mailboxes, setMailboxes] = useState([]); // array of V4 mailbox-bridge dicts from /api/bridge/mb
   // Set of TERMINAL IDs (backend strings), NOT local session ids. The comment
   // here used to say "session IDs", which is how a consumer came to call
   // .has(session.id) — always false, since session.id is a local number. Every
@@ -426,6 +428,11 @@ export default function App() {
   const seenBridgeIdsRef = useRef(new Set());
   const prevChannelStatesRef = useRef(new Map());
   const seenChannelIdsRef = useRef(new Set());
+  const prevMailboxStatesRef = useRef(new Map());
+  const seenMailboxIdsRef = useRef(new Set());
+  // Mailbox pauses announce once each, and re-announce after a resume — see
+  // computePauseEvents. Separate from seenMailboxIdsRef, which is permanent.
+  const pausedMailboxIdsRef = useRef(new Set());
 
   // System stats (polled from /api/system every 5s)
   const [systemStats, setSystemStats] = useState(null);
@@ -1125,6 +1132,42 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady, toast]);
 
+  // Poll /api/bridge/mb every 3s for V4 mailbox bridges. Two signals come out
+  // of this: the usual end events, and PAUSE events — a bridge that hit its
+  // round cap is waiting on the user and nothing resumes until they answer, so
+  // it gets its own toast rather than only a badge on a pane that may not even
+  // be on screen in the current layout.
+  useEffect(() => {
+    if (!backendReady) return;
+    const fetchMailboxes = async () => {
+      try {
+        const res = await fetch("/api/bridge/mb");
+        if (!res.ok) return;
+        const data = await res.json();
+        const list = data.bridges || [];
+        setMailboxes(list);
+
+        computePauseEvents(list, pausedMailboxIdsRef.current).forEach((rec) => {
+          toast(
+            `Bridge paused at its round cap (${rec.rounds_used}/${rec.max_rounds}) — grant more rounds or end it`,
+            "warning",
+          );
+        });
+
+        const events = computeEndEvents(MAILBOX_KIND, list, prevMailboxStatesRef.current, seenMailboxIdsRef.current);
+        events.forEach((evt) => {
+          const { message, type } = formatEndEventToast(evt);
+          toast(message, type);
+        });
+      } catch (_) {
+        // soft-fail — stale bridge state is not critical
+      }
+    };
+    fetchMailboxes();
+    const id = setInterval(fetchMailboxes, 3000);
+    return () => clearInterval(id);
+  }, [backendReady, toast]);
+
   // Poll /api/bridge/channel every 3s to track active channels. Also detects
   // active -> ended transitions (or TTL-prune vanish) and toasts the reason.
   useEffect(() => {
@@ -1387,33 +1430,6 @@ export default function App() {
     handleCloseBridge();
   }, [sessions, bridgeModal.fromSessionId, toast, handleCloseBridge]);
 
-  const handleStartAuto = useCallback(async ({ to, prompt, maxTurns }) => {
-    const fromSession = sessions.find((s) => s.id === bridgeModal.fromSessionId);
-    const toSession = sessions.find((s) => s.id === to);
-    if (!fromSession?.terminalId || !toSession?.terminalId) {
-      toast("Session not running", "error");
-      return;
-    }
-    try {
-      const res = await fetch("/api/bridge/auto", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          from_terminal_id: fromSession.terminalId,
-          to_terminal_id: toSession.terminalId,
-          kickoff_prompt: prompt,
-          max_turns: maxTurns,
-        }),
-      });
-      const data = await res.json();
-      if (data.ok) toast(`Auto-bridge started (${data.bridge_id})`, "info");
-      else toast(`Bridge failed: ${data.error || "unknown"}`, "error");
-    } catch (err) {
-      toast(`Bridge failed: ${err.message}`, "error");
-    }
-    handleCloseBridge();
-  }, [sessions, bridgeModal.fromSessionId, toast, handleCloseBridge]);
-
   const handleEndBridge = useCallback(async (bridgeId) => {
     try {
       await fetch(`/api/bridge/${bridgeId}`, { method: "DELETE" });
@@ -1425,41 +1441,6 @@ export default function App() {
     }
   }, [toast]);
 
-  const handleStartChannel = useCallback(async ({ leadId, workerIds, prompt, maxTurns }) => {
-    // leadId and workerIds are local session ids — resolve to terminalIds
-    const leadSession = sessions.find((s) => s.id === leadId);
-    const workerSessions = workerIds.map((id) => sessions.find((s) => s.id === id)).filter(Boolean);
-    if (!leadSession?.terminalId || workerSessions.some((s) => !s.terminalId)) {
-      toast("One or more selected sessions are not running", "error");
-      return "One or more selected sessions are not running";
-    }
-    try {
-      const res = await fetch("/api/bridge/channel", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          lead_id: leadSession.terminalId,
-          worker_ids: workerSessions.map((s) => s.terminalId),
-          kickoff_prompt: prompt,
-          max_turns: maxTurns,
-        }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        toast(`Channel started (${data.channel_id})`, "info");
-        return null; // no error
-      } else {
-        const msg = `Channel failed: ${data.error || "unknown"}`;
-        toast(msg, "error");
-        return msg;
-      }
-    } catch (err) {
-      const msg = `Channel failed: ${err.message}`;
-      toast(msg, "error");
-      return msg;
-    }
-  }, [sessions, toast]);
-
   const handleEndChannel = useCallback(async (channelId) => {
     try {
       await fetch(`/api/bridge/channel/${channelId}`, { method: "DELETE" });
@@ -1470,6 +1451,102 @@ export default function App() {
       toast(`Failed to end channel: ${err.message}`, "error");
     }
   }, [toast]);
+
+  // ---- V4 mailbox bridge ----
+
+  const handleStartMailbox = useCallback(async ({ leadId, workerIds, topic, maxRounds }) => {
+    // The modal picks LOCAL session ids; the API speaks terminal ids. Sending
+    // the wrong one 400s with "session not found" against ids that plainly
+    // exist on screen.
+    const leadSession = sessions.find((s) => s.id === leadId);
+    const workerSessions = workerIds.map((id) => sessions.find((s) => s.id === id)).filter(Boolean);
+    if (!leadSession?.terminalId || workerSessions.length !== workerIds.length
+        || workerSessions.some((s) => !s.terminalId)) {
+      const msg = "One or more selected sessions are not running";
+      toast(msg, "error");
+      return { ok: false, error: msg };
+    }
+    try {
+      const res = await fetch("/api/bridge/mailbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lead_id: leadSession.terminalId,
+          worker_ids: workerSessions.map((s) => s.terminalId),
+          topic,
+          max_rounds: maxRounds,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        toast(`Bridge started — ${workerSessions.length + 1} sessions linked`, "info");
+        handleCloseBridge();
+      } else {
+        toast(data.error || "Failed to start bridge", "error");
+      }
+      return data;
+    } catch (err) {
+      toast(`Failed to start bridge: ${err.message}`, "error");
+      return { ok: false, error: err.message };
+    }
+  }, [sessions, toast, handleCloseBridge]);
+
+  const handleExtendMailbox = useCallback(async (mailboxId, additional) => {
+    try {
+      const res = await fetch(`/api/bridge/mb/${mailboxId}/extend`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ additional }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        toast(data.error || "Could not grant more rounds", "error");
+        return;
+      }
+      toast(`Granted ${additional} more round${additional === 1 ? "" : "s"} — bridge resumed`, "info");
+      // Reflect it immediately rather than waiting up to 3s for the next poll:
+      // the user just clicked a button and a badge that keeps saying PAUSED
+      // reads as the click having failed.
+      setMailboxes((prev) =>
+        prev.map((m) => (m.mailbox_id === mailboxId ? { ...m, ...data } : m)),
+      );
+    } catch (err) {
+      toast(`Could not grant more rounds: ${err.message}`, "error");
+    }
+  }, [toast]);
+
+  const handleEndMailbox = useCallback(async (mailboxId) => {
+    try {
+      await fetch(`/api/bridge/mb/${mailboxId}`, { method: "DELETE" });
+      toast("Bridge ended", "info");
+      setMailboxes((prev) => prev.filter((m) => m.mailbox_id !== mailboxId));
+    } catch (err) {
+      toast(`Failed to end bridge: ${err.message}`, "error");
+    }
+  }, [toast]);
+
+  /** Given a terminalId, find the live mailbox bridge it belongs to.
+   *  Returns the overlay's props, or null.
+   *
+   *  A PAUSED bridge must still resolve here — it is the state whose badge
+   *  carries the only control that unpauses it. */
+  const getMailboxForTerminal = useCallback((terminalId) => {
+    if (!terminalId) return null;
+    for (const mbx of mailboxes) {
+      if (!mbx?.state || isTerminalState(mbx.state)) continue;
+      const me = (mbx.participants || []).find((p) => p.terminal_id === terminalId);
+      if (!me) continue;
+      return {
+        mailbox_id: mbx.mailbox_id,
+        state: mbx.state,
+        handle: me.handle,
+        isLead: me.role === "lead",
+        rounds_used: mbx.rounds_used,
+        max_rounds: mbx.max_rounds,
+      };
+    }
+    return null;
+  }, [mailboxes]);
 
   /** Given a terminalId, find whether it is in an active channel.
    *  Returns { channel_id, isLead, turns_used, max_turns } or null. */
@@ -1493,8 +1570,8 @@ export default function App() {
    *  Send. Built by the shared helper (which documents why it must be a Map and
    *  not a Set) so App and its tests exercise the same code. */
   const busyTerminalIds = useMemo(
-    () => buildBusyTerminalIds(activeBridges, channels),
-    [activeBridges, channels],
+    () => buildBusyTerminalIds(activeBridges, channels, mailboxes),
+    [activeBridges, channels, mailboxes],
   );
 
   // BroadcastChannel: receive CLOSED from popout windows to clear their placeholder
@@ -1865,8 +1942,12 @@ export default function App() {
 
   const bridgeCount = useMemo(
     () => activeBridges.filter((b) => b?.state === "active").length
-      + channels.filter((c) => c?.state === "active").length,
-    [activeBridges, channels],
+      + channels.filter((c) => c?.state === "active").length
+      // A paused mailbox bridge counts: it is live and it is the one that most
+      // needs the user's attention, so hiding it from the count would be
+      // backwards.
+      + mailboxes.filter((m) => m?.state && !isTerminalState(m.state)).length,
+    [activeBridges, channels, mailboxes],
   );
 
   /** The focused session's bridge/channel role, for the Inspector card. */
@@ -2194,6 +2275,7 @@ export default function App() {
 
                 // Find an active channel involving this session's terminalId
                 const activeChannel = getChannelForTerminal(session.terminalId);
+                const activeMailbox = getMailboxForTerminal(session.terminalId);
 
                 // Glow state lives on the SLOT wrapper, not inside TerminalPane:
                 // the slot's overflow:hidden clips any child's outer box-shadow,
@@ -2294,6 +2376,13 @@ export default function App() {
                         onRenameSession={(newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
                       />
                     )}
+                    {/* Mailbox bridge overlay (V4) — also carries the grant-rounds
+                        control when the bridge is paused at its cap. */}
+                    <MailboxOverlay
+                      info={activeMailbox}
+                      onExtend={handleExtendMailbox}
+                      onStop={handleEndMailbox}
+                    />
                     {/* Channel overlay — shown when pane is part of an active channel */}
                     {activeChannel && (
                       <div
@@ -2785,8 +2874,7 @@ export default function App() {
               allSessions={sessions}
               busyTerminalIds={busyTerminalIds}
               onSendManual={handleSendManual}
-              onStartAuto={handleStartAuto}
-              onStartChannel={handleStartChannel}
+              onStartMailbox={handleStartMailbox}
               onClose={handleCloseBridge}
               fetchLatestAssistant={fetchLatestAssistant}
             />

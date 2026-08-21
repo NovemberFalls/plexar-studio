@@ -7,7 +7,8 @@
  *   - Tab state (Manual active by default)
  *   - ReceiverList filtering (exclude self, exclude non-running, empty state)
  *   - Manual tab: send disabled logic, latest-mode fetch trigger, chip fill, send callback
- *   - Auto tab: neon warning, disabled logic, two-step confirm gate, early-click safety
+ *   - Bridge tab (V4 mailbox): neon warning, disabled logic, confirm gate,
+ *     and the lead/worker pickers honouring the busy map
  *   - Escape key behaviour
  *
  * Dependencies:
@@ -88,7 +89,7 @@ function defaultProps(overrides = {}) {
     fromSession: FROM_SESSION,
     allSessions: [FROM_SESSION, PEER_SESSION],
     onSendManual: vi.fn(),
-    onStartAuto: vi.fn(),
+    onStartMailbox: vi.fn().mockResolvedValue({ ok: true }),
     onClose: vi.fn(),
     fetchLatestAssistant: vi.fn().mockResolvedValue("Latest assistant text"),
     ...overrides,
@@ -122,9 +123,9 @@ describe("BridgeModal", () => {
   it("manual_tab_active_by_default", () => {
     render(<BridgeModal {...defaultProps()} />);
     const manualTab = screen.getByRole("tab", { name: /manual/i });
-    const autoTab = screen.getByRole("tab", { name: /auto/i });
+    const bridgeTab = screen.getByRole("tab", { name: /^bridge$/i });
     expect(manualTab).toHaveAttribute("aria-selected", "true");
-    expect(autoTab).toHaveAttribute("aria-selected", "false");
+    expect(bridgeTab).toHaveAttribute("aria-selected", "false");
   });
 
   // 4
@@ -225,92 +226,88 @@ describe("BridgeModal", () => {
     expect(typeof args.prefix).toBe("string");
   });
 
+  // ---- Bridge tab (V4 mailbox protocol) ----
+
+  /** Render the modal on the Bridge tab with three sessions available. */
+  function renderBridgeTab(overrides = {}) {
+    const utils = render(
+      <BridgeModal
+        {...defaultProps({
+          allSessions: [FROM_SESSION, PEER_SESSION, THIRD_SESSION],
+          ...overrides,
+        })}
+      />
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /^bridge$/i }));
+    return utils;
+  }
+
+  /** Fill in a startable bridge: Beta leads, Zeta works, with an objective. */
+  function fillBridgeForm(topic = "Reconcile our work") {
+    const leadRadios = screen.getAllByRole("radio", { name: /Beta|Zeta/i });
+    fireEvent.click(leadRadios.find((r) => r.textContent.includes("Beta")));
+    const workers = screen.getAllByRole("checkbox");
+    fireEvent.click(workers.find((c) => c.textContent.includes("Zeta")));
+    fireEvent.change(screen.getByLabelText(/objective/i), { target: { value: topic } });
+  }
+
   // 11
-  it("auto_tab_shows_neon_warning", () => {
-    render(<BridgeModal {...defaultProps()} />);
+  it("bridge_tab_warns_that_the_cap_pauses_rather_than_ends", () => {
+    renderBridgeTab();
 
-    // Switch to auto tab
-    fireEvent.click(screen.getByRole("tab", { name: /auto/i }));
-
-    // The neon warning panel contains "AUTONOMOUS BRIDGE"
     expect(screen.getByText(/autonomous bridge/i)).toBeInTheDocument();
-
-    // AlertTriangle SVG icon is present (lucide renders an <svg>)
-    const alerts = document.querySelectorAll("[role='alert']");
-    expect(alerts.length).toBeGreaterThanOrEqual(1);
+    // The pause-not-die promise is the behavioural difference from the old
+    // auto-bridge, so the warning must actually say it.
+    expect(screen.getByText(/pauses and asks you|PAUSES and asks/i)).toBeInTheDocument();
+    expect(document.querySelectorAll("[role='alert']").length).toBeGreaterThanOrEqual(1);
   });
 
   // 12
-  it("auto_continue_disabled_with_no_receiver_or_prompt", () => {
-    render(<BridgeModal {...defaultProps()} />);
-    fireEvent.click(screen.getByRole("tab", { name: /auto/i }));
-
-    const continueBtn = screen.getByRole("button", { name: /continue to confirm/i });
-    expect(continueBtn).toBeDisabled();
+  it("bridge_start_disabled_without_lead_workers_or_topic", () => {
+    renderBridgeTab();
+    expect(screen.getByRole("button", { name: /start bridge/i })).toBeDisabled();
   });
 
   // 13
-  it("auto_confirm_two_step_gate", async () => {
-    const onStartAuto = vi.fn().mockResolvedValue(undefined);
-    render(<BridgeModal {...defaultProps({ onStartAuto })} />);
+  it("bridge_confirm_gate_precedes_start_and_passes_the_protocol_fields", async () => {
+    const onStartMailbox = vi.fn().mockResolvedValue({ ok: true });
+    renderBridgeTab({ onStartMailbox });
+    fillBridgeForm();
 
-    // Switch to auto tab
-    fireEvent.click(screen.getByRole("tab", { name: /auto/i }));
+    // Still gated: the confirm has not been given yet.
+    expect(screen.getByRole("button", { name: /start bridge/i })).toBeDisabled();
+    expect(onStartMailbox).not.toHaveBeenCalled();
 
-    // Pick receiver
-    const radio = screen.getByRole("radio");
-    fireEvent.click(radio);
-
-    // Fill prompt
-    const promptArea = screen.getByPlaceholderText(/share your blast radius/i);
-    fireEvent.change(promptArea, { target: { value: "Reconcile our work" } });
-
-    // Step 0: click Continue
-    const continueBtn = screen.getByRole("button", { name: /continue to confirm/i });
-    expect(continueBtn).not.toBeDisabled();
-    fireEvent.click(continueBtn);
-
-    // Step 1: second warning banner visible
-    await waitFor(() => expect(screen.getByText(/are you absolutely sure/i)).toBeInTheDocument());
-
-    // onStartAuto must NOT have been called yet
-    expect(onStartAuto).not.toHaveBeenCalled();
-
-    // Go back
-    fireEvent.click(screen.getByRole("button", { name: /go back/i }));
-    await waitFor(() => expect(screen.queryByText(/are you absolutely sure/i)).not.toBeInTheDocument());
-
-    // Step 0 again — click Continue once more
-    fireEvent.click(screen.getByRole("button", { name: /continue to confirm/i }));
-    await waitFor(() => expect(screen.getByText(/are you absolutely sure/i)).toBeInTheDocument());
-
-    // Now confirm
     fireEvent.click(screen.getByRole("button", { name: /i understand/i }));
-    await waitFor(() => expect(onStartAuto).toHaveBeenCalledTimes(1));
+    const startBtn = screen.getByRole("button", { name: /start bridge/i });
+    expect(startBtn).not.toBeDisabled();
+    fireEvent.click(startBtn);
 
-    const args = onStartAuto.mock.calls[0][0];
-    expect(args.to).toBe(PEER_SESSION.id);
-    expect(args.prompt).toBe("Reconcile our work");
-    expect(typeof args.maxTurns).toBe("number");
+    await waitFor(() => expect(onStartMailbox).toHaveBeenCalledTimes(1));
+    const args = onStartMailbox.mock.calls[0][0];
+    expect(args.leadId).toBe(PEER_SESSION.id);
+    expect(args.workerIds).toEqual([THIRD_SESSION.id]);
+    expect(args.topic).toBe("Reconcile our work");
+    expect(typeof args.maxRounds).toBe("number");
   });
 
   // 14
-  it("auto_does_not_call_onStartAuto_on_first_click", () => {
-    const onStartAuto = vi.fn();
-    render(<BridgeModal {...defaultProps({ onStartAuto })} />);
+  it("bridge_surfaces_a_server_refusal_and_keeps_the_form_open", async () => {
+    const onStartMailbox = vi.fn().mockResolvedValue({
+      ok: false,
+      error: "Sessions already in an active bridge: ['term-zeta']",
+    });
+    renderBridgeTab({ onStartMailbox });
+    fillBridgeForm();
+    fireEvent.click(screen.getByRole("button", { name: /i understand/i }));
+    fireEvent.click(screen.getByRole("button", { name: /start bridge/i }));
 
-    fireEvent.click(screen.getByRole("tab", { name: /auto/i }));
-
-    // Pick receiver and fill prompt to enable Continue
-    fireEvent.click(screen.getByRole("radio"));
-    const promptArea = screen.getByPlaceholderText(/share your blast radius/i);
-    fireEvent.change(promptArea, { target: { value: "Go" } });
-
-    // Click Continue (step 0 → step 1)
-    fireEvent.click(screen.getByRole("button", { name: /continue to confirm/i }));
-
-    // onStartAuto must not fire on the first click — that would skip the gate
-    expect(onStartAuto).not.toHaveBeenCalled();
+    // The error is rendered rather than the modal closing on a failure — the
+    // user would otherwise have no idea the bridge never started.
+    await waitFor(() =>
+      expect(screen.getByText(/already in an active bridge/i)).toBeInTheDocument()
+    );
+    expect(defaultProps().onClose).not.toHaveBeenCalled();
   });
 
   // 15
@@ -374,26 +371,26 @@ describe("BridgeModal", () => {
   });
 
   // 19
-  it("channel_lead_busy_session_renders_disabled_with_hint_and_is_unselectable", () => {
-    const busyTerminalIds = new Map([[PEER_SESSION.terminalId, "channel"]]);
+  it("bridge_lead_busy_session_renders_disabled_with_hint_and_is_unselectable", () => {
+    const busyTerminalIds = new Map([[PEER_SESSION.terminalId, "mailbox"]]);
     render(
       <BridgeModal
         {...defaultProps({
           allSessions: [FROM_SESSION, PEER_SESSION, THIRD_SESSION],
-          onStartChannel: vi.fn(),
+          onStartMailbox: vi.fn(),
           busyTerminalIds,
         })}
       />
     );
 
-    fireEvent.click(screen.getByRole("tab", { name: /channel/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^bridge$/i }));
 
     const leadRadios = screen.getAllByRole("radio", { name: /Beta|Zeta/i });
     const betaRadio = leadRadios.find((r) => r.textContent.includes("Beta"));
     const zetaRadio = leadRadios.find((r) => r.textContent.includes("Zeta"));
 
     expect(betaRadio).toBeDisabled();
-    expect(betaRadio.textContent.toLowerCase()).toContain("in channel");
+    expect(betaRadio.textContent.toLowerCase()).toContain("in bridge");
     expect(zetaRadio).not.toBeDisabled();
 
     // Clicking the disabled (busy) lead candidate must not select it.
@@ -405,19 +402,19 @@ describe("BridgeModal", () => {
   });
 
   // 20
-  it("channel_worker_busy_session_renders_disabled_with_hint_and_is_unselectable", () => {
-    const busyTerminalIds = new Map([[PEER_SESSION.terminalId, "channel"]]);
+  it("bridge_worker_busy_session_renders_disabled_with_hint_and_is_unselectable", () => {
+    const busyTerminalIds = new Map([[PEER_SESSION.terminalId, "mailbox"]]);
     render(
       <BridgeModal
         {...defaultProps({
           allSessions: [FROM_SESSION, PEER_SESSION, THIRD_SESSION],
-          onStartChannel: vi.fn(),
+          onStartMailbox: vi.fn(),
           busyTerminalIds,
         })}
       />
     );
 
-    fireEvent.click(screen.getByRole("tab", { name: /channel/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /^bridge$/i }));
 
     // Pick the non-busy session (Zeta) as lead so the worker list renders.
     const leadRadios = screen.getAllByRole("radio", { name: /Beta|Zeta/i });
@@ -428,7 +425,7 @@ describe("BridgeModal", () => {
     const betaWorkerCheckbox = workerCheckboxes.find((c) => c.textContent.includes("Beta"));
 
     expect(betaWorkerCheckbox).toBeDisabled();
-    expect(betaWorkerCheckbox.textContent.toLowerCase()).toContain("in channel");
+    expect(betaWorkerCheckbox.textContent.toLowerCase()).toContain("in bridge");
 
     fireEvent.click(betaWorkerCheckbox);
     expect(betaWorkerCheckbox).toHaveAttribute("aria-checked", "false");

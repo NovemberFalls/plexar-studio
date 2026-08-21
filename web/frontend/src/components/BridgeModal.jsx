@@ -37,7 +37,7 @@ function SessionDot({ activityState }) {
 // ---------------------------------------------------------------------------
 // ReceiverList — radio-style list of selectable target sessions
 // ---------------------------------------------------------------------------
-function BusyHint({ reason }) {
+function BusyHint() {
     return (
         <span
             className="text-[9px] font-bold uppercase"
@@ -50,12 +50,12 @@ function BusyHint({ reason }) {
                 flexShrink: 0,
             }}
         >
-            BUSY &middot; {reason === "channel" ? "in channel" : "in bridge"}
+            BUSY &middot; in bridge
         </span>
     );
 }
 
-function PickerRow({ selected, disabled, onClick, accent, name, model, activityState, busy, busyReason, shape = "radio", checked }) {
+function PickerRow({ selected, disabled, onClick, accent, name, model, activityState, busy, shape = "radio", checked }) {
     return (
         <button
             type="button"
@@ -121,7 +121,7 @@ function PickerRow({ selected, disabled, onClick, accent, name, model, activityS
             )}
             <SessionDot activityState={activityState} />
             <span className="flex-1 truncate font-semibold">{name}</span>
-            {busy && <BusyHint reason={busyReason} />}
+            {busy && <BusyHint />}
             <span
                 className="text-[10px] truncate"
                 style={{ color: "var(--cc-muted, var(--text-muted))" }}
@@ -169,7 +169,6 @@ function ReceiverList({ sessions, fromSessionId, selected, onSelect, busyTermina
                         model={s.model}
                         activityState={s.activityState}
                         busy={isBusy}
-                        busyReason={busyReason}
                     />
                 );
             })}
@@ -237,7 +236,7 @@ function Stepper({ value, onDec, onInc, min, max }) {
 }
 
 // ---------------------------------------------------------------------------
-// NeonWarningPanel — used in the Auto and Channel tabs
+// NeonWarningPanel — used in the Bridge tab
 // ---------------------------------------------------------------------------
 const NEON_PANEL_STYLE = {
     background: "color-mix(in srgb, var(--cc-error, #e0698a) 16%, var(--cc-surface, var(--bg-elevated)))",
@@ -268,8 +267,7 @@ export default function BridgeModal({
     allSessions,
     busyTerminalIds = EMPTY_BUSY_MAP,
     onSendManual,
-    onStartAuto,
-    onStartChannel,
+    onStartMailbox,
     onClose,
     fetchLatestAssistant,
 }) {
@@ -283,18 +281,15 @@ export default function BridgeModal({
     const [prefix, setPrefix] = useState(
         fromSession ? `[From session "${fromSession.name}"]:` : ""
     );
-    const [autoPrompt, setAutoPrompt] = useState("");
-    const [maxTurns, setMaxTurns] = useState(4);
-    const [confirmStep, setConfirmStep] = useState(0);
     const [submitting, setSubmitting] = useState(false);
 
-    // ---- channel tab state ----
-    const [channelLeadId, setChannelLeadId] = useState(null);
-    const [channelWorkerIds, setChannelWorkerIds] = useState(new Set());
-    const [channelPrompt, setChannelPrompt] = useState("");
-    const [channelMaxTurns, setChannelMaxTurns] = useState(6);
-    const [channelConfirmed, setChannelConfirmed] = useState(false);
-    const [channelError, setChannelError] = useState(null);
+    // ---- bridge tab state (V4 mailbox protocol) ----
+    const [bridgeLeadId, setBridgeLeadId] = useState(null);
+    const [bridgeWorkerIds, setBridgeWorkerIds] = useState(new Set());
+    const [bridgeTopic, setBridgeTopic] = useState("");
+    const [bridgeMaxRounds, setBridgeMaxRounds] = useState(6);
+    const [bridgeConfirmed, setBridgeConfirmed] = useState(false);
+    const [bridgeError, setBridgeError] = useState(null);
 
     const cardRef = useRef(null);
     const firstFieldRef = useRef(null);
@@ -359,12 +354,11 @@ export default function BridgeModal({
         }
     }, [open, tab, manualMode, toSessionId, fetchLatest]);
 
-    // ---- tab switch resets confirmStep and channel confirm ----
+    // ---- tab switch resets the bridge confirm gate ----
     const handleTabChange = (newTab) => {
         setTab(newTab);
-        setConfirmStep(0);
-        setChannelConfirmed(false);
-        setChannelError(null);
+        setBridgeConfirmed(false);
+        setBridgeError(null);
     };
 
     // ---- receiver helpers ----
@@ -376,16 +370,16 @@ export default function BridgeModal({
     );
     const receiverSession = eligibleSessions.find((s) => s.id === toSessionId) || null;
 
-    // ---- channel session helpers ----
-    // Eligible for the channel tab (excludes modal's own session)
-    const channelEligible = allSessions.filter(
+    // ---- bridge session helpers ----
+    // Eligible for the bridge tab (excludes modal's own session)
+    const bridgeEligible = allSessions.filter(
         (s) =>
             s.id !== fromSession?.id &&
             s.status === "running" &&
             s.terminalId != null
     );
     // After a lead is chosen, workers are the remaining eligible sessions (excluding lead)
-    const channelWorkerEligible = channelEligible.filter((s) => s.id !== channelLeadId);
+    const bridgeWorkerEligible = bridgeEligible.filter((s) => s.id !== bridgeLeadId);
 
     // ---- busy-session helper — true if the given local session id maps to a
     // terminalId currently enrolled in another active bridge/channel. Used both
@@ -397,8 +391,8 @@ export default function BridgeModal({
         return s ? busyTerminalIds.has(s.terminalId) : false;
     };
 
-    const toggleChannelWorker = (sessionId) => {
-        setChannelWorkerIds((prev) => {
+    const toggleBridgeWorker = (sessionId) => {
+        setBridgeWorkerIds((prev) => {
             const next = new Set(prev);
             if (next.has(sessionId)) next.delete(sessionId);
             else next.add(sessionId);
@@ -407,9 +401,9 @@ export default function BridgeModal({
     };
 
     // When lead changes, remove the new lead from workers if it was selected
-    const handleChannelLeadChange = (sessionId) => {
-        setChannelLeadId(sessionId);
-        setChannelWorkerIds((prev) => {
+    const handleBridgeLeadChange = (sessionId) => {
+        setBridgeLeadId(sessionId);
+        setBridgeWorkerIds((prev) => {
             const next = new Set(prev);
             next.delete(sessionId);
             return next;
@@ -430,39 +424,26 @@ export default function BridgeModal({
         }
     };
 
-    // ---- auto start ----
-    const handleStartAuto = async () => {
+    // ---- mailbox bridge start ----
+    const handleStartBridge = async () => {
         if (submitting) return;
-        if (!toSessionId || !autoPrompt.trim()) return;
+        if (!bridgeLeadId || bridgeWorkerIds.size === 0 || !bridgeTopic.trim()) return;
         setSubmitting(true);
+        setBridgeError(null);
         try {
-            await onStartAuto({ to: toSessionId, prompt: autoPrompt.trim(), maxTurns });
-        } finally {
-            setSubmitting(false);
-            onClose();
-        }
-    };
-
-    // ---- channel start ----
-    const handleStartChannel = async () => {
-        if (submitting) return;
-        if (!channelLeadId || channelWorkerIds.size === 0 || !channelPrompt.trim()) return;
-        setSubmitting(true);
-        setChannelError(null);
-        try {
-            const err = await onStartChannel({
-                leadId: channelLeadId,
-                workerIds: [...channelWorkerIds],
-                prompt: channelPrompt.trim(),
-                maxTurns: channelMaxTurns,
+            const res = await onStartMailbox({
+                leadId: bridgeLeadId,
+                workerIds: [...bridgeWorkerIds],
+                topic: bridgeTopic.trim(),
+                maxRounds: bridgeMaxRounds,
             });
-            if (err) {
-                setChannelError(err);
+            if (res && res.ok === false) {
+                setBridgeError(res.error || "Could not start the bridge");
                 setSubmitting(false);
                 return;
             }
         } catch (e) {
-            setChannelError(e.message || "Unknown error");
+            setBridgeError(e.message || "Unknown error");
             setSubmitting(false);
             return;
         }
@@ -478,33 +459,29 @@ export default function BridgeModal({
         (manualMode === "latest" && (!latestText || latestLoading)) ||
         (manualMode === "custom" && !customText.trim());
 
-    const autoContinueDisabled = !toSessionId || !autoPrompt.trim() || sessionIsBusy(toSessionId);
-
-    const channelStartDisabled =
-        !channelLeadId ||
-        channelWorkerIds.size === 0 ||
-        !channelPrompt.trim() ||
-        !channelConfirmed ||
+    const bridgeStartDisabled =
+        !bridgeLeadId ||
+        bridgeWorkerIds.size === 0 ||
+        !bridgeTopic.trim() ||
+        !bridgeConfirmed ||
         submitting ||
-        sessionIsBusy(channelLeadId) ||
-        [...channelWorkerIds].some(sessionIsBusy);
+        sessionIsBusy(bridgeLeadId) ||
+        [...bridgeWorkerIds].some(sessionIsBusy);
 
     if (!open || !fromSession) return null;
 
-    // ---- mode accent: salmon (--cc-error) for manual/auto, gold (--cc-waiting) for channel ----
-    const isChannelTab = tab === "channel";
-    const accent = isChannelTab ? "var(--cc-waiting, #e0b060)" : "var(--cc-error, #e0698a)";
+    // ---- mode accent: salmon (--cc-error) for a one-shot manual relay, gold
+    // (--cc-waiting) for a live bridge, matching the pane overlay's colours ----
+    const isBridgeTab = tab === "bridge";
+    const accent = isBridgeTab ? "var(--cc-waiting, #e0b060)" : "var(--cc-error, #e0698a)";
     const modeSubtitle =
         tab === "manual"
             ? "Relay one message to another session"
-            : tab === "auto"
-            ? "Let two sessions talk automatically"
-            : "One lead coordinates multiple workers";
+            : "Sessions coordinate over a shared mailbox file";
 
     const tabDefs = [
         { id: "manual", label: "Manual" },
-        { id: "auto", label: "Auto-bridge" },
-        { id: "channel", label: "Channel" },
+        { id: "bridge", label: "Bridge" },
     ];
 
     return (
@@ -627,7 +604,7 @@ export default function BridgeModal({
                         >
                             {tabDefs.map((t) => {
                                 const active = tab === t.id;
-                                const tabAccent = t.id === "channel" ? "var(--cc-waiting, #e0b060)" : "var(--cc-error, #e0698a)";
+                                const tabAccent = t.id === "bridge" ? "var(--cc-waiting, #e0b060)" : "var(--cc-error, #e0698a)";
                                 return (
                                     <button
                                         key={t.id}
@@ -659,14 +636,13 @@ export default function BridgeModal({
                             Send a message from this session to another running session.{" "}
                             <strong style={{ color: "var(--cc-dim, var(--text-secondary))" }}>Manual</strong>{" "}
                             relays a single message (your latest reply or a custom prompt).{" "}
-                            <strong style={{ color: "var(--cc-dim, var(--text-secondary))" }}>Auto-bridge</strong>{" "}
-                            lets two sessions exchange messages back and forth until a turn cap is reached.{" "}
-                            <strong style={{ color: "var(--cc-dim, var(--text-secondary))" }}>Channel</strong>{" "}
-                            coordinates one lead session with multiple workers simultaneously.
+                            <strong style={{ color: "var(--cc-dim, var(--text-secondary))" }}>Bridge</strong>{" "}
+                            links a lead session with one or more workers over a shared mailbox file
+                            they each watch, so they coordinate without you relaying anything.
                         </p>
 
                         {/* Receiver picker — only visible for Manual and Auto tabs */}
-                        {tab !== "channel" && (
+                        {tab !== "bridge" && (
                             <div>
                                 <label
                                     className="cc-label block mb-1.5"
@@ -860,221 +836,10 @@ export default function BridgeModal({
                             </>
                         )}
 
-                        {/* ---- AUTO TAB ---- */}
-                        {tab === "auto" && (
-                            <>
-                                {/* Neon warning panel */}
-                                <div style={NEON_PANEL_STYLE} role="alert">
-                                    <div className="flex items-start gap-2">
-                                        <AlertTriangle
-                                            size={16}
-                                            style={{ flexShrink: 0, marginTop: "1px", color: "var(--cc-error, #e0698a)" }}
-                                        />
-                                        <div>
-                                            <div style={{ fontSize: "13px", marginBottom: "4px" }}>
-                                                AUTONOMOUS BRIDGE
-                                            </div>
-                                            <div style={{ fontSize: "11px", fontWeight: 400, lineHeight: 1.5 }}>
-                                                Two agents will relay messages to each other without your
-                                                input until the turn cap is hit, one says BRIDGE-DONE, or
-                                                you click Stop. Token cost is doubled. Use Manual unless
-                                                you have a specific reason.
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Confirm step 0 — show form */}
-                                {confirmStep === 0 && (
-                                    <>
-                                        {/* Lead session label */}
-                                        <div>
-                                            <span
-                                                className="cc-label block mb-0.5"
-                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
-                                            >
-                                                Lead session
-                                            </span>
-                                            <span
-                                                className="text-xs"
-                                                style={{ color: "var(--cc-dim, var(--text-secondary))" }}
-                                            >
-                                                {fromSession.name}
-                                            </span>
-                                        </div>
-
-                                        {/* Worker session label */}
-                                        <div>
-                                            <label
-                                                className="cc-label block mb-1.5"
-                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
-                                            >
-                                                Worker session
-                                            </label>
-                                            {/* ReceiverList is rendered above the tabs section for non-channel tabs;
-                                                the worker selection reuses the already-rendered toSessionId picker */}
-                                            {receiverSession ? (
-                                                <span
-                                                    className="text-xs"
-                                                    style={{ color: "var(--cc-dim, var(--text-secondary))" }}
-                                                >
-                                                    {receiverSession.name}
-                                                </span>
-                                            ) : (
-                                                <span
-                                                    className="text-xs"
-                                                    style={{ color: "var(--cc-muted, var(--text-muted))" }}
-                                                >
-                                                    Select a session above
-                                                </span>
-                                            )}
-                                        </div>
-
-                                        {/* Kickoff prompt */}
-                                        <div>
-                                            <label
-                                                htmlFor="bridge-auto-prompt"
-                                                className="cc-label block mb-1"
-                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
-                                            >
-                                                Kickoff prompt
-                                            </label>
-                                            <textarea
-                                                id="bridge-auto-prompt"
-                                                ref={firstFieldRef}
-                                                rows={4}
-                                                value={autoPrompt}
-                                                onChange={(e) => setAutoPrompt(e.target.value)}
-                                                onKeyDown={(e) => e.stopPropagation()}
-                                                placeholder="Share your blast radius — files you intend to touch — and reconcile any overlap. End with BRIDGE-DONE when aligned."
-                                                className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none"
-                                                style={{
-                                                    backgroundColor: "var(--cc-term, var(--bg-surface))",
-                                                    color: "var(--cc-fg, var(--text-primary))",
-                                                    border: "1px solid var(--cc-border, var(--border-color))",
-                                                    fontFamily: "inherit",
-                                                    lineHeight: 1.5,
-                                                }}
-                                            />
-                                        </div>
-
-                                        {/* Max turns stepper */}
-                                        <div className="flex items-center justify-between">
-                                            <div className="flex flex-col" style={{ gap: 1 }}>
-                                                <span className="text-xs font-semibold" style={{ color: "var(--cc-fg, var(--text-primary))" }}>
-                                                    Max turns
-                                                </span>
-                                                <span className="text-[10px]" style={{ color: "var(--cc-muted, var(--text-muted))" }}>
-                                                    Auto-stop after this many exchanges
-                                                </span>
-                                            </div>
-                                            <Stepper
-                                                value={maxTurns}
-                                                min={1}
-                                                max={10}
-                                                onDec={() => setMaxTurns((v) => Math.max(1, v - 1))}
-                                                onInc={() => setMaxTurns((v) => Math.min(10, v + 1))}
-                                            />
-                                        </div>
-
-                                        {/* Footer buttons — step 0 */}
-                                        <div className="flex justify-between items-center gap-2">
-                                            <button
-                                                type="button"
-                                                onClick={onClose}
-                                                className="px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors"
-                                                style={{
-                                                    color: "var(--cc-dim, var(--text-muted))",
-                                                    border: "1px solid var(--cc-border, var(--border-color))",
-                                                    background: "none",
-                                                }}
-                                            >
-                                                Cancel
-                                            </button>
-                                            <button
-                                                type="button"
-                                                disabled={autoContinueDisabled}
-                                                onClick={() => setConfirmStep(1)}
-                                                className="px-3.5 py-2 rounded-lg text-xs font-bold transition-colors"
-                                                style={{
-                                                    backgroundColor: autoContinueDisabled
-                                                        ? "var(--cc-elev, var(--bg-surface))"
-                                                        : "var(--cc-error, #e0698a)",
-                                                    color: autoContinueDisabled
-                                                        ? "var(--cc-muted, var(--text-muted))"
-                                                        : "#0f1216",
-                                                    cursor: autoContinueDisabled ? "not-allowed" : "pointer",
-                                                    border: autoContinueDisabled
-                                                        ? "1px solid var(--cc-border, var(--border-color))"
-                                                        : "none",
-                                                }}
-                                            >
-                                                Continue to confirm
-                                            </button>
-                                        </div>
-                                    </>
-                                )}
-
-                                {/* Confirm step 1 — replace form with second banner + buttons */}
-                                {confirmStep === 1 && (
-                                    <>
-                                        <div style={NEON_PANEL_SMALL_STYLE} role="alert">
-                                            <div className="flex items-start gap-2">
-                                                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: "1px", color: "var(--cc-error, #e0698a)" }} />
-                                                <span>
-                                                    Are you absolutely sure? This will start an autonomous
-                                                    loop between two agents.
-                                                </span>
-                                            </div>
-                                        </div>
-
-                                        <div className="flex justify-between items-center gap-2">
-                                            <button
-                                                type="button"
-                                                onClick={() => setConfirmStep(0)}
-                                                className="px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors"
-                                                style={{
-                                                    color: "var(--cc-dim, var(--text-muted))",
-                                                    border: "1px solid var(--cc-border, var(--border-color))",
-                                                    background: "none",
-                                                }}
-                                            >
-                                                Go back
-                                            </button>
-                                            <button
-                                                type="button"
-                                                disabled={submitting}
-                                                onClick={handleStartAuto}
-                                                className="px-3.5 py-2 rounded-lg text-xs font-bold transition-colors"
-                                                style={{
-                                                    backgroundColor: submitting
-                                                        ? "color-mix(in srgb, var(--cc-error, #e0698a) 55%, black)"
-                                                        : "var(--cc-error, #e0698a)",
-                                                    color: "#0f1216",
-                                                    border: "1px solid color-mix(in srgb, var(--cc-error, #e0698a) 60%, white)",
-                                                    cursor: submitting ? "not-allowed" : "pointer",
-                                                    boxShadow: "0 0 12px color-mix(in srgb, var(--cc-error, #e0698a) 45%, transparent)",
-                                                }}
-                                            >
-                                                {submitting ? (
-                                                    <span className="flex items-center gap-1.5">
-                                                        <Loader size={11} className="state-icon-spin" />
-                                                        Starting...
-                                                    </span>
-                                                ) : (
-                                                    "I understand — start auto-relay"
-                                                )}
-                                            </button>
-                                        </div>
-                                    </>
-                                )}
-                            </>
-                        )}
-
                         {/* ---- CHANNEL TAB ---- */}
-                        {tab === "channel" && (
+                        {tab === "bridge" && (
                             <>
-                                {/* Neon warning panel (gold for channel) */}
+                                {/* Neon warning panel (gold — matches the live pane badge) */}
                                 <div
                                     style={{
                                         ...NEON_PANEL_STYLE,
@@ -1091,13 +856,14 @@ export default function BridgeModal({
                                         />
                                         <div>
                                             <div style={{ fontSize: "13px", marginBottom: "4px" }}>
-                                                AUTONOMOUS CHANNEL
+                                                AUTONOMOUS BRIDGE
                                             </div>
                                             <div style={{ fontSize: "11px", fontWeight: 400, lineHeight: 1.5 }}>
-                                                One lead and multiple workers will exchange messages without
-                                                your input until the turn cap is hit or you click Stop.
-                                                Token cost scales with the number of sessions. Use Manual
-                                                unless you have a specific reason.
+                                                These sessions will work together without your input until
+                                                they all agree they are done, the round cap is reached, or
+                                                you click Stop. At the cap the bridge PAUSES and asks you
+                                                whether to grant more rounds — it does not silently end.
+                                                Token cost scales with the number of sessions.
                                             </div>
                                         </div>
                                     </div>
@@ -1111,7 +877,7 @@ export default function BridgeModal({
                                     >
                                         Lead session
                                     </label>
-                                    {channelEligible.length === 0 ? (
+                                    {bridgeEligible.length === 0 ? (
                                         <p
                                             className="text-xs py-2 px-1"
                                             style={{ color: "var(--cc-muted, var(--text-muted))" }}
@@ -1120,8 +886,8 @@ export default function BridgeModal({
                                         </p>
                                     ) : (
                                         <div className="flex flex-col gap-1.5 max-h-[150px] overflow-y-auto" role="radiogroup" aria-label="Lead session">
-                                            {channelEligible.map((s) => {
-                                                const isSelected = s.id === channelLeadId;
+                                            {bridgeEligible.map((s) => {
+                                                const isSelected = s.id === bridgeLeadId;
                                                 const busyReason = busyTerminalIds.get(s.terminalId);
                                                 const isBusy = Boolean(busyReason);
                                                 return (
@@ -1130,7 +896,7 @@ export default function BridgeModal({
                                                         shape="radio"
                                                         selected={isSelected}
                                                         disabled={isBusy}
-                                                        onClick={() => handleChannelLeadChange(s.id)}
+                                                        onClick={() => handleBridgeLeadChange(s.id)}
                                                         accent="var(--cc-waiting, #e0b060)"
                                                         name={s.name}
                                                         model={s.model}
@@ -1152,17 +918,17 @@ export default function BridgeModal({
                                     >
                                         Worker sessions{" "}
                                         <span style={{ color: "var(--cc-waiting, #e0b060)" }}>
-                                            {channelWorkerIds.size > 0 ? `${channelWorkerIds.size} selected` : ""}
+                                            {bridgeWorkerIds.size > 0 ? `${bridgeWorkerIds.size} selected` : ""}
                                         </span>
                                     </label>
-                                    {!channelLeadId ? (
+                                    {!bridgeLeadId ? (
                                         <p
                                             className="text-xs py-2 px-1"
                                             style={{ color: "var(--cc-muted, var(--text-muted))" }}
                                         >
                                             Select a lead session first.
                                         </p>
-                                    ) : channelWorkerEligible.length === 0 ? (
+                                    ) : bridgeWorkerEligible.length === 0 ? (
                                         <p
                                             className="text-xs py-2 px-1"
                                             style={{ color: "var(--cc-muted, var(--text-muted))" }}
@@ -1171,8 +937,8 @@ export default function BridgeModal({
                                         </p>
                                     ) : (
                                         <div className="flex flex-col gap-1.5 max-h-[150px] overflow-y-auto" role="group" aria-label="Worker sessions">
-                                            {channelWorkerEligible.map((s) => {
-                                                const isChecked = channelWorkerIds.has(s.id);
+                                            {bridgeWorkerEligible.map((s) => {
+                                                const isChecked = bridgeWorkerIds.has(s.id);
                                                 const busyReason = busyTerminalIds.get(s.terminalId);
                                                 const isBusy = Boolean(busyReason);
                                                 return (
@@ -1181,7 +947,7 @@ export default function BridgeModal({
                                                         shape="checkbox"
                                                         checked={isChecked}
                                                         disabled={isBusy}
-                                                        onClick={() => toggleChannelWorker(s.id)}
+                                                        onClick={() => toggleBridgeWorker(s.id)}
                                                         accent="var(--cc-waiting, #e0b060)"
                                                         name={s.name}
                                                         model={s.model}
@@ -1198,20 +964,20 @@ export default function BridgeModal({
                                 {/* Kickoff prompt */}
                                 <div>
                                     <label
-                                        htmlFor="channel-prompt"
+                                        htmlFor="bridge-topic"
                                         className="cc-label block mb-1"
                                         style={{ color: "var(--cc-muted, var(--text-muted))" }}
                                     >
-                                        Kickoff prompt
+                                        Objective
                                     </label>
                                     <textarea
-                                        id="channel-prompt"
+                                        id="bridge-topic"
                                         ref={firstFieldRef}
                                         rows={4}
-                                        value={channelPrompt}
-                                        onChange={(e) => setChannelPrompt(e.target.value)}
+                                        value={bridgeTopic}
+                                        onChange={(e) => setBridgeTopic(e.target.value)}
                                         onKeyDown={(e) => e.stopPropagation()}
-                                        placeholder="Describe the task and how each session should collaborate..."
+                                        placeholder="What are these sessions working on together? The lead breaks this down and assigns it."
                                         className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none"
                                         style={{
                                             backgroundColor: "var(--cc-term, var(--bg-surface))",
@@ -1223,27 +989,27 @@ export default function BridgeModal({
                                     />
                                 </div>
 
-                                {/* Max turns stepper */}
+                                {/* Round cap stepper */}
                                 <div className="flex items-center justify-between">
                                     <div className="flex flex-col" style={{ gap: 1 }}>
                                         <span className="text-xs font-semibold" style={{ color: "var(--cc-fg, var(--text-primary))" }}>
-                                            Max turns
+                                            Round cap
                                         </span>
                                         <span className="text-[10px]" style={{ color: "var(--cc-muted, var(--text-muted))" }}>
-                                            Auto-stop after this many exchanges
+                                            Pause and ask you after this many messages
                                         </span>
                                     </div>
                                     <Stepper
-                                        value={channelMaxTurns}
+                                        value={bridgeMaxRounds}
                                         min={1}
                                         max={20}
-                                        onDec={() => setChannelMaxTurns((v) => Math.max(1, v - 1))}
-                                        onInc={() => setChannelMaxTurns((v) => Math.min(20, v + 1))}
+                                        onDec={() => setBridgeMaxRounds((v) => Math.max(1, v - 1))}
+                                        onInc={() => setBridgeMaxRounds((v) => Math.min(20, v + 1))}
                                     />
                                 </div>
 
                                 {/* Confirm gate */}
-                                {!channelConfirmed ? (
+                                {!bridgeConfirmed ? (
                                     <div>
                                         <div
                                             style={{
@@ -1258,8 +1024,8 @@ export default function BridgeModal({
                                                 <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: "1px", color: "var(--cc-waiting, #e0b060)" }} />
                                                 <span>
                                                     This will start an autonomous loop across{" "}
-                                                    {channelWorkerIds.size > 0
-                                                        ? `1 lead + ${channelWorkerIds.size} worker${channelWorkerIds.size > 1 ? "s" : ""}`
+                                                    {bridgeWorkerIds.size > 0
+                                                        ? `1 lead + ${bridgeWorkerIds.size} worker${bridgeWorkerIds.size > 1 ? "s" : ""}`
                                                         : "multiple sessions"}
                                                     . Confirm to enable the Start button.
                                                 </span>
@@ -1267,7 +1033,7 @@ export default function BridgeModal({
                                         </div>
                                         <button
                                             type="button"
-                                            onClick={() => setChannelConfirmed(true)}
+                                            onClick={() => setBridgeConfirmed(true)}
                                             className="w-full px-3 py-2 rounded-lg text-xs font-bold transition-colors"
                                             style={{
                                                 backgroundColor: "transparent",
@@ -1276,7 +1042,7 @@ export default function BridgeModal({
                                                 cursor: "pointer",
                                             }}
                                         >
-                                            I understand — confirm channel
+                                            I understand — confirm bridge
                                         </button>
                                     </div>
                                 ) : (
@@ -1288,10 +1054,10 @@ export default function BridgeModal({
                                             backgroundColor: "var(--cc-term, var(--bg-surface))",
                                         }}
                                     >
-                                        Confirmed. Click Start Channel to proceed.
+                                        Confirmed. Click Start Bridge to proceed.
                                         <button
                                             type="button"
-                                            onClick={() => setChannelConfirmed(false)}
+                                            onClick={() => setBridgeConfirmed(false)}
                                             className="ml-2 underline"
                                             style={{ color: "var(--cc-muted, var(--text-muted))", background: "none", border: "none" }}
                                         >
@@ -1301,7 +1067,7 @@ export default function BridgeModal({
                                 )}
 
                                 {/* Error display */}
-                                {channelError && (
+                                {bridgeError && (
                                     <div
                                         className="px-3 py-2 rounded-lg text-xs"
                                         style={{
@@ -1310,15 +1076,15 @@ export default function BridgeModal({
                                             backgroundColor: "color-mix(in srgb, var(--cc-error, #e0698a) 10%, transparent)",
                                         }}
                                     >
-                                        {channelError}
+                                        {bridgeError}
                                     </div>
                                 )}
                             </>
                         )}
                     </div>
 
-                    {/* Channel tab footer */}
-                    {tab === "channel" && (
+                    {/* Bridge tab footer */}
+                    {tab === "bridge" && (
                         <div
                             className="flex items-center justify-between gap-2"
                             style={{
@@ -1342,21 +1108,21 @@ export default function BridgeModal({
                                     </button>
                                     <button
                                         type="button"
-                                        disabled={channelStartDisabled}
-                                        onClick={handleStartChannel}
+                                        disabled={bridgeStartDisabled}
+                                        onClick={handleStartBridge}
                                         className="px-3.5 py-2 rounded-lg text-xs font-bold transition-colors"
                                         style={{
-                                            backgroundColor: channelStartDisabled
+                                            backgroundColor: bridgeStartDisabled
                                                 ? "var(--cc-elev, var(--bg-surface))"
                                                 : "var(--cc-waiting, #e0b060)",
-                                            color: channelStartDisabled
+                                            color: bridgeStartDisabled
                                                 ? "var(--cc-muted, var(--text-muted))"
                                                 : "#0f1216",
-                                            cursor: channelStartDisabled ? "not-allowed" : "pointer",
-                                            border: channelStartDisabled
+                                            cursor: bridgeStartDisabled ? "not-allowed" : "pointer",
+                                            border: bridgeStartDisabled
                                                 ? "1px solid var(--cc-border, var(--border-color))"
                                                 : "1px solid color-mix(in srgb, var(--cc-waiting, #e0b060) 60%, white)",
-                                            boxShadow: channelStartDisabled
+                                            boxShadow: bridgeStartDisabled
                                                 ? "none"
                                                 : "0 0 12px color-mix(in srgb, var(--cc-waiting, #e0b060) 45%, transparent)",
                                         }}
@@ -1367,7 +1133,7 @@ export default function BridgeModal({
                                                 Starting...
                                             </span>
                                         ) : (
-                                            "Start Channel"
+                                            "Start Bridge"
                                         )}
                                     </button>
                             </>

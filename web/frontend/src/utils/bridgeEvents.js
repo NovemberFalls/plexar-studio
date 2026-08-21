@@ -34,11 +34,32 @@
 
 export const BRIDGE_KIND = "bridge";
 export const CHANNEL_KIND = "channel";
+export const MAILBOX_KIND = "mailbox";
 
 const ID_FIELD = {
   [BRIDGE_KIND]: "bridge_id",
   [CHANNEL_KIND]: "channel_id",
+  [MAILBOX_KIND]: "mailbox_id",
 };
+
+/** States in which a run is still LIVE — it holds its sessions and must not
+ *  fire an end event.
+ *
+ *  `awaiting_human` is the V4 mailbox bridge paused at its round cap. It is
+ *  emphatically NOT an end: the sessions are still enrolled, their watchers are
+ *  still armed, and granting more rounds resumes the same conversation. Testing
+ *  `state !== "active"` — which is what this module did while V2/V3 were the
+ *  only producers — would toast "Bridge ended" at every pause and then again
+ *  for real later, and the `seenIds` guard means the SECOND one (the true end)
+ *  would be the one suppressed.
+ *
+ *  V2/V3 never emit `awaiting_human`, so widening this is a no-op for them. */
+const LIVE_STATES = new Set(["active", "awaiting_human"]);
+
+/** True if *state* means the run is over. */
+export function isTerminalState(state) {
+  return typeof state === "string" && !!state && !LIVE_STATES.has(state);
+}
 
 /**
  * Compute the "end events" for one poll cycle.
@@ -81,7 +102,7 @@ export function computeEndEvents(kind, records, prevStates, seenIds) {
     // very first poll we ever see it (prev === undefined) is seeded
     // silently — no toast storm on app reload while a recently-ended record
     // is still inside the backend's TTL window.
-    if (state !== "active" && prev && prev.state === "active" && !seenIds.has(id)) {
+    if (isTerminalState(state) && prev && LIVE_STATES.has(prev.state) && !seenIds.has(id)) {
       events.push({ id, kind, endState: state, record: rec });
       seenIds.add(id);
     }
@@ -96,13 +117,48 @@ export function computeEndEvents(kind, records, prevStates, seenIds) {
   // recur, so there is nothing to keep watching for.
   for (const [id, prev] of prevStates) {
     if (currentIds.has(id)) continue;
-    if (prev.state === "active" && !seenIds.has(id)) {
+    if (LIVE_STATES.has(prev.state) && !seenIds.has(id)) {
       events.push({ id, kind, endState: null, record: prev });
       seenIds.add(id);
     }
     prevStates.delete(id);
   }
 
+  return events;
+}
+
+/**
+ * Detect mailbox bridges that have just entered `awaiting_human`.
+ *
+ * This is the counterpart to computeEndEvents and it exists because a pause is
+ * the one state that REQUIRES the user to act: the bridge has stopped, every
+ * session is standing by with its watcher armed, and nothing resumes until a
+ * human grants more rounds or stops it. A silent pause looks exactly like a
+ * bridge that quietly died — the ambiguity this whole redesign is trying to
+ * remove.
+ *
+ * `seenPausedIds` is mutated in place and guarantees one announcement per
+ * pause, not one per 3-second poll. An id is REMOVED from it when the bridge
+ * goes live again, so a second pause after an extend announces itself too.
+ *
+ * @returns {Array<object>} the records that just paused.
+ */
+export function computePauseEvents(records, seenPausedIds) {
+  if (!(seenPausedIds instanceof Set)) return [];
+  const events = [];
+  for (const rec of Array.isArray(records) ? records : []) {
+    if (!rec || typeof rec !== "object") continue;
+    const id = rec.mailbox_id;
+    if (typeof id !== "string" || !id) continue;
+    if (rec.state === "awaiting_human") {
+      if (!seenPausedIds.has(id)) {
+        seenPausedIds.add(id);
+        events.push(rec);
+      }
+    } else {
+      seenPausedIds.delete(id);
+    }
+  }
   return events;
 }
 
@@ -122,7 +178,18 @@ export function formatEndEventToast(event) {
   const prefix = namesPart ? `${kindLabel} ${namesPart}` : kindLabel;
 
   switch (event.endState) {
+    case "ended_agreed":
+      // V4 only. Distinct from V2/V3's `ended_sentinel` on purpose: that fired
+      // when ONE side said BRIDGE-DONE, this one means every participant agreed
+      // and nothing was left unanswered.
+      return { message: `${prefix} finished — all sides agreed`, type: "info" };
     case "ended_capped": {
+      // V4 reaches this only when a pause went unanswered until the human gate
+      // expired, so `end_reason` carries the real explanation and is preferred
+      // over the generic turn-limit wording.
+      if (typeof record.end_reason === "string" && record.end_reason) {
+        return { message: `${prefix} ended: ${record.end_reason}`, type: "info" };
+      }
       const turnsUsed = record.turns_used;
       const maxTurns = record.max_turns;
       const hasCounts = Number.isFinite(turnsUsed) && Number.isFinite(maxTurns);
@@ -135,8 +202,12 @@ export function formatEndEventToast(event) {
       return { message: `${prefix} ended: task completed (BRIDGE-DONE)`, type: "info" };
     case "ended_user":
       return { message: `${prefix} stopped`, type: "info" };
-    case "errored":
+    case "errored": {
+      if (typeof record.end_reason === "string" && record.end_reason) {
+        return { message: `${prefix} failed: ${record.end_reason}`, type: "error" };
+      }
       return { message: `${prefix} failed — a session died or a write failed`, type: "error" };
+    }
     default:
       // null (vanished / TTL race) or an unrecognised future state string —
       // still tell the user *something* ended rather than staying silent.
@@ -159,7 +230,7 @@ export function formatEndEventToast(event) {
  *
  *  First writer wins, so a session somehow in both keeps a stable label (the
  *  backend's 409 conflict guard should make that combination impossible). */
-export function buildBusyTerminalIds(activeBridges, channels) {
+export function buildBusyTerminalIds(activeBridges, channels, mailboxes) {
   const busy = new Map();
   const mark = (id, reason) => {
     if (id && !busy.has(id)) busy.set(id, reason);
@@ -174,12 +245,30 @@ export function buildBusyTerminalIds(activeBridges, channels) {
     mark(ch.lead_id, CHANNEL_KIND);
     if (Array.isArray(ch.worker_ids)) for (const w of ch.worker_ids) mark(w, CHANNEL_KIND);
   }
+  // A PAUSED mailbox bridge still owns its sessions — see LIVE_STATES. Testing
+  // `=== "active"` here would let the user start a second bridge on a session
+  // that is mid-conversation and merely waiting for them to grant rounds.
+  for (const mbx of Array.isArray(mailboxes) ? mailboxes : []) {
+    if (isTerminalState(mbx?.state)) continue;
+    if (!mbx?.state) continue;
+    mark(mbx.lead_id, MAILBOX_KIND);
+    if (Array.isArray(mbx.worker_ids)) for (const w of mbx.worker_ids) mark(w, MAILBOX_KIND);
+  }
   return busy;
 }
 
 /** Build the "Session A ↔ Session B" (bridge) or "Lead + N workers" (channel)
  *  name fragment for a toast, or "" if the record doesn't expose names. */
 function describeNames(kind, record) {
+  if (kind === MAILBOX_KIND) {
+    const participants = Array.isArray(record.participants) ? record.participants : [];
+    const lead = participants.find((p) => p?.role === "lead");
+    const workers = participants.filter((p) => p?.role === "worker");
+    if (!lead?.name) return "";
+    return workers.length
+      ? `${lead.name} + ${workers.length} worker${workers.length === 1 ? "" : "s"}`
+      : lead.name;
+  }
   if (kind === CHANNEL_KIND) {
     const leadName = typeof record.lead_name === "string" && record.lead_name ? record.lead_name : null;
     if (!leadName) return "";

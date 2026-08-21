@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useState, useCallback, useRef } from "react";
-import { CheckCircle, CircleX, Info } from "lucide-react";
+import { CheckCircle, CircleX, Info, TriangleAlert } from "lucide-react";
 
 let toastId = 0;
 
@@ -67,6 +67,12 @@ export function ToastContainer({ toasts, onDismiss }) {
         >
           {t.type === "error" ? (
             <CircleX size={16} style={{ color: "#ff6b6b", flexShrink: 0 }} />
+          ) : t.type === "warning" ? (
+            // Not an error and not a success. A mailbox bridge pausing at its
+            // round cap is the case this exists for: the run is fine and is
+            // waiting on the user. Without this branch it fell through to the
+            // green tick, which reads as "done".
+            <TriangleAlert size={16} style={{ color: "var(--cc-waiting, #e0b060)", flexShrink: 0 }} />
           ) : t.type === "info" ? (
             <Info size={16} style={{ color: "var(--accent, #4dabf7)", flexShrink: 0 }} />
           ) : (
