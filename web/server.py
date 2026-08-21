@@ -36,6 +36,7 @@ logger = logging.getLogger("cockpit.server")
 import pty_manager as pty_manager_module  # noqa: E402 -- module handle for resolve_claude_cli(); see /api/cli
 from pty_manager import ClaudeCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
+from mailbox_bridge import mailbox_manager, cleanup_mailbox_root, read_mailbox  # noqa: E402 -- V4 bridge; imports bridge_manager, so it must follow that line
 # _wait_for_idle_simple / _paste_and_submit are underscore-prefixed (bridge_manager treats
 # them as internal helpers), but they are exactly the typing-quiet + idle gate
 # and bracketed-paste injection mechanics the CLI-actions routes below need
@@ -226,6 +227,8 @@ async def lifespan(app: FastAPI):
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
     logger.info("Shutdown: cleaning relay dir...")
     cleanup_relay_dir()
+    logger.info("Shutdown: cleaning mailbox dirs...")
+    cleanup_mailbox_root()
     PID_FILE.unlink(missing_ok=True)
     logger.info("Shutdown complete")
 
@@ -1729,9 +1732,7 @@ async def bridge_manual(request: Request):
     # already being driven by an active V2/V3 relay task would interleave
     # writes to the same input buffer and produce corrupt, unpredictable
     # output — same rationale as the guard on /api/bridge/auto.
-    active = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
-    busy_ids = {b["from_id"] for b in active} | {b["to_id"] for b in active}
-    busy_ids |= channel_manager.member_ids()
+    busy_ids = _bridge_busy_ids()
     if from_id in busy_ids or to_id in busy_ids:
         return JSONResponse(
             {"ok": False, "error": "One or both sessions already in an active bridge or channel"},
@@ -1774,9 +1775,7 @@ async def bridge_auto(request: Request):
     # Guard: refuse if either session is already enrolled in an active bridge.
     # Two active bridges on the same session would interleave writes to its PTY
     # input buffer and produce corrupt, unpredictable output.
-    active = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
-    busy_ids = {b["from_id"] for b in active} | {b["to_id"] for b in active}
-    busy_ids |= channel_manager.member_ids()
+    busy_ids = _bridge_busy_ids()
     if from_id in busy_ids or to_id in busy_ids:
         return JSONResponse(
             {"ok": False, "error": "One or both sessions already in an active bridge or channel"},
@@ -1838,12 +1837,8 @@ async def channel_start(request: Request):
         return JSONResponse({"ok": False, "error": "max_turns must be between 1 and 20"}, status_code=400)
 
     # Conflict guard: reject if any session is in an active 2-session bridge OR active channel
-    active_bridges = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
-    bridge_busy = {b["from_id"] for b in active_bridges} | {b["to_id"] for b in active_bridges}
-    channel_busy = channel_manager.member_ids()
-    all_busy = bridge_busy | channel_busy
     all_requested = {lead_id} | set(worker_ids)
-    overlap = all_requested & all_busy
+    overlap = all_requested & _bridge_busy_ids()
     if overlap:
         return JSONResponse(
             {"ok": False, "error": f"Sessions already in an active bridge or channel: {sorted(overlap)}"},
@@ -1876,6 +1871,171 @@ async def channel_stop(channel_id: str):
 async def channel_list():
     """List all known channels (active and recently ended)."""
     return JSONResponse({"channels": channel_manager.list_active()})
+
+
+# ── Mailbox bridge (V4) ──────────────────────────────────
+#
+# The self-driving protocol: sessions watch a shared file with their own
+# Monitor tool and POST here to speak. See mailbox_bridge.py for why this
+# replaces the V2/V3 relay loops rather than sitting beside them.
+
+
+def _bridge_busy_ids() -> set[str]:
+    """Terminal IDs enrolled in ANY live bridge, of any generation.
+
+    Every start route consults this. A session driven by two bridges at once
+    has two writers on one PTY input buffer (V1/V2/V3) or two watchers on two
+    mailboxes (V4) — the first corrupts input, the second makes the session's
+    replies ambiguous about which conversation they belong to.
+    """
+    active = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
+    busy = {b["from_id"] for b in active} | {b["to_id"] for b in active}
+    busy |= channel_manager.member_ids()
+    busy |= mailbox_manager.member_ids()
+    return busy
+
+
+@app.post("/api/bridge/mailbox")
+async def mailbox_start(request: Request):
+    """Start a mailbox bridge: one lead plus N workers on a shared file."""
+    body = await request.json()
+    lead_id = body.get("lead_id", "")
+    worker_ids = body.get("worker_ids", [])
+    topic = body.get("topic", "") or body.get("kickoff_prompt", "")
+    try:
+        max_rounds = int(body.get("max_rounds", 12))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"ok": False, "error": "max_rounds must be an integer"}, status_code=400
+        )
+
+    if not lead_id or not worker_ids or not topic:
+        return JSONResponse(
+            {"ok": False, "error": "lead_id, worker_ids, topic required"},
+            status_code=400,
+        )
+    if not isinstance(worker_ids, list) or not all(isinstance(w, str) for w in worker_ids):
+        return JSONResponse(
+            {"ok": False, "error": "worker_ids must be a list of strings"},
+            status_code=400,
+        )
+    if len(worker_ids) > 7:  # lead + 7 workers = 8, matches MAX_SESSIONS default
+        return JSONResponse(
+            {"ok": False, "error": "Maximum 7 workers per bridge"}, status_code=400
+        )
+
+    overlap = ({lead_id} | set(worker_ids)) & _bridge_busy_ids()
+    if overlap:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"Sessions already in an active bridge: {sorted(overlap)}",
+            },
+            status_code=409,
+        )
+
+    # Spend guardrail — a mailbox bridge runs unattended between human gates,
+    # so it is refused on the same terms as V2/V3 (see /api/bridge/auto).
+    spend = await _spend_refusal("bridges")
+    if spend is not None:
+        return JSONResponse(
+            {"ok": False, "error": _spend_error_text(spend), "spend": spend},
+            status_code=409,
+        )
+
+    # The brief tells each session where to POST. It must be an address the
+    # session's own shell can reach, which is this server's loopback bind —
+    # not the browser's origin, which may be the Vite dev server on :5174.
+    base_url = f"http://127.0.0.1:{os.getenv('PORT', '8420')}"
+    result = await mailbox_manager.start(
+        lead_id, worker_ids, topic, max_rounds, base_url=base_url
+    )
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@app.post("/api/bridge/mb/{mailbox_id}/post")
+async def mailbox_post(mailbox_id: str, request: Request):
+    """A participating session sends a message. Called by the session, not the UI.
+
+    This is the one route a *session* calls, via curl from its own shell. It is
+    unauthenticated like every other Studio route and sits behind origin_guard's
+    loopback Host clause; a session claiming another participant's handle is
+    possible and is not defended against, matching the trust posture of the rest
+    of the app (all participants are the user's own sessions on the user's own
+    machine).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "Body must be valid JSON"}, status_code=400
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "Body must be a JSON object"}, status_code=400
+        )
+
+    ack = body.get("ack")
+    if ack is not None:
+        try:
+            ack = int(ack)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"ok": False, "error": "ack must be an integer or null"},
+                status_code=400,
+            )
+
+    result = await mailbox_manager.post(
+        mailbox_id,
+        sender=str(body.get("from", "")),
+        to=str(body.get("to", "")),
+        body=body.get("body", ""),
+        ack=ack,
+        done=bool(body.get("done", False)),
+    )
+    status = result.pop("status", 200 if result.get("ok") else 400)
+    return JSONResponse(result, status_code=status)
+
+
+@app.post("/api/bridge/mb/{mailbox_id}/extend")
+async def mailbox_extend(mailbox_id: str, request: Request):
+    """Grant more rounds to a bridge paused at its cap — the human gate."""
+    body = await request.json()
+    try:
+        additional = int(body.get("additional", 0))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"ok": False, "error": "additional must be an integer"}, status_code=400
+        )
+    result = await mailbox_manager.extend(mailbox_id, additional)
+    status = result.pop("status", 200 if result.get("ok") else 400)
+    return JSONResponse(result, status_code=status)
+
+
+@app.get("/api/bridge/mb/{mailbox_id}/transcript")
+async def mailbox_transcript(mailbox_id: str, limit: int = 200):
+    """The conversation so far, for the UI's transcript view."""
+    record = mailbox_manager.get(mailbox_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Bridge not found"}, status_code=404)
+    limit = max(1, min(limit, 1000))
+    messages = await asyncio.to_thread(read_mailbox, record, limit)
+    return JSONResponse({"ok": True, **record.to_dict(), "messages": messages})
+
+
+@app.delete("/api/bridge/mb/{mailbox_id}")
+async def mailbox_stop(mailbox_id: str):
+    """Stop a mailbox bridge."""
+    ok = await mailbox_manager.stop(mailbox_id)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "Bridge not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/bridge/mb")
+async def mailbox_list():
+    """All known mailbox bridges (live, paused, and recently ended)."""
+    return JSONResponse({"bridges": mailbox_manager.list_active()})
 
 
 # ── JSONL Message Stream (SSE) ───────────────────────────
