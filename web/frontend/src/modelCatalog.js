@@ -56,7 +56,10 @@ export const FALLBACK_MODEL_GROUPS = [
   },
   {
     label: "Fable",
-    models: [{ id: "claude-fable-5", label: "Fable 5" }],
+    models: [
+      { id: "claude-fable-5-1", label: "Fable 5.1" },
+      { id: "claude-fable-5", label: "Fable 5" },
+    ],
   },
   OPENROUTER_GROUP,
 ];

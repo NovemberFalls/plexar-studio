@@ -101,14 +101,28 @@ def test_the_1m_ambiguity_same_jsonl_model_id_two_windows():
 
 @pytest.mark.parametrize("model", [
     "brand-new-model-9",
-    "claude-fable-5",           # priced in this repo, but no window is published
-    "claude-mythos",
     "",
     "   ",
     None,
 ])
 def test_unknown_model_yields_none_never_a_default(model):
     assert resolve_context_window(model) is None
+
+
+@pytest.mark.parametrize("model", [
+    "claude-fable-5",
+    "claude-fable-5-1",         # Fable 5.1, live in the picker as of 2026-09
+    "claude-mythos-5",
+    "claude-mythos-preview",
+])
+def test_fable_and_mythos_are_1m_at_the_base_id(model):
+    """These families ship ONE window and never carry a "[1m]" suffix.
+
+    They used to resolve to None, so a live Fable session rendered "not
+    reported" for a window that is in fact published. Gating them on the suffix
+    would recreate that: there is no smaller variant for the suffix to extend.
+    """
+    assert resolve_context_window(model) == ANTHROPIC_LONG_CONTEXT_TOKENS
 
 
 def test_openrouter_slug_yields_none():

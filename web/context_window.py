@@ -98,10 +98,16 @@ ANTHROPIC_STANDARD_CONTEXT_TOKENS = 200_000
 # Haiku session still has a 200k window worth reporting.
 _STANDARD_200K_FAMILIES = ("opus", "sonnet", "haiku")
 
+# Families that are 1M at their BASE id — there is no smaller variant to extend,
+# so they never carry a "[1m]" suffix and the suffix logic below does not apply.
+# Fable and Mythos ship a single 1,000,000-token window (Anthropic's published
+# figure for both; Mythos 5 is the same model surface as Fable 5). Until this was
+# added they resolved to None and the pane rendered "not reported" for a live
+# session whose window is in fact known — which is the same class of dishonesty
+# as inventing one, in the other direction.
+_LONG_CONTEXT_ONLY_FAMILIES = ("fable", "mythos")
+
 # Deliberately absent, and therefore resolving to None:
-#   - claude-fable-5 / claude-mythos: this repo carries pricing for them but no
-#     context-window figure anywhere, and inventing one to fill the ring is the
-#     exact failure mode this module refuses.
 #   - OpenRouter slugs (deepseek/*, qwen/*): per-model windows are not published
 #     anywhere in this repo; OpenRouter's /models payload has them, but nothing
 #     stores them yet. None until it does.
@@ -227,6 +233,11 @@ def resolve_context_window(model: str, *, provider: str = "anthropic") -> Option
     # The bare aliases the CLI accepts ("sonnet", "opus", "haiku") name the
     # standard-window variant; the picker offers the 1M tier only as an explicit
     # "[1m]" id, so an alias with the suffix is still resolvable.
+    # Checked BEFORE the 200k families: these are 1M at the base id, so the
+    # suffix is not the discriminator for them and must not gate the answer.
+    if any(family in base for family in _LONG_CONTEXT_ONLY_FAMILIES):
+        return ANTHROPIC_LONG_CONTEXT_TOKENS
+
     if any(family in base for family in _STANDARD_200K_FAMILIES):
         return ANTHROPIC_LONG_CONTEXT_TOKENS if long_context else ANTHROPIC_STANDARD_CONTEXT_TOKENS
 
