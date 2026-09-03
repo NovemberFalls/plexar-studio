@@ -67,6 +67,12 @@ TIMESERIES_BUCKETS = ("1m", "5m", "1h", "6h", "1d")
 
 _ENVELOPE_KEYS = ("state", "available", "reason", "action", "eta_seconds", "since")
 
+# Identifies Studio to Plexar and, more importantly, is NOT the urllib default
+# that Cloudflare blocks outright (see auth_headers). Naming the product also
+# makes Plexar's own request records attributable to Studio rather than to an
+# anonymous script.
+_USER_AGENT = "PlexarStudio/1.0 (+https://github.com/anthropics/claude-cockpit)"
+
 
 def auth_headers(auth: Optional[dict]) -> dict:
     """Build the request headers for *auth*, which may be None.
@@ -82,8 +88,24 @@ def auth_headers(auth: Optional[dict]) -> dict:
 
     None of these values ever reach the browser (same SSRF/secrets stance as
     every other provider URL and key in the registry).
+
+    THE USER-AGENT IS LOAD-BEARING, not cosmetic. Plexar is published through
+    Cloudflare, and Cloudflare rejects urllib's default `Python-urllib/3.x`
+    with **Error 1010 ("Access denied", HTTP 403") before the request reaches
+    the tunnel at all. Measured 2026-09-02 against the live rig: identical
+    requests differing ONLY in User-Agent returned 403 (`Python-urllib/3.11`)
+    vs. Plexar's own 401 (curl's UA, or no UA header). So every Plexar read
+    failed with a Cloudflare error that has nothing to do with the credential —
+    and because the body is a 403, `_refused()` mapped it to `forbidden` and
+    the UI told the user to ask the rig owner to widen their key's scope. The
+    key was fine; the request never arrived.
+
+    Set here rather than at each call site because this is the one builder
+    every Plexar path shares (`_get`, the control POST, and server's
+    `_mgmt_get`), and a UA missing from any one of them resurrects the bug on
+    that route alone.
     """
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", "User-Agent": _USER_AGENT}
     if not isinstance(auth, dict):
         return headers
     token = auth.get("bearer")

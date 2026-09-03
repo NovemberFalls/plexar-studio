@@ -5577,13 +5577,30 @@ async def get_provider_health(provider_id: str):
     # breaking shape change to say something the shape can already say.
 
     async def probe_provider():
+        """(reachable, models_loaded, raw, refusal) for the management plane.
+
+        A REFUSAL IS NOT UNREACHABILITY — the same defect `/models` was fixed
+        for on 2026-08-02 (S9), which was never fixed here. `_mgmt_get` raises
+        `HTTPError`, a subclass of `Exception`, so the bare `except Exception`
+        this replaces reported a rig that was UP and REFUSING THE CREDENTIAL as
+        `reachable: false`, byte-identical to a dead rig — and then the Plexar
+        branch below said "Plexar is not answering on its address", which is a
+        false claim about machine state with the wrong remedy attached.
+        Measured live 2026-09-02: it said exactly that while the rig was
+        serving and answering.
+        """
         try:
             data = await asyncio.to_thread(_mgmt_get, provider, _models_path(provider))
-            return True, _provider_models_loaded_count(data), data
+            return True, _provider_models_loaded_count(data), data, None
+        except urllib.error.HTTPError as exc:
+            # It answered. We cannot read the catalog, so models_loaded stays 0
+            # and `raw` stays None — but reachability is now a measured fact.
+            return True, 0, None, ("forbidden" if exc.code == 403 else
+                                   "unauthorized" if exc.code == 401 else "refused")
         except Exception:
-            return False, 0, None
+            return False, 0, None, None
 
-    provider_reachable, models_loaded, raw = await probe_provider()
+    provider_reachable, models_loaded, raw, refusal = await probe_provider()
 
     body = {
         # `applicable: false` + `reachable: null` says "no broker here", which
@@ -5591,8 +5608,13 @@ async def get_provider_health(provider_id: str):
         # only answer this key ever gives.
         "broker": {"applicable": False, "reachable": None},
         "provider": {"reachable": provider_reachable, "models_loaded": models_loaded},
+        # `ok` keeps meaning REACHABILITY, so a refusing rig is `ok: true`.
+        # Callers asking whether work can run read `engine.available`.
         "ok": bool(provider_reachable),
     }
+    if refusal:
+        body["provider"]["authorized"] = False
+        body["provider"]["reason"] = refusal
 
     # Plexar is a GATEWAY: it answers 200 on /v1/models even while the engine
     # behind it is restarting or dead, because a stable address is the whole
@@ -5607,12 +5629,25 @@ async def get_provider_health(provider_id: str):
     if provider.get("kind") == "plexar" and raw is not None:
         body["engine"] = plexar_client.engine_summary(raw)
     elif provider.get("kind") == "plexar":
-        body["engine"] = {
-            "serving": 0, "total": 0, "state": None, "available": False,
-            "reason": "Plexar is not answering on its address.",
-            "action": "Start Plexar, or check COCKPIT_PLEXAR_URL.",
-            "eta_seconds": None,
-        }
+        # Two DIFFERENT situations with opposite remedies, and collapsing them
+        # is what sent a user to restart a rig that was already running.
+        if refusal:
+            body["engine"] = {
+                "serving": 0, "total": 0, "state": None, "available": False,
+                "reason": "Plexar is running but did not accept the credential.",
+                "action": ("Set a key in Settings ▸ Providers."
+                           if refusal == "unauthorized" else
+                           "This key is valid but not permitted here. "
+                           "Ask the rig owner to widen its scope."),
+                "eta_seconds": None,
+            }
+        else:
+            body["engine"] = {
+                "serving": 0, "total": 0, "state": None, "available": False,
+                "reason": "Plexar is not answering on its address.",
+                "action": "Start Plexar, or check its base URL in Settings ▸ Providers.",
+                "eta_seconds": None,
+            }
 
     return JSONResponse(body)
 
