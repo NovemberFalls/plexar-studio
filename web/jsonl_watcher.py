@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import logging
 import os
 import re
@@ -562,3 +563,127 @@ def _compute_latest_preview(
         return None
 
     return None
+
+
+# ── Workflow calls, read INCREMENTALLY (R-193) ────────────────────────────────
+#
+# `/api/terminals/{id}/workflows` used to call `read_all_messages` — open the
+# whole transcript and JSON-parse every line — on EVERY poll, and the UI polls it
+# every 3 s for every open pane. MEASURED 2026-09-10 with py-spy on the owner's
+# sidecar with six live sessions: that path was ~19% of all samples in the
+# process, burning worker threads that hold the GIL and starving the event loop
+# until health probes and requests timed out. A busy session's transcript
+# changes constantly, so a (size, mtime) cache would miss exactly when it
+# matters. Instead each transcript is scanned ONCE and then only its appended
+# bytes are parsed. Claude Code writes JSONL append-only, which is what makes
+# this correct; a file that shrinks or is replaced (a new inode) is rescanned.
+#
+# The output is defined to be IDENTICAL to the full re-parse it replaces —
+# `tests/test_workflows_incremental.py` holds the old algorithm as a reference
+# and compares across appends, a partial final line, and a truncation.
+
+_WORKFLOW_SCANS: dict = {}
+_WORKFLOW_SCANS_MAX = 64
+_WORKFLOW_GUARD = threading.Lock()
+
+
+class _WorkflowScan:
+    __slots__ = ("lock", "ino", "offset", "uses", "results")
+
+    def __init__(self, ino: int) -> None:
+        self.lock = threading.Lock()   # one per transcript: sessions never queue on each other
+        self.ino = ino
+        self.offset = 0                # bytes of COMPLETE lines already consumed
+        self.uses: list = []           # Workflow tool_use records, in file order
+        self.results: dict = {}        # tool_use_id -> {"completed_at", "is_error"}
+
+
+def _apply_workflow_entry(entry: dict, uses: list, results: dict) -> None:
+    """Fold one parsed entry into the scan — the exact rules the full parse used."""
+    if entry.get("type") == "tool_result":
+        for block in entry.get("content", []):
+            tuid = block.get("tool_use_id")
+            if tuid:
+                results[tuid] = {
+                    "completed_at": entry.get("timestamp"),
+                    "is_error": block.get("is_error", False),
+                }
+    elif entry.get("type") == "assistant":
+        for block in entry.get("content", []):
+            if block.get("type") != "tool_use" or block.get("tool_name") != "Workflow":
+                continue
+            inp = block.get("input", {}) or {}
+            uses.append({
+                "tool_id": block.get("tool_id", ""),
+                "name": inp.get("name") or inp.get("title") or "workflow",
+                "description": inp.get("description") or "",
+                "args": inp.get("args"),
+                "script_preview": (inp.get("script") if isinstance(inp.get("script"), str) else None),
+                "script_path": inp.get("scriptPath"),
+                "started_at": entry.get("timestamp"),
+            })
+
+
+def _parsed_entries(raw_lines):
+    for raw in raw_lines:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if line:
+            entry = parse_jsonl_entry(line)
+            if entry:
+                yield entry
+
+
+def workflow_calls(filepath: str) -> list[dict]:
+    """Every Workflow tool call in *filepath*, each paired with its result.
+
+    Same records, fields and status rule as the full re-parse it replaces;
+    callers sort and cap. Parses only bytes appended since the previous call.
+    """
+    try:
+        st = os.stat(filepath)
+    except OSError:
+        return []
+    with _WORKFLOW_GUARD:
+        scan = _WORKFLOW_SCANS.pop(filepath, None)
+        if scan is None or scan.ino != st.st_ino or st.st_size < scan.offset:
+            scan = _WorkflowScan(st.st_ino)
+        _WORKFLOW_SCANS[filepath] = scan           # re-insert: most recently used last
+        while len(_WORKFLOW_SCANS) > _WORKFLOW_SCANS_MAX:
+            _WORKFLOW_SCANS.pop(next(iter(_WORKFLOW_SCANS)))
+
+    with scan.lock:
+        tail = b""
+        if st.st_size > scan.offset:
+            try:
+                with open(filepath, "rb") as f:
+                    f.seek(scan.offset)
+                    chunk = f.read()
+            except OSError:
+                logger.debug("Could not read transcript for workflows: %s", filepath, exc_info=True)
+                chunk = b""
+            cut = chunk.rfind(b"\n")
+            complete, tail = (chunk[: cut + 1], chunk[cut + 1:]) if cut >= 0 else (b"", chunk)
+            for entry in _parsed_entries(complete.split(b"\n")):
+                _apply_workflow_entry(entry, scan.uses, scan.results)
+            scan.offset += len(complete)
+
+        uses, results = scan.uses, scan.results
+        if tail.strip():
+            # A final line with no newline yet. The full read counted it, so this
+            # must too — but it is NOT committed, because more of it may follow.
+            pending = list(_parsed_entries([tail]))
+            if pending:
+                uses, results = list(uses), dict(results)
+                for entry in pending:
+                    _apply_workflow_entry(entry, uses, results)
+
+        out = []
+        for use in uses:
+            result = results.get(use["tool_id"])
+            out.append({
+                **use,
+                "completed_at": result["completed_at"] if result else None,
+                "is_error": result["is_error"] if result else False,
+                "status": "completed" if result else "in_progress",
+            })
+        return out

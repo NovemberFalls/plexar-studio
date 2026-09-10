@@ -1794,8 +1794,12 @@ def get_workflows(terminal_id: str):
     For each `tool_use` whose name is "Workflow", pairs it with its matching
     `tool_result` (if present) and reports `status` as "in_progress" or "completed".
     Used by the per-pane WorkflowsPanel in the frontend.
+
+    The transcript is read INCREMENTALLY (`jsonl_watcher.workflow_calls`, R-193):
+    this route is polled every 3 s for every open pane, and re-parsing whole
+    transcripts on each poll was a fifth of the sidecar's CPU with six sessions.
     """
-    from jsonl_watcher import read_all_messages
+    from jsonl_watcher import workflow_calls
 
     session = pty_manager.get_terminal(terminal_id)
     if session is None:
@@ -1804,46 +1808,7 @@ def get_workflows(terminal_id: str):
     if not jsonl_path:
         return {"workflows": []}
 
-    messages = read_all_messages(jsonl_path)
-    # Build map of tool_use_id -> tool_result entry for status pairing
-    tool_results: dict[str, dict] = {}
-    for m in messages:
-        if m.get("type") == "tool_result":
-            for block in m.get("content", []):
-                tuid = block.get("tool_use_id")
-                if tuid:
-                    tool_results[tuid] = {
-                        "completed_at": m.get("timestamp"),
-                        "is_error": block.get("is_error", False),
-                    }
-
-    workflows: list[dict] = []
-    for m in messages:
-        if m.get("type") != "assistant":
-            continue
-        for block in m.get("content", []):
-            if block.get("type") != "tool_use":
-                continue
-            if block.get("tool_name") != "Workflow":
-                continue
-            tool_id = block.get("tool_id", "")
-            inp = block.get("input", {}) or {}
-            # `script` may be huge — _summarize_tool_input already truncates to 200 chars.
-            # We only surface the script meta-fields; the raw script body is not shown.
-            result = tool_results.get(tool_id)
-            workflows.append({
-                "tool_id": tool_id,
-                "name": inp.get("name") or inp.get("title") or "workflow",
-                "description": inp.get("description") or "",
-                "args": inp.get("args"),
-                "script_preview": (inp.get("script") if isinstance(inp.get("script"), str) else None),
-                "script_path": inp.get("scriptPath"),
-                "started_at": m.get("timestamp"),
-                "completed_at": result["completed_at"] if result else None,
-                "is_error": result["is_error"] if result else False,
-                "status": "completed" if result else "in_progress",
-            })
-
+    workflows = workflow_calls(jsonl_path)
     # Most recent first
     workflows.sort(key=lambda w: w.get("started_at") or "", reverse=True)
     # Cap to 20 most recent — keeps the response small for polling

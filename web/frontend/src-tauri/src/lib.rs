@@ -117,10 +117,16 @@ fn now_stamp() -> String {
 const HEALTH_POLL_SECS: u64 = 5;
 
 /// Consecutive failed probes before the sidecar is declared hung and killed.
-/// 6 x 5s = 30s of total silence. Generous on purpose: a restart cycle costs
-/// ~2s and a cold start longer, and the counter resets on the first success, so
-/// an ordinary restart never reaches this. Only a genuinely stuck process does.
-const HEALTH_FAILURES_BEFORE_KILL: u32 = 6;
+/// 24 x 5s = 2 minutes of total silence.
+///
+/// RAISED FROM 6 (30 s), 2026-09-10 (R-193). The kill takes EVERY session with
+/// it, so a false positive is far worse than a slow recovery. MEASURED on the
+/// owner's machine with six live sessions: an OVERLOADED but working sidecar
+/// missed up to 4 consecutive probes (~20 s) and then answered, while the one
+/// real hang on record (R-188) lasted 51 minutes. At 6 the watchdog sat two
+/// probes from destroying a live workspace over load alone. The counter still
+/// resets on the first success.
+const HEALTH_FAILURES_BEFORE_KILL: u32 = 24;
 
 /// How long a replacement sidecar is given to come up before the watchdog
 /// judges it. A cold start extracts a 50MB onefile archive while Defender

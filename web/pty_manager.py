@@ -517,6 +517,10 @@ class TerminalSession:
     codex_usage_reader: Any = None
     codex_usage_lock: Any = field(default_factory=threading.Lock)
     codex_usage_checked: float = 0.0
+    # When the owned rollout was last SEARCHED FOR (R-193) — separate from the
+    # 2 s usage read above, because the search is the expensive half.
+    codex_discover_checked: float = 0.0
+    codex_binding_status: str = "retained"
     history: TerminalHistory = field(default_factory=TerminalHistory)
     history_changed: asyncio.Event = field(default_factory=asyncio.Event)
     # One asyncio.Event per attached Studio Remote stream socket. Separate from
@@ -590,6 +594,20 @@ def _resolve_max_sessions() -> int:
 
 
 MAX_SESSIONS = _resolve_max_sessions()
+
+# How often a Codex session's rollout is RE-SEARCHED (R-193). The search,
+# `codex_usage.discover_rollout`, calls `psutil.Process.open_files()` on the
+# CLI and every child — which on Windows enumerates every handle on the
+# machine and filters by pid, so its cost grows with Unreal, browsers and
+# everything else running. MEASURED 2026-09-10 on the owner's sidecar with six
+# sessions: ~64% of all py-spy samples in the process, every 2 s, even after
+# the rollout was already bound. Reading the bound rollout stays every 2 s
+# (it is incremental and cheap); only the search is spaced out. The cost of
+# the spacing: after a native `/new` or `/resume`, usage follows the new chat
+# within _BOUND seconds instead of 2. Nothing is lost — the new rollout is
+# read from its start once found.
+_CODEX_REDISCOVER_BOUND_S = 30.0
+_CODEX_REDISCOVER_UNBOUND_S = 10.0
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "0"))  # 0 = disabled (no auto-close)
 
 # Allowed model names — prevents command injection via the model parameter.
@@ -1799,13 +1817,25 @@ class PtyManager:
         from codex_usage import CodexUsageReader, discover_rollout, reference_pricing
         with session.codex_usage_lock:
             now = time.monotonic()
-            if now - session.codex_usage_checked < 2:
+            prior_check = session.codex_usage_checked
+            if now - prior_check < 2:
                 return dict(session.codex_usage)
             session.codex_usage_checked = now
             previous_path = session.codex_rollout_path
             candidate_path = previous_path
             binding_status = "retained"
-            if session.alive and session.pty.isalive():
+            live = session.alive and session.pty.isalive()
+            # A check time of 0 means "never refreshed" (and is how callers and
+            # tests force a full refresh): the search runs. Otherwise it runs only
+            # when due — see _CODEX_REDISCOVER_*. Reads with defaults because
+            # callers may pass a lightweight session object.
+            last_search = getattr(session, "codex_discover_checked", 0.0)
+            interval = _CODEX_REDISCOVER_BOUND_S if previous_path else _CODEX_REDISCOVER_UNBOUND_S
+            search_due = prior_check == 0 or last_search == 0 or now - last_search >= interval
+            if live and not search_due:
+                binding_status = getattr(session, "codex_binding_status", "retained")
+            if live and search_due:
+                session.codex_discover_checked = now
                 pid = getattr(session.pty, "pid", None)
                 if not isinstance(pid, int):
                     pid = getattr(getattr(session.pty, "_pi", None), "dwProcessId", None)
@@ -1861,6 +1891,7 @@ class PtyManager:
             data["est_cost_usd"] = data.pop("estimated_cost_usd", None)
             data["effort"] = session.effort or None
             data["binding_status"] = binding_status
+            session.codex_binding_status = binding_status
             session.codex_usage = data
             flush_events(candidate_path)
             if usage_store is not None:
