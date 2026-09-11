@@ -595,13 +595,15 @@ def _resolve_max_sessions() -> int:
 
 MAX_SESSIONS = _resolve_max_sessions()
 
-# How often a Codex session's rollout is RE-SEARCHED (R-193). The search,
-# `codex_usage.discover_rollout`, calls `psutil.Process.open_files()` on the
-# CLI and every child — which on Windows enumerates every handle on the
-# machine and filters by pid, so its cost grows with Unreal, browsers and
-# everything else running. MEASURED 2026-09-10 on the owner's sidecar with six
-# sessions: ~64% of all py-spy samples in the process, every 2 s, even after
-# the rollout was already bound. Reading the bound rollout stays every 2 s
+# How often a Codex session's rollout is RE-SEARCHED (R-193). The search used
+# to call `psutil.Process.open_files()` on the CLI and every child — which on
+# Windows enumerates every handle on the machine and holds the GIL while it
+# does, so its cost grew with Unreal, browsers and everything else running.
+# MEASURED 2026-09-10 on the owner's sidecar with six sessions: ~64% of all
+# py-spy samples in the process, every 2 s, even after the rollout was already
+# bound; 2026-09-11, 2.9 s per scan. R-194 replaced it with a directory scan,
+# which is cheap — this spacing is kept anyway, because a search that need not
+# run is a search that should not. Reading the bound rollout stays every 2 s
 # (it is incremental and cheap); only the search is spaced out. The cost of
 # the spacing: after a native `/new` or `/resume`, usage follows the new chat
 # within _BOUND seconds instead of 2. Nothing is lost — the new rollout is
@@ -1814,7 +1816,7 @@ class PtyManager:
 
     def refresh_codex_usage(self, session, usage_store=None):
         """Bind only the owned process's rollout; unknown identity stays unknown."""
-        from codex_usage import CodexUsageReader, discover_rollout, reference_pricing
+        from codex_usage import CodexUsageReader, discover_rollout, reference_pricing, spawn_epoch
         with session.codex_usage_lock:
             now = time.monotonic()
             prior_check = session.codex_usage_checked
@@ -1842,8 +1844,11 @@ class PtyManager:
                 if isinstance(pid, int) and pid > 0:
                     claimed = [other.codex_rollout_path for other in self.sessions.values()
                                if other.id != session.id and other.alive and other.codex_rollout_path]
+                    # created_at is an ISO-8601 UTC string; discovery wants epoch
+                    # seconds, and None there means "search the last 24 h".
                     path = discover_rollout(pid, session.working_dir, claimed,
-                                            expected_session_id=None if previous_path else session.codex_session_id)
+                                            expected_session_id=None if previous_path else session.codex_session_id,
+                                            spawned_at=spawn_epoch(getattr(session, "created_at", None)))
                     if path:
                         candidate_path = str(path)
                         binding_status = "verified"

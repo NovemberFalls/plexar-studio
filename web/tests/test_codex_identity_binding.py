@@ -47,14 +47,12 @@ def test_foreign_discovery_cannot_overwrite_known_resume_identity(tmp_path, monk
     assert discover.call_args.kwargs["expected_session_id"] == "requested-resume-id"
 
 
-def test_discovery_filters_foreign_metadata_even_when_process_holds_the_file(tmp_path, monkeypatch):
+def test_discovery_filters_foreign_metadata_even_when_the_file_is_the_only_candidate(tmp_path):
     from codex_usage import discover_rollout
     path = tmp_path / "rollout-foreign.jsonl"
     path.write_text(json.dumps({"type": "session_meta", "payload": {
         "id": "foreign-id", "source": "cli", "cwd": str(tmp_path),
     }}) + "\n")
-    process = SimpleNamespace(children=lambda recursive: [], open_files=lambda: [SimpleNamespace(path=str(path))])
-    monkeypatch.setattr("psutil.Process", lambda pid: process)
     assert discover_rollout(123, str(tmp_path), sessions_root=tmp_path,
                             expected_session_id="requested-resume-id") is None
     assert discover_rollout(123, str(tmp_path), sessions_root=tmp_path,

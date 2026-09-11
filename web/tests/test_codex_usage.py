@@ -109,39 +109,30 @@ def metadata(path, cwd, source="cli", thread_source="user"):
                                                        "source": source, "thread_source": thread_source}})
 
 
-def test_binding_uses_owned_handles_not_newest_same_cwd(tmp_path, monkeypatch):
-    import psutil
+def test_binding_ignores_subagents_and_claims_and_refuses_untimed_ambiguity(tmp_path):
+    """Ported from the handle-enumeration era (R-194): the same identity rules,
+    now proven against real files instead of a mocked `open_files()`."""
     root = tmp_path / "sessions"
     root.mkdir()
     first, other, child = [root / f"rollout-{name}.jsonl" for name in ("owned", "other", "child")]
     metadata(first, tmp_path)
-    metadata(other, tmp_path)
     metadata(child, tmp_path, thread_source="subagent")
-    process = Mock()
-    process.children.return_value = []
-    process.open_files.return_value = [SimpleNamespace(path=str(first)), SimpleNamespace(path=str(child))]
-    monkeypatch.setattr(psutil, "Process", lambda pid: process)
     assert discover_rollout(123, str(tmp_path), sessions_root=root) == first
     assert discover_rollout(123, str(tmp_path), claimed_paths=[first], sessions_root=root) is None
-    process.open_files.return_value.append(SimpleNamespace(path=str(other)))
+    metadata(other, tmp_path)
     assert discover_rollout(123, str(tmp_path), sessions_root=root) is None
 
 
-def test_binding_excludes_wrong_cwd_external_path_and_denied_process(tmp_path, monkeypatch):
-    import psutil
+def test_binding_excludes_wrong_cwd_external_path_and_unreadable_root(tmp_path):
     root = tmp_path / "sessions"
     root.mkdir()
-    foreign = tmp_path / "rollout-external.jsonl"
-    wrong = root / "rollout-wrong.jsonl"
+    foreign = tmp_path / "rollout-external.jsonl"   # outside the sessions root
+    wrong = root / "rollout-wrong.jsonl"            # a different working directory
     metadata(foreign, tmp_path)
     metadata(wrong, root)
-    process = Mock()
-    process.children.return_value = []
-    process.open_files.return_value = [SimpleNamespace(path=str(foreign)), SimpleNamespace(path=str(wrong))]
-    monkeypatch.setattr(psutil, "Process", lambda pid: process)
     assert discover_rollout(123, str(tmp_path), sessions_root=root) is None
-    process.open_files.side_effect = psutil.AccessDenied(123)
-    assert discover_rollout(123, str(tmp_path), sessions_root=root) is None
+    assert discover_rollout(123, str(tmp_path), sessions_root=tmp_path / "absent") is None
+    assert discover_rollout(0, str(tmp_path), sessions_root=root) is None
 
 
 def test_reference_prices_include_long_context_and_cache_write(tmp_path):

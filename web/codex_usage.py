@@ -1,4 +1,8 @@
-"""Native Codex rollout usage; never infer identity from newest files in a cwd.
+"""Native Codex rollout usage; identity comes from metadata, not from a guess.
+
+Discovery scans the sessions tree by spawn time and ``session_meta`` contents —
+it never enumerates process handles (see ``discover_rollout``), and it falls back
+to recency only inside the narrow, already-filtered case documented there.
 
 Only numeric/accounting metadata is retained. Cumulative totals are snapshots,
 cached input is a subset of input, and reasoning is a subset of output.
@@ -9,8 +13,9 @@ import json
 import logging
 import math
 import os
+import time
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("cockpit.codex_usage")
 
@@ -106,48 +111,169 @@ def _same_directory(a, b):
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
-def discover_rollout(pid: int, cwd: str, claimed_paths=(), sessions_root=None, expected_session_id=None):
-    """Return the sole root CLI rollout held open by the owned process tree.
+# Discovery is a DIRECTORY SCAN, never a handle enumeration (R-194).
+# `psutil.Process.open_files()` enumerates every handle on the machine on
+# Windows and holds the GIL for the whole call: measured 2.9 s per scan against
+# a live nine-process Codex tree, with a competing Python thread reduced to 38%
+# of its rate. It ran every 10-30 s per Codex session from the default executor
+# and from the sync usage route, starving the event loop until the Tauri
+# watchdog gave up on /api/version and killed the sidecar with every session in
+# it. No periodic path may call it again.
+_DISCOVER_SLACK_S = 60.0            # clock skew between created_at and the CLI's first write
+_DISCOVER_FALLBACK_WINDOW_S = 24 * 60 * 60
+_DISCOVER_MAX_DAYS = 31
+# Only the expected-id search walks history: `codex resume <id>` attaches to a
+# rollout written days ago and untouched until the first turn, so the spawn
+# window cannot see it, and an EXACT id match carries no mis-attribution risk.
+# Bounded to the newest day directories, newest first, stopping at the match.
+_DISCOVER_MAX_HISTORY_DAYS = 120
 
-    Access failures or multiple plausible roots leave identity unknown. Never
-    search by recency: concurrent sessions commonly share a working directory.
+
+def _creation_time(info):
+    """Birth time where the platform records one, else mtime.
+
+    Windows' ``st_ctime`` IS creation time; on POSIX it is inode-change time,
+    which a chmod or a rename moves, so it is never used here.
     """
-    import psutil
+    birth = getattr(info, "st_birthtime", None)
+    if isinstance(birth, (int, float)) and birth > 0:
+        return float(birth)
+    return float(info.st_ctime if os.name == "nt" else info.st_mtime)
 
+
+def _candidate_files(root, since, history=False):
+    """Rollout files in the day directories that can hold one, never the tree.
+
+    The CLI writes ``<root>/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl``; ``root``
+    itself is also listed because older layouts (and tests) keep them flat.
+    The day window runs from the day before ``since`` to tomorrow, so a
+    local/UTC or DST disagreement cannot hide the right directory.
+
+    ``history=True`` (the expected-id search only) instead lists the newest
+    ``_DISCOVER_MAX_HISTORY_DAYS`` existing day directories, newest first, so a
+    resumed rollout older than the window is still reachable — still a listing
+    of day directories, never a walk of the whole tree.
+    """
+    directories = [root]
+    if history:
+        try:
+            days = [path for path in root.glob("*/*/*") if path.is_dir()]
+        except (OSError, ValueError):
+            days = []
+        days.sort(key=lambda path: str(path), reverse=True)
+        directories.extend(days[:_DISCOVER_MAX_HISTORY_DAYS])
+    else:
+        try:
+            start = datetime.fromtimestamp(since) - timedelta(days=1)
+        except (ValueError, OSError, OverflowError):
+            start = datetime.now() - timedelta(days=1)
+        day = datetime(start.year, start.month, start.day)
+        end = datetime.now() + timedelta(days=1)
+        for _ in range(_DISCOVER_MAX_DAYS):
+            if day > end:
+                break
+            directories.append(root / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}")
+            day += timedelta(days=1)
+    for directory in directories:
+        try:
+            entries = list(directory.iterdir())
+        except (OSError, ValueError):
+            continue
+        for entry in entries:
+            if entry.name.startswith("rollout-") and entry.suffix == ".jsonl":
+                yield entry
+
+
+def discover_rollout(pid: int, cwd: str, claimed_paths=(), sessions_root=None,
+                     expected_session_id=None, spawned_at=None):
+    """Return this pane's root CLI rollout, found by scanning the sessions tree.
+
+    A candidate is a ``rollout-*.jsonl`` whose first record is a ``session_meta``
+    for a user (not subagent) CLI thread in ``cwd``, which no other live pane has
+    claimed, and which was created or last written at or after ``spawned_at``
+    (epoch seconds) less a minute of slack. With no ``spawned_at`` the window is
+    the last 24 hours.
+
+    ``expected_session_id`` wins outright when given, **including outside that
+    window**: a `codex resume <id>` pane attaches to a rollout written days ago
+    and untouched until its first turn, and an exact id match is unique, so
+    there is nothing for recency or a spawn time to protect against. Every other
+    filter (cli/user thread, cwd, claimed, inside the root) still applies, and
+    the search is bounded to the newest ``_DISCOVER_MAX_HISTORY_DAYS`` day
+    directories, newest first, stopping at the match. Otherwise a single
+    unclaimed candidate binds, and when several remain the most recently CREATED
+    one is preferred — **the one deliberate departure from the old "never search
+    by recency" rule**, and safe here only because the alternatives are already
+    excluded: every other Studio pane's rollout is in ``claimed_paths``, files
+    predating this pane's spawn are outside the window, and a native ``/new`` or
+    ``/resume`` inside the pane is exactly the newer file we want. The backstop
+    is unchanged: ``refresh_codex_usage`` compares the reader's ``session_id``
+    against ``session.codex_session_id`` and unbinds with a warning on mismatch.
+    Without a spawn time there is no recency to trust, so ambiguity stays unknown.
+
+    ``pid`` is retained for the call signature and validated, but no handle of
+    that process is inspected — see the note above this function.
+    """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     root = Path(sessions_root or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions").resolve()
     claimed = {os.path.normcase(str(Path(path).resolve())) for path in claimed_paths}
-    try:
-        process = psutil.Process(pid)
-        processes = [process] + process.children(recursive=True)
-    except (psutil.Error, OSError, ValueError):
-        return None
-    candidates = set()
-    for process in processes:
+    timed = (isinstance(spawned_at, (int, float)) and not isinstance(spawned_at, bool)
+             and math.isfinite(spawned_at) and spawned_at > 0)
+    since = (spawned_at - _DISCOVER_SLACK_S) if timed else (time.time() - _DISCOVER_FALLBACK_WINDOW_S)
+    wanted = expected_session_id is not None
+    files = list(_candidate_files(root, since, history=wanted))
+    if wanted:
+        # The id is usually the filename's uuid; looking at those first turns the
+        # common case into one open, without relying on that naming holding.
+        files.sort(key=lambda path: str(expected_session_id) not in path.name)
+    candidates = []
+    for candidate in files:
         try:
-            files = process.open_files()
-        except (psutil.Error, OSError):
-            continue
-        for item in files:
-            path = Path(item.path).resolve()
-            if path.suffix != ".jsonl" or not path.name.startswith("rollout-"):
-                continue
+            path = candidate.resolve()
             if not path.is_relative_to(root) or os.path.normcase(str(path)) in claimed:
                 continue
-            try:
-                with path.open("rb") as stream:
-                    entry = json.loads(stream.readline(2 * 1024 * 1024))
-                meta = entry.get("payload") or {}
-                if (entry.get("type") == "session_meta" and meta.get("source") == "cli"
-                        and meta.get("thread_source", "user") == "user"
-                        and isinstance(meta.get("cwd"), str) and _same_directory(meta["cwd"], cwd)
-                        and (expected_session_id is None or (meta.get("id") or meta.get("session_id")) == expected_session_id)
-                        and (meta.get("id") or meta.get("session_id"))):
-                    candidates.add(path)
-            except (OSError, ValueError, TypeError, AttributeError):
+            info = path.stat()
+            # An exact id match is unique, so the spawn window does not apply to
+            # it: a `codex resume <id>` rollout predates the pane and is not
+            # written to until the first turn.
+            if not wanted and max(_creation_time(info), info.st_mtime) < since:
                 continue
-    return next(iter(candidates)) if len(candidates) == 1 else None
+            with path.open("rb") as stream:
+                entry = json.loads(stream.readline(2 * 1024 * 1024))
+            meta = entry.get("payload") or {}
+            identity = meta.get("id") or meta.get("session_id")
+            if not (entry.get("type") == "session_meta" and meta.get("source") == "cli"
+                    and meta.get("thread_source", "user") == "user"
+                    and isinstance(meta.get("cwd"), str) and _same_directory(meta["cwd"], cwd)
+                    and identity):
+                continue
+            if wanted:
+                if identity == expected_session_id:
+                    return path
+                continue
+            candidates.append((_creation_time(info), path))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    if not candidates or (len(candidates) > 1 and not timed):
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def spawn_epoch(created_at):
+    """Epoch seconds for a ``TerminalSession.created_at`` (an ISO-8601 UTC string)."""
+    if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+        return float(created_at)
+    if not isinstance(created_at, str) or not created_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        logger.debug("Unparsable session created_at: %r", created_at, exc_info=True)
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _estimate(usage, rate):
