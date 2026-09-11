@@ -12,7 +12,8 @@ from pty_manager import PtyManager, TerminalSession
 from usage_tracker import UsageTracker
 
 
-def test_transcript_identity_matches_its_file_when_native_conversation_switches(monkeypatch):
+@pytest.mark.asyncio
+async def test_transcript_identity_matches_its_file_when_native_conversation_switches(monkeypatch):
     session = SimpleNamespace(
         harness="codex", codex_usage_lock=threading.Lock(),
         codex_rollout_path="first.jsonl", codex_session_id="first-native",
@@ -29,7 +30,10 @@ def test_transcript_identity_matches_its_file_when_native_conversation_switches(
         return {"available": True, "messages": [{"text": "first conversation"}]}
 
     monkeypatch.setattr("codex_transcript.transcript_page", read_and_switch)
-    result = server.get_codex_transcript("pane")
+    # get_codex_transcript is async def (N04 -- its blocking body now runs
+    # via asyncio.to_thread), so it must be awaited rather than called
+    # directly; every assertion below is unchanged.
+    result = await server.get_codex_transcript("pane")
     assert result["session_id"] == "first-native"
     assert result["messages"][0]["text"] == "first conversation"
 

@@ -250,18 +250,23 @@ def _bearer_token(headers) -> str | None:
     return token or None
 
 
-def require_device(request: Request) -> Device:
+async def require_device(request: Request) -> Device:
     """FastAPI dependency: the authenticated device, or an HTTPException.
 
     Order matters and is load-bearing: when remote is disabled EVERY route
     answers 404 before any credential is examined, so a probe cannot learn
     whether a token is valid on a desktop that has remote turned off.
+
+    Async, and DeviceStore.authenticate runs in the threadpool (N04): every
+    phone route depends on this (the phone polls the session list every 3s),
+    and DeviceStore._read() does a real disk read (is_file + read_text) on
+    every call -- it is not an in-memory check.
     """
     _require_configured()
     if not remote_enabled():
         raise HTTPException(status_code=404, detail="remote disabled")
     token = _bearer_token(request.headers)
-    device = _store.authenticate(token) if token else None
+    device = await asyncio.to_thread(_store.authenticate, token) if token else None
     if device is None:
         raise HTTPException(status_code=401, detail="unauthorized")
     return device

@@ -27,6 +27,17 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
+# uvicorn's websockets implementation raises this when the peer is already
+# gone; guarded because it is uvicorn's dependency, not ours directly, and
+# pty_to_ws's existing except clause predates this need. Falls back to a
+# plain tuple (still covers the WebSocketDisconnect/RuntimeError family) if
+# the import ever fails.
+try:
+    from websockets.exceptions import ConnectionClosed as _ConnectionClosed
+    _WS_SEND_CLOSED_EXC = (WebSocketDisconnect, RuntimeError, ConnectionError, _ConnectionClosed)
+except ImportError:  # pragma: no cover -- websockets ships with uvicorn[standard]
+    _WS_SEND_CLOSED_EXC = (WebSocketDisconnect, RuntimeError, ConnectionError)
+
 load_dotenv()
 
 import app_paths  # noqa: E402 -- the ONE place the data directory is resolved; see the six literals it replaced
@@ -1248,8 +1259,17 @@ async def create_terminal(request: Request):
 
 @app.get("/api/terminals")
 async def list_terminals():
-    """List all active terminal sessions."""
-    return JSONResponse({"terminals": pty_manager.list_terminals()})
+    """List all active terminal sessions.
+
+    Off-loop: _session_to_dict does os.listdir/getmtime per session via
+    _get_jsonl_path, and this route is polled routinely. Safe to run in the
+    threadpool alongside the state ticker's own tracker.tick() calls -- tick()
+    only reassigns self.state from a deterministic read of self.buffer /
+    last_output_time, both simple attribute ops that are atomic under the GIL,
+    so two concurrent callers converge on the same value rather than
+    corrupting anything.
+    """
+    return JSONResponse({"terminals": await asyncio.to_thread(pty_manager.list_terminals)})
 
 
 @app.delete("/api/terminals/{terminal_id}")
@@ -1585,22 +1605,34 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             # would swallow that wakeup and stall the pane until the next tick.
             session.history_changed.clear()
             snapshot = session.history.snapshot(cursor)
-            if initial or snapshot["reset"]:
-                await websocket.send_json({"type": "replay_start", "reset": snapshot["reset"],
-                                           "truncated": snapshot["truncated"]})
-            # One frame per 64 KB rather than one per PTY read: the client treats an
-            # output frame's seq as "accepted through seq", so a batch carrying its
-            # LAST seq is already correct there. See utils/terminalReplay.js.
-            for seq, data in coalesce_chunks(snapshot["chunks"], 64 * 1024):
-                if session.active_consumer != my_generation:
-                    return
-                await websocket.send_json({"type": "output", "seq": seq, "data": data})
-            cursor = snapshot["sequence"]
-            if initial or snapshot["reset"]:
-                await websocket.send_json({"type": "replay_end", "seq": cursor})
+            try:
+                if initial or snapshot["reset"]:
+                    await websocket.send_json({"type": "replay_start", "reset": snapshot["reset"],
+                                               "truncated": snapshot["truncated"]})
+                # One frame per 64 KB rather than one per PTY read: the client treats an
+                # output frame's seq as "accepted through seq", so a batch carrying its
+                # LAST seq is already correct there. See utils/terminalReplay.js.
+                for seq, data in coalesce_chunks(snapshot["chunks"], 64 * 1024):
+                    if session.active_consumer != my_generation:
+                        return
+                    await websocket.send_json({"type": "output", "seq": seq, "data": data})
+                cursor = snapshot["sequence"]
+                if initial or snapshot["reset"]:
+                    await websocket.send_json({"type": "replay_end", "seq": cursor})
+            except _WS_SEND_CLOSED_EXC:
+                # The peer is already gone (browser closed the tab, reload,
+                # etc.) -- end this task quietly rather than let uvicorn log
+                # "Exception in ASGI application" for a ConnectionClosed we
+                # cannot do anything about. Same posture as pty_to_ws's
+                # except clause below.
+                logger.debug("replay_to_ws send failed for terminal %s (peer gone)", terminal_id)
+                return
             initial = False
             if not session.alive:
-                await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
+                try:
+                    await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
+                except _WS_SEND_CLOSED_EXC:
+                    logger.debug("Failed to send [Session ended] banner for terminal %s (peer gone)", terminal_id)
                 return
             # The timeout is ONLY a liveness re-check for the branch above; new
             # output arrives via the event, never by waiting this out.
@@ -1637,7 +1669,7 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                     break
                 await websocket.send_text(data)
                 await asyncio.sleep(0)
-            except (WebSocketDisconnect, RuntimeError, ConnectionError):
+            except _WS_SEND_CLOSED_EXC:
                 break
             except Exception as e:
                 logger.debug("PTY->WS forward error: %s", e)
@@ -1787,23 +1819,14 @@ async def get_latest_assistant(terminal_id: str):
     return JSONResponse({"text": None, "reason": "no assistant message found"})
 
 
-@app.get("/api/terminals/{terminal_id}/workflows")
-def get_workflows(terminal_id: str):
-    """Return recent Workflow tool invocations from this session's JSONL.
+def _get_workflows_blocking(session) -> dict:
+    """Blocking body of get_workflows -- moved off the loop, see N04.
 
-    For each `tool_use` whose name is "Workflow", pairs it with its matching
-    `tool_result` (if present) and reports `status` as "in_progress" or "completed".
-    Used by the per-pane WorkflowsPanel in the frontend.
-
-    The transcript is read INCREMENTALLY (`jsonl_watcher.workflow_calls`, R-193):
-    this route is polled every 3 s for every open pane, and re-parsing whole
-    transcripts on each poll was a fifth of the sidecar's CPU with six sessions.
+    jsonl_watcher.workflow_calls() and _get_jsonl_path() both do real disk I/O
+    (stat/listdir/read), and this route is polled every 3 s per open pane.
     """
     from jsonl_watcher import workflow_calls
 
-    session = pty_manager.get_terminal(terminal_id)
-    if session is None:
-        return JSONResponse({"error": "Terminal not found"}, status_code=404)
     jsonl_path = pty_manager._get_jsonl_path(session)
     if not jsonl_path:
         return {"workflows": []}
@@ -1815,17 +1838,27 @@ def get_workflows(terminal_id: str):
     return {"workflows": workflows[:20]}
 
 
-@app.get("/api/terminals/{terminal_id}/usage")
-def get_terminal_usage(terminal_id: str):
-    """Return persistent token/cost usage for a session, merged with its live effort level.
+@app.get("/api/terminals/{terminal_id}/workflows")
+async def get_workflows(terminal_id: str):
+    """Return recent Workflow tool invocations from this session's JSONL.
 
-    Usage totals come from the SQLite-backed usage_tracker (survives JSONL
-    deletion); effort is read from the live in-memory session (parsed from
-    PTY output — see SessionStateTracker._EFFORT_RE).
+    For each `tool_use` whose name is "Workflow", pairs it with its matching
+    `tool_result` (if present) and reports `status` as "in_progress" or "completed".
+    Used by the per-pane WorkflowsPanel in the frontend.
+
+    The transcript is read INCREMENTALLY (`jsonl_watcher.workflow_calls`, R-193):
+    this route is polled every 3 s for every open pane, and re-parsing whole
+    transcripts on each poll was a fifth of the sidecar's CPU with six sessions.
+    The read itself now runs off the event loop -- see _get_workflows_blocking.
     """
     session = pty_manager.get_terminal(terminal_id)
     if session is None:
         return JSONResponse({"error": "Terminal not found"}, status_code=404)
+    return await asyncio.to_thread(_get_workflows_blocking, session)
+
+
+def _get_terminal_usage_blocking(terminal_id: str, session) -> dict:
+    """Blocking body of get_terminal_usage -- moved off the loop, see N04."""
     if session.harness == "codex":
         return pty_manager.refresh_codex_usage(session, usage_tracker)
     summary = usage_tracker.session_summary(terminal_id)
@@ -1833,19 +1866,34 @@ def get_terminal_usage(terminal_id: str):
     return summary
 
 
-@app.get("/api/usage/daily")
-def get_daily_usage(day: str | None = None):
-    """Return the daily cost/token rollup, optionally for a specific ``day`` (YYYY-MM-DD)."""
-    return usage_tracker.daily_summary(day)
+@app.get("/api/terminals/{terminal_id}/usage")
+async def get_terminal_usage(terminal_id: str):
+    """Return persistent token/cost usage for a session, merged with its live effort level.
 
-
-@app.get("/api/terminals/{terminal_id}/transcript")
-def get_codex_transcript(terminal_id: str, before: int | None = None, limit: int = 50):
-    """Read only the native transcript already bound to this terminal's process."""
-    from codex_transcript import transcript_page
+    Usage totals come from the SQLite-backed usage_tracker (survives JSONL
+    deletion); effort is read from the live in-memory session (parsed from
+    PTY output — see SessionStateTracker._EFFORT_RE). usage_tracker hits
+    SQLite, so the read runs off the event loop -- see N04.
+    """
     session = pty_manager.get_terminal(terminal_id)
-    if session is None or session.harness != "codex":
-        return JSONResponse({"error": "Codex terminal not found"}, status_code=404)
+    if session is None:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+    return await asyncio.to_thread(_get_terminal_usage_blocking, terminal_id, session)
+
+
+@app.get("/api/usage/daily")
+async def get_daily_usage(day: str | None = None):
+    """Return the daily cost/token rollup, optionally for a specific ``day`` (YYYY-MM-DD).
+
+    usage_tracker.daily_summary hits SQLite; run off the event loop (N04).
+    """
+    return await asyncio.to_thread(usage_tracker.daily_summary, day)
+
+
+def _get_codex_transcript_blocking(before: int | None, limit: int, session) -> dict:
+    """Blocking body of get_codex_transcript -- moved off the loop, see N04."""
+    from codex_transcript import transcript_page
+
     pty_manager.refresh_codex_usage(session, usage_tracker)
     # A native /new or /resume can rebind this pane while its recording is read.
     # Capture identity and path together; never label old messages with a new ID.
@@ -1857,6 +1905,19 @@ def get_codex_transcript(terminal_id: str, before: int | None = None, limit: int
         return {"messages": [], "before": None, "has_more": False, "available": False}
     return {**transcript_page(rollout_path, max(0, before) if before is not None else None, limit),
             "session_id": session_id, "binding_status": binding_status}
+
+
+@app.get("/api/terminals/{terminal_id}/transcript")
+async def get_codex_transcript(terminal_id: str, before: int | None = None, limit: int = 50):
+    """Read only the native transcript already bound to this terminal's process.
+
+    transcript_page() reads the rollout file from disk; run off the event
+    loop (N04).
+    """
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None or session.harness != "codex":
+        return JSONResponse({"error": "Codex terminal not found"}, status_code=404)
+    return await asyncio.to_thread(_get_codex_transcript_blocking, before, limit, session)
 
 
 # ── Spend guardrails ─────────────────────────────────────
@@ -6960,7 +7021,11 @@ async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
             task.result()
     except WebSocketDisconnect:
         pass
-    except (RuntimeError, ConnectionError) as e:
+    except _WS_SEND_CLOSED_EXC as e:
+        # Covers RuntimeError/ConnectionError plus a bare ConnectionClosed from
+        # the underlying websockets library when the phone is already gone --
+        # end quietly rather than let uvicorn log "Exception in ASGI
+        # application". Same posture as /ws/terminal's replay_to_ws/pty_to_ws.
         logger.debug("Remote stream for terminal %s ended: %s", terminal_id, e)
     finally:
         session.remote_listeners.discard(listener)
@@ -7142,6 +7207,21 @@ async def api_shutdown():
 # authentication) is reachable from other machines on the LAN.
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
+# uvicorn's built-in WebSocket ping/pong is a LIVENESS signal, and this app
+# already has a stronger one: the 30 s application-level heartbeat in
+# websocket_terminal, plus client-side replay-from-cursor on reconnect. What
+# uvicorn's defaults (ws_ping_interval=20.0, ws_ping_timeout=20.0) actually do
+# here is turn an event-loop STALL into a mass disconnect: a GIL-holding scan
+# elsewhere on the loop for >20s means uvicorn never gets to send or process a
+# pong in time, and it closes EVERY open terminal socket with 1011 "keepalive
+# ping timeout" the moment the loop frees up — the client sees every pane say
+# "[Reconnecting in 1s...]" at once for a server that was never actually gone.
+# ws_ping_timeout is widened to 120s (matching the Tauri watchdog's
+# HEALTH_FAILURES_BEFORE_KILL tolerance of 24 x 5s) so a stall shorter than
+# that self-heals via reconnect-and-replay instead of a hard close.
+_WS_PING_INTERVAL_S = 20.0
+_WS_PING_TIMEOUT_S = 120.0
+
 
 def main():
     import uvicorn
@@ -7181,7 +7261,13 @@ def main():
     # log_config=None: uvicorn's default dictConfig strips every handler from
     # its own loggers, which is how "[Errno 10048]" never reached cockpit.log.
     # logging_config.setup() already routes uvicorn.* to stderr + the file.
-    uvicorn.run(app, host=host, port=port, log_config=None)
+    # ws_ping_interval/ws_ping_timeout: see _WS_PING_INTERVAL_S / _WS_PING_TIMEOUT_S
+    # above -- a stall is not a dead client, and the app already has its own
+    # heartbeat + reconnect-and-replay.
+    uvicorn.run(
+        app, host=host, port=port, log_config=None,
+        ws_ping_interval=_WS_PING_INTERVAL_S, ws_ping_timeout=_WS_PING_TIMEOUT_S,
+    )
 
 
 if __name__ == "__main__":
