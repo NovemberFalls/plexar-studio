@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -67,6 +67,24 @@ fn backoff_for(attempts: u32) -> std::time::Duration {
 /// which meant nothing in the app could end a sidecar that had stopped
 /// answering. Dropping a `CommandChild` does not kill the process.
 type ChildSlot = Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>;
+
+/// Set by the watchdog IMMEDIATELY BEFORE it kills the bootloader, so the
+/// `CommandEvent::Terminated` that the kill produces can be told apart from a
+/// crash. `CommandChild::kill` CONSUMES the child, but the receiver keeps
+/// delivering — the exit event still arrives, with code 1, and looks exactly
+/// like a genuine failure. Consumed (swapped back to false) by the handler that
+/// reads it, so the NEXT termination is judged on its own merits.
+type ExpectedTermination = Arc<AtomicBool>;
+
+/// Monotonic id for "which spawn is the current one". Each `spawn_sidecar`
+/// bumps it and captures its own value; a `Terminated` handler whose captured
+/// value is no longer the live one belongs to a child that has already been
+/// replaced, and must not act.
+///
+/// Compared by NUMBER, not by process handle: the handle is moved into the slot
+/// and consumed by `kill()`, so there is nothing left to compare identities
+/// with by the time the event arrives.
+type SpawnGen = Arc<AtomicU32>;
 
 /// Append one line to `~/.plexar-studio/logs/supervisor.log`, and to stderr.
 ///
@@ -155,10 +173,38 @@ const RECOVERY_GRACE_SECS: u64 = 25;
 /// `HUNG_AFTER_S` (10s), confirms its executable name is in `SIDECAR_NAMES` and
 /// terminates it before binding. This adds no new kill path; it reaches the one
 /// that already exists.
+///
+/// ══ ONE HANG PRODUCED TWO SIDECARS, 2026-09-11 ═════════════════════════════
+/// MEASURED from supervisor.log and cockpit.log this morning. The kill in step
+/// 1 and the spawn in step 2 are not independent: killing the bootloader makes
+/// the `CommandEvent::Terminated` handler in `spawn_sidecar` fire for that SAME
+/// child. `CommandChild::kill` consumes the child, but the receiver keeps
+/// delivering, so the exit arrives with code 1 — indistinguishable, to that
+/// handler, from a crash. It saw uptime >= HEALTHY_RUN_SECS, reset the budget,
+/// waited the 2s backoff and spawned a SECOND replacement: 07:41 reads "ended
+/// the sidecar bootloader we spawned" → "spawning a replacement sidecar" →
+/// "sidecar terminated with code 1" → "restarting in 2s (attempt 1/3)".
+///
+/// The two replacements then RACED, at 05:58. Neither had bound yet when the
+/// other ran `instance_guard.resolve_port` — uvicorn runs the whole lifespan
+/// (temp sweep, orphan sweep, cloudflared spawn) BEFORE it binds — so both saw
+/// a free port, both started a cloudflared connector, and the loser exited 1 on
+/// `[Errno 10048]`. Three cloudflared.exe were left running on the machine.
+/// `child_slot` was also overwritten by whichever spawn finished last, so a
+/// later hang would have killed the wrong bootloader.
+///
+/// THE FIX IS CLASSIFICATION, NOT TIMING. The kill stays — it is still the
+/// cheap half of reaching `instance_guard` — and an `ExpectedTermination` flag
+/// is set before it. The `Terminated` handler consumes that flag, logs that the
+/// watchdog owns recovery, and returns WITHOUT touching the restart budget and
+/// WITHOUT spawning. A `SpawnGen` check backs it up for the ordering case where
+/// an event outlives its spawn for any other reason. One hang, one replacement.
 fn spawn_health_watchdog(
     app: tauri::AppHandle,
     restart_count: Arc<AtomicU32>,
     child_slot: ChildSlot,
+    expected_termination: ExpectedTermination,
+    spawn_gen: SpawnGen,
 ) {
     std::thread::spawn(move || {
         supervisor_log("watchdog started");
@@ -192,12 +238,24 @@ fn spawn_health_watchdog(
             // PyInstaller BOOTLOADER; the process actually hung and holding
             // port 8420 is its Python child, which deliberately outlives it.
             // Killing this does not free the port and does not stop the hang.
+            // The flag is raised BEFORE the kill, never after: the Terminated
+            // event can be delivered while `kill()` is still returning, and a
+            // flag set afterwards would arrive too late to classify it.
             let child = child_slot.lock().ok().and_then(|mut slot| slot.take());
             match child {
-                Some(c) => match c.kill() {
-                    Ok(()) => supervisor_log("ended the sidecar bootloader we spawned"),
-                    Err(e) => supervisor_log(&format!("could not end the bootloader: {}", e)),
-                },
+                Some(c) => {
+                    expected_termination.store(true, Ordering::SeqCst);
+                    match c.kill() {
+                        Ok(()) => supervisor_log("ended the sidecar bootloader we spawned"),
+                        Err(e) => {
+                            // Nothing died, so nothing will report a
+                            // termination — clear the flag rather than leave it
+                            // armed to swallow the next genuine crash.
+                            expected_termination.store(false, Ordering::SeqCst);
+                            supervisor_log(&format!("could not end the bootloader: {}", e));
+                        }
+                    }
+                }
                 None => supervisor_log("no live bootloader handle to end"),
             }
 
@@ -225,7 +283,13 @@ fn spawn_health_watchdog(
             // would make the watchdog fire forever with nothing happening.
             restart_count.store(0, Ordering::SeqCst);
             supervisor_log("spawning a replacement sidecar (instance_guard will arbitrate the port)");
-            spawn_sidecar(&app, restart_count.clone(), child_slot.clone());
+            spawn_sidecar(
+                &app,
+                restart_count.clone(),
+                child_slot.clone(),
+                expected_termination.clone(),
+                spawn_gen.clone(),
+            );
 
             // Give the replacement a real chance before judging it, so the
             // next loop does not immediately count a cold start as a failure.
@@ -248,7 +312,13 @@ fn spawn_health_watchdog(
 /// from inside the sidecar event task can deadlock the runtime. The window is
 /// NOT closed and the app is NOT auto-quit; the user may need to copy text out
 /// of a pane, so quitting stays their explicit choice.
-fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>, child_slot: ChildSlot) {
+fn report_give_up(
+    app: &tauri::AppHandle,
+    restart_count: Arc<AtomicU32>,
+    child_slot: ChildSlot,
+    expected_termination: ExpectedTermination,
+    spawn_gen: SpawnGen,
+) {
     let app_handle = app.clone();
     app.dialog()
         .message(
@@ -266,7 +336,13 @@ fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>, child_s
             if try_again {
                 restart_count.store(0, Ordering::SeqCst);
                 supervisor_log("user chose Try again — resetting the restart budget and respawning");
-                spawn_sidecar(&app_handle, restart_count, child_slot);
+                spawn_sidecar(
+                    &app_handle,
+                    restart_count,
+                    child_slot,
+                    expected_termination,
+                    spawn_gen,
+                );
             } else {
                 supervisor_log("user chose Quit after the sidecar gave up");
                 app_handle.exit(0);
@@ -278,6 +354,8 @@ fn spawn_sidecar(
     app: &tauri::AppHandle,
     restart_count: Arc<AtomicU32>,
     child_slot: ChildSlot,
+    expected_termination: ExpectedTermination,
+    spawn_gen: SpawnGen,
 ) {
     let shell = app.shell();
     let cmd = shell
@@ -293,9 +371,16 @@ fn spawn_sidecar(
         *slot = Some(child);
     }
 
+    // Claim a generation for THIS spawn. `fetch_add` returns the previous
+    // value, so `my_gen` is the number the counter now holds, and any handler
+    // holding a smaller one is looking at a child that has been replaced.
+    let my_gen = spawn_gen.fetch_add(1, Ordering::SeqCst) + 1;
+
     let app_handle = app.clone();
     let rc = restart_count.clone();
     let slot_for_events = child_slot.clone();
+    let expected_for_events = expected_termination.clone();
+    let gen_for_events = spawn_gen.clone();
     let spawned_at = std::time::Instant::now();
 
     // Log sidecar output and handle crash recovery
@@ -314,6 +399,39 @@ fn spawn_sidecar(
 
                     if status.code == Some(3) {
                         supervisor_log("sidecar exited 3: another Plexar Studio already serves 127.0.0.1:8420 — attaching, not restarting");
+                        break;
+                    }
+
+                    // ── Was this termination ours? ─────────────────────────
+                    //
+                    // The watchdog raises this flag before it kills the
+                    // bootloader, and the kill then produces exactly this
+                    // event with code 1. Restarting here is the 2026-09-11
+                    // double-spawn: the watchdog has ALREADY spawned the
+                    // replacement, and a second one races it through
+                    // instance_guard, past which both start a cloudflared.
+                    // `swap` consumes the flag, so the next crash is judged
+                    // on its own merits.
+                    if expected_for_events.swap(false, Ordering::SeqCst) {
+                        supervisor_log(
+                            "bootloader ended by the watchdog; the watchdog owns recovery",
+                        );
+                        break;
+                    }
+
+                    // ── Is this still the CURRENT child? ───────────────────
+                    //
+                    // A handler for a child that has since been replaced must
+                    // not respawn on top of the live replacement. Compared by
+                    // the generation number captured at spawn: `kill()`
+                    // consumes the handle, so there is no process identity
+                    // left to compare by the time this runs.
+                    let current_gen = gen_for_events.load(Ordering::SeqCst);
+                    if current_gen != my_gen {
+                        supervisor_log(&format!(
+                            "ignoring the exit of a superseded sidecar (spawn {} of {}) — a newer one is live",
+                            my_gen, current_gen
+                        ));
                         break;
                     }
 
@@ -354,10 +472,22 @@ fn spawn_sidecar(
                         .await;
 
                         // Respawn
-                        spawn_sidecar(&app_handle, rc, slot_for_events);
+                        spawn_sidecar(
+                            &app_handle,
+                            rc,
+                            slot_for_events,
+                            expected_for_events,
+                            gen_for_events,
+                        );
                     } else {
                         supervisor_log("sidecar exited 3 times in a row — giving up and telling the user");
-                        report_give_up(&app_handle, rc, slot_for_events);
+                        report_give_up(
+                            &app_handle,
+                            rc,
+                            slot_for_events,
+                            expected_for_events,
+                            gen_for_events,
+                        );
                     }
                     break;
                 }
@@ -386,10 +516,18 @@ pub fn run() {
         .setup(|app| {
             let restart_count = Arc::new(AtomicU32::new(0));
             let child_slot: ChildSlot = Arc::new(Mutex::new(None));
+            let expected_termination: ExpectedTermination = Arc::new(AtomicBool::new(false));
+            let spawn_gen: SpawnGen = Arc::new(AtomicU32::new(0));
             let restart_count_for_watchdog = restart_count.clone();
 
             // Spawn the sidecar and monitor it
-            spawn_sidecar(&app.handle(), restart_count, child_slot.clone());
+            spawn_sidecar(
+                &app.handle(),
+                restart_count,
+                child_slot.clone(),
+                expected_termination.clone(),
+                spawn_gen.clone(),
+            );
 
             // Wait for the server to answer BEFORE the window exists.
             //
@@ -428,7 +566,13 @@ pub fn run() {
             // app, which is the point: every other recovery path in this file
             // hangs off process termination, and a hung sidecar never
             // terminates.
-            spawn_health_watchdog(app.handle().clone(), restart_count_for_watchdog, child_slot.clone());
+            spawn_health_watchdog(
+                app.handle().clone(),
+                restart_count_for_watchdog,
+                child_slot.clone(),
+                expected_termination.clone(),
+                spawn_gen.clone(),
+            );
 
             if ready {
                 supervisor_log(&format!("server ready in {:?}", start.elapsed()));
