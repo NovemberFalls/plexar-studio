@@ -177,3 +177,41 @@ def test_slow_cold_scan_does_not_block_another_file(tmp_path, monkeypatch):
         finally:
             release.set()
         assert pending.result(timeout=2)["messages"][0]["text"] == "slow"
+
+
+def _tool_rollout(path):
+    msg = lambda role, text, **extra: {"type": "response_item", "payload": {"type": "message", "role": role, "content": [{"type": "output_text", "text": text}], **extra}}
+    rows = [
+        msg("user", "fix it"),
+        {"type": "response_item", "payload": {"type": "reasoning", "encrypted_content": "x"}},
+        {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "c1",
+                                              "input": 'text(await tools.exec_command({cmd:"git status \\"src\\"",max_output_tokens:5}));'}},
+        {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "c1", "output": [
+            {"type": "input_text", "text": "Script completed\nOutput:\n"},
+            {"type": "input_text", "text": json.dumps({"output": "nothing to commit", "exit_code": 1})}]}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "send_message", "namespace": "collaboration",
+                                              "call_id": "c2", "arguments": json.dumps({"target": "/root/w1", "message": "gAAAA"})}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c2", "output": ""}},
+        {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "c3", "output": "y" * 20000}},
+        msg("assistant", "done", phase="final_answer"),
+    ]
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+
+
+def test_full_detail_includes_tool_calls_and_output_but_default_stays_messages_only(tmp_path):
+    import codex_transcript
+    path = tmp_path / "rollout.jsonl"
+    _tool_rollout(path)
+    assert [m["role"] for m in transcript_page(path)["messages"]] == ["user", "assistant"]
+    full = transcript_page(path, detail="full")["messages"]
+    assert [(m["role"], m.get("kind")) for m in full] == [
+        ("user", None), ("tool", "call"), ("tool", "output"), ("tool", "call"), ("tool", "output"), ("assistant", None)]
+    assert full[1]["text"] == 'git status "src"' and full[1]["name"] == "exec"
+    assert full[2]["text"] == "Script completed\nOutput:\nnothing to commit\n[exit code 1]"
+    assert full[3]["text"] == "-> /root/w1" and "gAAAA" not in full[3]["text"]
+    assert full[4]["truncated"] is True and len(full[4]["text"]) == codex_transcript._TOOL_TEXT_MAX
+    assert full[5]["phase"] == "final_answer"
+    older = transcript_page(path, before=full[2]["index"], limit=1, detail="full")
+    assert [m["index"] for m in older["messages"]] == [full[1]["index"]] and older["has_more"] is True
+    uncached = codex_transcript._uncached_page(path, None, 50, True)["messages"]
+    assert uncached == full

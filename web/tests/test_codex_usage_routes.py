@@ -22,7 +22,7 @@ async def test_transcript_identity_matches_its_file_when_native_conversation_swi
     manager = SimpleNamespace(get_terminal=lambda _: session, refresh_codex_usage=lambda *_: {})
     monkeypatch.setattr(server, "pty_manager", manager)
 
-    def read_and_switch(path, before, limit):
+    def read_and_switch(path, before, limit, detail="messages"):
         assert path == "first.jsonl"
         with session.codex_usage_lock:
             session.codex_rollout_path = "second.jsonl"

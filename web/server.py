@@ -1890,7 +1890,7 @@ async def get_daily_usage(day: str | None = None):
     return await asyncio.to_thread(usage_tracker.daily_summary, day)
 
 
-def _get_codex_transcript_blocking(before: int | None, limit: int, session) -> dict:
+def _get_codex_transcript_blocking(before: int | None, limit: int, session, detail: str = "messages") -> dict:
     """Blocking body of get_codex_transcript -- moved off the loop, see N04."""
     from codex_transcript import transcript_page
 
@@ -1903,21 +1903,24 @@ def _get_codex_transcript_blocking(before: int | None, limit: int, session) -> d
         binding_status = session.codex_usage.get("binding_status")
     if not rollout_path:
         return {"messages": [], "before": None, "has_more": False, "available": False}
-    return {**transcript_page(rollout_path, max(0, before) if before is not None else None, limit),
+    return {**transcript_page(rollout_path, max(0, before) if before is not None else None, limit, detail),
             "session_id": session_id, "binding_status": binding_status}
 
 
 @app.get("/api/terminals/{terminal_id}/transcript")
-async def get_codex_transcript(terminal_id: str, before: int | None = None, limit: int = 50):
+async def get_codex_transcript(terminal_id: str, before: int | None = None, limit: int = 50, detail: str = "messages"):
     """Read only the native transcript already bound to this terminal's process.
 
     transcript_page() reads the rollout file from disk; run off the event
-    loop (N04).
+    loop (N04). ``detail=full`` adds Codex's tool calls and their output; the
+    default stays messages-only because the phone's chat view reads this route.
     """
+    if detail not in ("messages", "full"):
+        return JSONResponse({"error": "detail must be messages or full"}, status_code=400)
     session = pty_manager.get_terminal(terminal_id)
     if session is None or session.harness != "codex":
         return JSONResponse({"error": "Codex terminal not found"}, status_code=404)
-    return await asyncio.to_thread(_get_codex_transcript_blocking, before, limit, session)
+    return await asyncio.to_thread(_get_codex_transcript_blocking, before, limit, session, detail)
 
 
 # ── Spend guardrails ─────────────────────────────────────

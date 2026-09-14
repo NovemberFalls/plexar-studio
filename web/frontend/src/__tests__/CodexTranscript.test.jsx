@@ -56,7 +56,7 @@ describe("saved Codex conversation", () => {
     await screen.findByText("Chat B");
     expect(screen.queryByText("Chat A")).toBeNull();
     expect(screen.queryByText("Old offset in B")).toBeNull();
-    expect(fetch.mock.calls[2][0]).toBe("/api/terminals/term-1/transcript?limit=50");
+    expect(fetch.mock.calls[2][0]).toBe("/api/terminals/term-1/transcript?limit=100&detail=full");
     expect(screen.queryByText(/Showing the last identified conversation/)).toBeNull();
   });
 
@@ -67,7 +67,7 @@ describe("saved Codex conversation", () => {
     await screen.findByText("<img src=x onerror=alert(1)>");
     expect(container.querySelector("img")).toBeNull();
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch.mock.calls[0][0]).toBe("/api/terminals/term-1/transcript?limit=50");
+    expect(fetch.mock.calls[0][0]).toBe("/api/terminals/term-1/transcript?limit=100&detail=full");
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   });
@@ -137,7 +137,7 @@ describe("history loading continuity", () => {
       .mockResolvedValueOnce(response({ ...page([message(2, "Retry worked")]), session_id: "a" }));
     vi.stubGlobal("fetch", fetch);
     render(<CodexTranscript terminalId="timeout" onClose={vi.fn()} />);
-    await act(async () => { vi.advanceTimersByTime(10000); });
+    await act(async () => { vi.advanceTimersByTime(30000); });
     expect(screen.getByRole("alert")).toHaveTextContent("timed out");
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Refresh" })));
     expect(screen.getByText("Retry worked")).toBeVisible();
@@ -238,4 +238,23 @@ it("places pending controls in the pane layout host and removes them when readab
   expect(host).toBeEmptyDOMElement();
   expect(screen.getByRole("dialog")).toContainElement(screen.getByText("Ready in overlay"));
   view.unmount(); host.remove();
+});
+
+it("shows what Codex ran, with its output folded into the same block", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => response(page([
+    { index: 1, role: "user", text: "Fix the build", timestamp: "2026-09-13T19:49:05.794Z" },
+    { index: 2, role: "assistant", phase: "commentary", text: "Checking the diff." },
+    { index: 3, role: "tool", kind: "call", name: "exec", call_id: "c1", text: "git diff --check" },
+    { index: 4, role: "tool", kind: "output", call_id: "c1", text: "warning: CRLF" },
+    { index: 5, role: "tool", kind: "output", call_id: "older-page", text: "orphan output" },
+    { index: 6, role: "assistant", text: "Done." },
+  ]))));
+  render(<CodexTranscript terminalId="term-1" presentation="scroll" onClose={vi.fn()} />);
+  await screen.findByText("Done.");
+  expect(screen.getByText("Ran")).toBeInTheDocument();
+  expect(screen.getAllByText("git diff --check").length).toBeGreaterThan(0);
+  const outputs = screen.getAllByTestId("tool-output");
+  expect(outputs.map((node) => node.textContent)).toEqual(["warning: CRLF", "orphan output"]);
+  expect(screen.getByText(/progress/)).toBeInTheDocument();
+  expect(screen.queryByText("2026-09-13T19:49:05.794Z")).toBeNull();
 });
