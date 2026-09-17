@@ -84,7 +84,8 @@ def _entry(row, offset, native, full):
         if full and isinstance(payload.get("phase"), str):
             entry["phase"] = payload["phase"]
         return entry
-    if not native and row.get("type") == "event_msg" and kind in ("user_message", "agent_message")             and isinstance(payload.get("message"), str):
+    if (not native and row.get("type") == "event_msg" and kind in ("user_message", "agent_message")
+            and isinstance(payload.get("message"), str)):
         return {**base, "role": "user" if kind == "user_message" else "assistant", "text": payload["message"]}
     if not full or row.get("type") != "response_item":
         return None

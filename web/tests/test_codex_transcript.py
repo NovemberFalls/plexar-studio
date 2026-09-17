@@ -180,17 +180,22 @@ def test_slow_cold_scan_does_not_block_another_file(tmp_path, monkeypatch):
 
 
 def _tool_rollout(path):
-    msg = lambda role, text, **extra: {"type": "response_item", "payload": {"type": "message", "role": role, "content": [{"type": "output_text", "text": text}], **extra}}
+    def msg(role, text, **extra):
+        return {"type": "response_item", "payload": {
+            "type": "message", "role": role, "content": [{"type": "output_text", "text": text}], **extra}}
+
+    exec_input = 'text(await tools.exec_command({cmd:"git status \\"src\\"",max_output_tokens:5}));'
+    send_args = json.dumps({"target": "/root/w1", "message": "gAAAA"})
     rows = [
         msg("user", "fix it"),
         {"type": "response_item", "payload": {"type": "reasoning", "encrypted_content": "x"}},
         {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "c1",
-                                              "input": 'text(await tools.exec_command({cmd:"git status \\"src\\"",max_output_tokens:5}));'}},
+                                              "input": exec_input}},
         {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "c1", "output": [
             {"type": "input_text", "text": "Script completed\nOutput:\n"},
             {"type": "input_text", "text": json.dumps({"output": "nothing to commit", "exit_code": 1})}]}},
         {"type": "response_item", "payload": {"type": "function_call", "name": "send_message", "namespace": "collaboration",
-                                              "call_id": "c2", "arguments": json.dumps({"target": "/root/w1", "message": "gAAAA"})}},
+                                              "call_id": "c2", "arguments": send_args}},
         {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c2", "output": ""}},
         {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "c3", "output": "y" * 20000}},
         msg("assistant", "done", phase="final_answer"),

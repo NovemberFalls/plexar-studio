@@ -32,7 +32,6 @@ import logging_config
 logging_config.setup("WARNING")
 
 from server import app
-import server as server_module
 from usage_tracker import usage_tracker
 
 _WEB_DIR = Path(__file__).resolve().parent.parent
