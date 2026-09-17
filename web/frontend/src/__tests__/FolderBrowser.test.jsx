@@ -106,6 +106,9 @@ async function renderBrowser(props = {}, routes = browseRoutes()) {
     />
   );
   await waitFor(() => expect(screen.getByRole("listbox")).toBeInTheDocument());
+  // The listbox renders BEFORE the listing arrives; on a slow CI runner the
+  // rows land after the assertion that follows. Wait for the fetch to settle.
+  await waitFor(() => expect(screen.queryByLabelText("Loading folder")).toBeNull());
   return { ...utils, onPathChange, onSelectPath, onCreateHere };
 }
 

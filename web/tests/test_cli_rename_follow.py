@@ -187,7 +187,10 @@ class TestRefreshCliTitle:
             assert self.mgr._refresh_cli_title(s) is None
         finally:
             logger.removeHandler(caplog.handler)
-        renames = [r for r in caplog.records if "renamed by the CLI" in r.getMessage()]
+        # Whether cockpit.pty propagates depends on test order (logging_config.setup
+        # turns it off). When it does, the SAME record reaches caplog twice: via
+        # the handler attached above and via the root. Count records, not arrivals.
+        renames = {id(r) for r in caplog.records if "renamed by the CLI" in r.getMessage()}
         assert len(renames) == 1
 
     @pytest.mark.parametrize("binary", ["claude", "Codex", "CLAUDE"])
