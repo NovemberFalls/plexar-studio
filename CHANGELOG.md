@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.29] - 2026-09-13
+
+### Changed
+- Codex **Conversation history** now shows everything Codex did, not only chat text: each command it ran with its output folded underneath, progress notes versus final answers, and local times. Long output is capped at 12 KB and marked. The first open of a very large Codex log is about twice as fast, and the view waits up to 30 s instead of 10 s.
+
+### Added
+- **Plexar Mobile 1.1.0** for Android is attached to this release (arm64 and armv7 APKs).
+
+## [2.1.28] - 2026-09-11
+
+### Fixed
+- Terminals no longer disconnect in bulk when the server stalls. Codex session discovery enumerated every open file handle on the machine, which held Python's lock for seconds at a time; it now lists Codex's session folder instead.
+- A stall of more than 20 s no longer closes every pane: the WebSocket keepalive now allows 120 s, matching the watchdog.
+- The watchdog starts exactly one replacement server, not two.
+
+## [2.1.27] - 2026-09-10
+
+### Fixed
+- Installing an update no longer stalls on a locked `plexar-studio-server.exe`: the installer now stops the server by its current name.
+
+## [2.1.26] - 2026-09-10
+
+### Fixed
+- Six or more busy sessions no longer starve the server, and the watchdog no longer kills a server that is merely overloaded.
+
+## [2.1.25] - 2026-09-10
+
+### Fixed
+- No blocking work runs on the server's event loop any more, so one slow request cannot freeze every pane.
+
+## [2.1.24] - 2026-09-09
+
+### Fixed
+- Recovery from a hung server actually starts a replacement, and every recovery is written to a supervisor log.
+
+## [2.1.23] - 2026-09-09
+
+### Fixed
+- A server that is running but no longer answering is recovered automatically, without Task Manager.
+
+## [2.1.22] - 2026-09-09
+
+### Fixed
+- Image attachments in Codex sessions render in Plexar Mobile's chat view.
+
 ## [2.1.21] - 2026-09-09
 
 ### Fixed

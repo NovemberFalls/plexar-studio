@@ -4,11 +4,9 @@ A desktop workspace for Claude Code and Codex CLI sessions. Run terminals side b
 
 **AGPL-3.0** · [Latest release](https://github.com/NovemberFalls/plexar-studio/releases/latest)
 
-**2.1.7:** readable history during loading, faster terminal replay and Windows clipboard image recovery, with compatible upgrades for existing installations. See the [release notes](CHANGELOG.md#217---2026-09-08).
+**2.1.29:** Codex conversation history shows the commands Codex ran and their output, and a busy or stalled server no longer disconnects your terminals. See the [release notes](CHANGELOG.md#2129---2026-09-13).
 
-[![Plexar Studio](screenshot.svg)](https://github.com/NovemberFalls/plexar-studio/releases/latest)
-
-> **Demo video:** the [v1.3.3 demo](https://github.com/NovemberFalls/plexar-studio/releases/download/v1.3.3/demo.mp4) still shows the general idea, but the interface has changed considerably since. A current walkthrough is in progress.
+> **See it in action:** [watch the demo on X](https://x.com/Falls_November/status/2085765847985819687/video/1) for how Studio looks today and how to use it.
 
 ---
 
@@ -41,6 +39,15 @@ Grab the Windows installer from [the latest release](https://github.com/November
 The desktop app bundles the server and starts it automatically; no browser needed. It checks for updates on launch and offers **Install & Restart** when one is available.
 
 > **Antivirus:** PyInstaller executables are sometimes flagged heuristically. Add an exception for `Plexar Studio` if that happens.
+
+### Plexar Mobile (Android)
+
+Use your Studio sessions from your phone. The same release carries the Android app:
+
+- **`Plexar-Mobile_<version>_android-arm64.apk`** for almost every current Android phone
+- **`Plexar-Mobile_<version>_android-armv7.apk`** for older 32-bit phones
+
+Install the APK (allow installs from your browser when Android asks), then turn on **Settings ▸ Remote** in Studio and scan the pairing code with the app. Remote access is off until you enable it.
 
 ---
 
