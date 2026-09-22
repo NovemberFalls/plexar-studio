@@ -196,12 +196,17 @@ describe("structural — the boundaries are actually MOUNTED", () => {
     expect(src).toMatch(/import ViewBoundary from ".\/components\/ViewBoundary"/);
   });
 
-  it("wraps all FOUR full-area views", () => {
-    // A count, not a spot check: adding a fifth destination without a boundary
-    // is the way this regresses, and it should cost a red suite.
+  it("wraps EVERY full-area view", () => {
+    // A count, not a spot check: adding a destination without a boundary is the
+    // way this regresses, and it should cost a red suite. The number moved 4->5
+    // when Plexar Chat became a full-area section (2026-09-22) — which is this
+    // guard working, not a stale assertion. The views are NAMED rather than
+    // left as a bare integer so the next person to move it has to say which
+    // view they added.
+    const FULL_AREA_VIEWS = ["Workspace", "Settings", "Reports", "Fleet", "Plexar Chat"];
     const opens = src.match(/<ViewBoundary\b/g) || [];
-    expect(opens.length).toBe(4);
-    expect((src.match(/<\/ViewBoundary>/g) || []).length).toBe(4);
+    expect(opens.length).toBe(FULL_AREA_VIEWS.length);
+    expect((src.match(/<\/ViewBoundary>/g) || []).length).toBe(FULL_AREA_VIEWS.length);
   });
 
   it("every boundary passes both a name and a resetKey", () => {
