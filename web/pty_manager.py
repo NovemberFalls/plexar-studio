@@ -1448,6 +1448,43 @@ class PtyManager:
                     f" -c model_providers.{local_provider_id}.env_key={_CODEX_LOCAL_KEY_ENV}"
                     f" -c model_providers.{local_provider_id}.wire_api=responses"
                 )
+                # TELL CODEX THE WINDOW THE ENGINE ACTUALLY HAS.
+                #
+                # Codex carries its own per-model metadata table and a served
+                # name like "qwen3.8-27b" is not in it, so it warns ("Model
+                # metadata for `qwen3.8-27b` not found. Defaulting to fallback
+                # metadata; this can degrade performance and cause issues") and
+                # substitutes a generic window. MEASURED 2026-09-22: it showed
+                # `72.6K/258.4K` against a real max_model_len of 131072 -- about
+                # TWICE the true capacity, on turn one. Unfixed it keeps filling
+                # toward the imagined ceiling and starts getting refused by vLLM
+                # past the real limit while its own ring still shows headroom,
+                # so the failure reads as "Codex broke" rather than "context
+                # exhausted".
+                #
+                # EMITTED ONLY WHEN THE ENGINE PUBLISHED A WINDOW. A guess here
+                # would be worse than Codex's own fallback, because ours arrives
+                # looking authoritative. None -> no flag, and Codex keeps its
+                # own (wrong, but its own) default.
+                #
+                # Read from cache, never fetched: create_terminal runs ON the
+                # event loop (see _create_terminal_from_body, which calls it
+                # directly rather than via to_thread), so a network call here
+                # would park the loop for every spawn. The cache is filled by
+                # GET /api/local/{id}/models -- the same call that had to
+                # succeed for this model to be offerable in the first place.
+                _ctx = _server.resolve_local_context_window(local_provider_id, local_model_id)
+                if _ctx:
+                    cmd += f" -c model_context_window={int(_ctx)}"
+                    # Same derivation the claude harness already uses for this
+                    # engine (resolve_local_output_reservation: a quarter of the
+                    # window, floored at 1024, capped at 8000) rather than a
+                    # second rule invented here -- one number per engine, and
+                    # small enough that prompt+output cannot exceed the window
+                    # and earn a refusal.
+                    _out = _server.resolve_local_output_reservation(local_provider_id, local_model_id)
+                    if _out:
+                        cmd += f" -c model_max_output_tokens={int(_out)}"
         elif provider in ("openrouter", "local"):
             # OpenRouter slugs and local model ids (e.g. "qwen/qwen3-coder-next"
             # or "/models/Qwen3-Coder-30B-A3B-AWQ") are not valid --model values

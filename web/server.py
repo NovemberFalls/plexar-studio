@@ -5530,6 +5530,34 @@ def _normalize_plexar_raw_model(m: dict) -> dict:
         # which instance a name meant.
         out["instance_id"] = envelope.get("instance_id")
 
+    # THE PUBLISHED WINDOW, WHICH THIS NORMALIZER USED TO DROP ON THE FLOOR.
+    # Plexar's catalog carries `max_model_len` exactly like vLLM's does (it is a
+    # vLLM gateway), and _normalize_vllm_raw_model has always mapped it -- this
+    # sibling never did, so every Plexar model arrived with a null window.
+    #
+    # Measured 2026-09-22: the rig publishes max_model_len 131072 while
+    # /api/local/plexar-vllm/models reported max_context_length null. Three
+    # things were reading that null and quietly degrading:
+    #   * Codex had no window to be told, so it fell back to its own generic
+    #     metadata and displayed 72.6K/258.4K -- roughly TWICE the real 131072.
+    #     It would keep packing the conversation toward an imagined ceiling and
+    #     start getting refused by vLLM while the ring still showed headroom.
+    #   * resolve_local_output_reservation returned None, so the claude harness
+    #     used the flat 8000 fallback instead of the derived quarter-window the
+    #     function exists to compute.
+    #   * any local context ring had nothing to render.
+    # The data was there the whole way; only this mapping was missing.
+    #
+    # Same both-fields rule as the vLLM sibling: for a vLLM-backed engine the
+    # served context IS the loaded context, and a genuine value already present
+    # is never overwritten.
+    max_model_len = m.get("max_model_len")
+    if max_model_len is not None:
+        if out.get("max_context_length") is None:
+            out["max_context_length"] = max_model_len
+        if out.get("loaded_context_length") is None:
+            out["loaded_context_length"] = max_model_len
+
     if out.get("quantization") is None:
         sniff_source = m.get("id") or ""
         out["quantization"] = _sniff_quantization(sniff_source) if sniff_source else None
@@ -5861,6 +5889,32 @@ def resolve_local_auth_token(provider_id: str) -> str | None:
         _url, auth = _plexar_config()
         return auth.get("bearer") or None
     return (provider.get("auth") or {}).get("bearer") or None
+
+
+def resolve_local_context_window(provider_id: str, model_id: str) -> int | None:
+    """The context window a local model actually has, or None if unpublished.
+
+    THE CODEX HARNESS HAS NO OTHER WAY TO KNOW. Unlike the claude CLI it carries
+    its own per-model metadata table, and a served name like "qwen3.8-27b" is not
+    in it -- so it warns ("Model metadata for `qwen3.8-27b` not found. Defaulting
+    to fallback metadata; this can degrade performance and cause issues") and
+    substitutes a generic window.
+
+    That substitution is not cosmetic. MEASURED 2026-09-22: Codex displayed
+    `72.6K/258.4K` against an engine whose real `max_model_len` is 131072 -- it
+    believed it had roughly TWICE the context it had, on turn one. Left alone it
+    keeps filling toward the imagined ceiling and starts getting refused by vLLM
+    somewhere past the real limit, while its own ring still shows headroom. The
+    failure reads as "Codex broke", not "context exhausted".
+
+    None means the provider published no window, and the caller must then emit
+    NO flag rather than a guess: a wrong window is worse than Codex's own
+    fallback, because ours would look authoritative.
+    """
+    window = context_window.resolve_context_window(model_id, provider="local")
+    if not isinstance(window, int) or window <= 0:
+        return None
+    return window
 
 
 def resolve_local_output_reservation(provider_id: str, model_id: str) -> int | None:
