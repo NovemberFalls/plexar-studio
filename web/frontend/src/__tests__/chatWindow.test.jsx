@@ -174,3 +174,27 @@ describe("the default address is written once", () => {
     expect(fromApp).toBe(fromStore);
   });
 });
+
+// ── the two defects the 2.1.33 trial build surfaced ───────
+//
+// Both passed every test above and failed on the owner's first click. Neither is
+// observable from a unit test's runtime, so both are pinned structurally.
+
+describe("regressions from the first trial build", () => {
+  it("Tauri is built with the `unstable` feature the child-webview API requires", () => {
+    // Webview::new is gated behind it. Without it the JS API, the capability
+    // grant and every test are all correct and the constructor still refuses:
+    // "this feature requires the `unstable` flag on Cargo.toml".
+    const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+    expect(/^tauri = \{[^}]*features = \[[^\]]*"unstable"/m.test(cargo)).toBe(true);
+  });
+
+  it("ChatView's create effect does NOT depend on onError", () => {
+    // App passes an inline arrow. As a dep it re-ran creation on every render;
+    // each failure toasted, the toast re-rendered App, and the loop stacked
+    // dozens of identical toasts. onError must ride a ref.
+    const src = fs.readFileSync("src/components/ChatView.jsx", "utf8");
+    expect(src.includes("}, [isTauri, url, sync]);")).toBe(true);
+    expect(/\}, \[[^\]]*onError[^\]]*\]\);/.test(src)).toBe(false);
+  });
+});

@@ -53,6 +53,12 @@ export default function ChatView({ url, onError }) {
     () => typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__),
   );
   const [failed, setFailed] = useState(null);
+  // onError lives in a REF, never in an effect's deps. App passes an inline
+  // arrow, so its identity changes every render; as a dep it re-ran the create
+  // effect on every render, each failed attempt toasted, the toast re-rendered
+  // App, and the loop stacked dozens of identical toasts (2.1.33 trial build).
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
 
   /** Push the measured rect of our placeholder onto the webview. The DOM node
    *  is the single source of truth for geometry — the webview is positioned
@@ -105,13 +111,13 @@ export default function ChatView({ url, onError }) {
         view.once("tauri://error", (e) => {
           const msg = typeof e?.payload === "string" ? e.payload : "the window manager refused it";
           setFailed(msg);
-          onError?.(msg);
+          onErrorRef.current?.(msg);
         });
         if (cancelled) { try { view.close(); } catch { /* already gone */ } return; }
         viewRef.current = view;
         sync();
       } catch (err) {
-        if (!cancelled) { setFailed(err.message); onError?.(err.message); }
+        if (!cancelled) { setFailed(err.message); onErrorRef.current?.(err.message); }
       }
     })();
 
@@ -123,7 +129,7 @@ export default function ChatView({ url, onError }) {
       // alive for a section the user has left.
       if (v) { try { v.close(); } catch { /* window already tearing down */ } }
     };
-  }, [isTauri, url, sync, onError]);
+  }, [isTauri, url, sync]);
 
   // Geometry and overlay tracking. ResizeObserver catches layout changes the
   // window-resize event does not (the drawer, the inspector); the
