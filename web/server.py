@@ -4517,12 +4517,24 @@ async def get_local_providers():
             # Refreshed first so a plexar entry carries the URL and credential
             # the user configured -- the probe below dials it.
             resolved = _require_provider(p["id"]) or p
+            # This whole function runs in a to_thread (see below), so it is the
+            # right place to pay for the blocking scope probe -- and it is the
+            # call the frontend makes on mount, so the cache is warm before any
+            # capability-gated surface is rendered.
+            if p.get("kind") == "plexar":
+                _plexar_scope_refresh(resolved)
+                resolved = _require_provider(p["id"]) or p
             rows.append({
                 "id": p["id"],
                 "label": p["label"],
                 "kind": p["kind"],
                 "scope": p["scope"],
-                "capabilities": p["capabilities"],
+                # The NARROWED view, not the raw registry list. The frontend
+                # builds its surfaces off this payload, so publishing the
+                # declared set here would re-offer every page the credential
+                # cannot use -- the narrowing would exist and change nothing a
+                # user sees.
+                "capabilities": resolved["capabilities"],
                 "endpoint_hint": _endpoint_hint(p),
                 "managed": _provider_managed(p),
                 # true / false / null -- null is UNKNOWN and must never be
@@ -5560,6 +5572,152 @@ def _plexar_config() -> tuple[str, dict]:
     }
 
 
+# ── What can THIS CREDENTIAL do? (Plexar scope → capabilities) ──
+#
+# A CAPABILITY IS A PROPERTY OF THE CREDENTIAL, NOT OF THE BACKEND KIND. The
+# registry declares what a Plexar rig can serve; a key's SCOPE decides how much
+# of that the holder may reach. Studio conflated the two, advertised every
+# capability to everyone, called the routes, and handed the user Plexar's own
+# refusal prose:
+#
+#     "This credential is scoped 'guest' -- inference only ... call the models
+#      that are currently serving ... This route is outside that scope."
+#
+# Reported by a user trying to connect a guest key. MEASURED on this rig the
+# same day with a `model-control` key, so it is not only a guest problem:
+#     /v1/models 200 · /api/me 200 · /api/status 200
+#     /api/reports/summary 403 · /api/reports/timeseries 403 · /api/planner/gpus 403
+#
+# Same shape as the Codex/local-provider defect: answering a question about one
+# instance from the category it belongs to. Ask the credential instead.
+#
+# Narrowing here means the existing uniform gate ("<cap> not in capabilities" ->
+# 404 "capability not available") does the rest, so the surface simply is not
+# offered. That is the difference between a product that does not show you a
+# page and a product that shows you an error.
+_PLEXAR_SCOPE_TTL = 300.0
+_plexar_scope_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
+
+#: Capabilities each Plexar scope may reach. A scope ABSENT from this map, and a
+#: scope we could not read at all, both narrow NOTHING -- see _require_provider.
+#:
+#: `model-control` is MEASURED (the three 403s above). `guest` is taken from
+#: Plexar's own published scope prose ("inference only ... Cannot change
+#: anything, cannot see anyone else's usage"), NOT from a probe: there is no
+#: guest key on this machine and Plexar has no self-service minting, so the
+#: guest row is UNVERIFIED. That is exactly why the reactive demotion below
+#: exists -- the table is not allowed to be the only defence.
+_PLEXAR_SCOPE_CAPABILITIES: dict[str, set[str]] = {
+    "owner": set(),  # empty set == no narrowing; owner reaches everything declared
+    "model-control": {"models", "health", "identity", "instances", "model-control"},
+    "guest": {"models", "health", "identity"},
+}
+
+
+def _plexar_scope(provider: dict) -> str | None:
+    """This credential's Plexar scope, READ FROM CACHE ONLY. Never dials.
+
+    **THIS FUNCTION MUST NOT DO I/O, AND THAT IS NOT A STYLE PREFERENCE.** Its
+    caller is `_require_provider`, which is synchronous and is invoked inline by
+    every `/api/local/*` async route. A blocking `urlopen` behind it therefore
+    parks the single event loop for up to `_LOCAL_PROVIDER_TIMEOUT` on every one
+    of those calls -- which is exactly the class of defect that produced the
+    2026-09-11 terminal-disconnect incident (a GIL/loop-blocking worker on a
+    route path, every pane dropped). The first draft of this change did precisely
+    that; the timeseries tests caught it by going 404 while the probe dialled the
+    real rig from inside a unit test.
+
+    So the probe is split out into `_plexar_scope_refresh` and only ever runs
+    inside an existing `asyncio.to_thread` context -- the same rule
+    `_probe_responses_api` already follows.
+
+    A cold cache returns None, which is UNKNOWN, which narrows NOTHING. That is
+    the safe direction: before the first refresh the user sees every capability
+    the rig declares (and the reactive 403 demotion still protects them), rather
+    than having working surfaces hidden by a probe that has not run yet.
+    """
+    url = (provider.get("management_url") or "").rstrip("/")
+    bearer = (provider.get("auth") or {}).get("bearer") or ""
+    # Process-local cache key only -- never logged, never persisted, never sent.
+    # Keyed on the bearer as well as the url so entering a NEW key re-probes at
+    # once instead of serving the previous key's scope until the TTL lapses.
+    ck = (url, bearer)
+    now = _time.monotonic()
+    hit = _plexar_scope_cache.get(ck)
+    if hit and (now - hit[0]) < _PLEXAR_SCOPE_TTL:
+        return hit[1]
+    return None
+
+
+def _scope_from_me(me: dict | None) -> str | None:
+    """`identity.scope` out of a `/api/me` body, or None if it is not stated."""
+    ident = (me or {}).get("identity")
+    if isinstance(ident, dict):
+        raw = ident.get("scope")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def _plexar_scope_refresh(provider: dict, me: dict | None = None) -> str | None:
+    """BLOCKING. Refresh the cached scope. Call ONLY from an `asyncio.to_thread`.
+
+    Pass `me` when the caller has already fetched `/api/me` (the identity route
+    has), so the scope rides a request that was being made anyway rather than
+    costing a second round trip per poll.
+    """
+    url = (provider.get("management_url") or "").rstrip("/")
+    bearer = (provider.get("auth") or {}).get("bearer") or ""
+    ck = (url, bearer)
+    if me is None:
+        try:
+            me = plexar_client.fetch_me(url, provider.get("auth"))
+        except Exception:  # noqa: BLE001 - a scope probe must never break a route
+            logger.debug("Plexar scope probe failed", exc_info=True)
+            me = None
+    scope = _scope_from_me(me)
+    _plexar_scope_cache[ck] = (_time.monotonic(), scope)
+    return scope
+
+
+def _capabilities_for_scope(declared: list[str], scope: str | None) -> list[str]:
+    """`declared` narrowed to what `scope` may reach, order preserved.
+
+    UNKNOWN (None) and any scope name this build has never heard of narrow
+    NOTHING. A scope Plexar adds later must not silently disable a user's
+    working surfaces because this table predates it -- the reactive demotion
+    catches that case with one real refusal instead of a guess.
+    """
+    allowed = _PLEXAR_SCOPE_CAPABILITIES.get(scope or "")
+    if not allowed:
+        return list(declared)
+    return [c for c in declared if c in allowed]
+
+
+def _demote_forbidden_capability(provider_id: str, capability: str, payload: dict) -> dict:
+    """Drop `capability` when Plexar said 403, then hand the payload back.
+
+    THE BACKSTOP FOR A MAPPING THAT CANNOT BE FULLY TESTED. A 403 is not a
+    transient failure -- it is the server stating this credential may not have
+    this -- so the honest response is to stop offering it rather than re-ask
+    every poll and re-surface the same refusal. The user sees at most one.
+
+    Deliberately narrow: only the capability that was actually refused, only on
+    403, and never on 401 (a bad key is a credential problem whose remedy is to
+    fix the key, not to hide the feature).
+    """
+    if not isinstance(payload, dict) or payload.get("reason") != "forbidden":
+        return payload
+    provider = _PROVIDERS.get(provider_id)
+    if provider and capability in provider.get("capabilities", []):
+        provider["capabilities"] = [c for c in provider["capabilities"] if c != capability]
+        logger.info(
+            "Plexar refused %r for this credential's scope; capability withdrawn "
+            "so it is no longer offered", capability,
+        )
+    return payload
+
+
 def _require_provider(provider_id: str):
     """Look up a provider by id, or None if unknown.
 
@@ -5572,6 +5730,16 @@ def _require_provider(provider_id: str):
         provider["broker_url"] = url
         provider["management_url"] = url
         provider["auth"] = auth
+        # Narrow to what THIS CREDENTIAL may reach. Returned as a copy rather
+        # than written back to the registry: the declared list is what the rig
+        # can serve and must survive a key change, while this view is per-call
+        # and follows whoever is authenticated right now. (The reactive
+        # demotion is the one path that edits the registry, because a measured
+        # 403 outranks the table.)
+        scope = _plexar_scope(provider)
+        narrowed = _capabilities_for_scope(provider["capabilities"], scope)
+        if narrowed != provider["capabilities"]:
+            provider = {**provider, "capabilities": narrowed}
     return provider
 
 
@@ -6205,9 +6373,9 @@ async def get_provider_instances(provider_id: str):
         return JSONResponse({"error": "unknown provider"}, status_code=404)
     if "instances" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
-    return JSONResponse(
+    return JSONResponse(_demote_forbidden_capability(provider_id, "instances",
         await asyncio.to_thread(plexar_client.fetch_status, provider["management_url"], provider.get("auth"))
-    )
+    ))
 
 
 @app.get("/api/local/{provider_id}/reports")
@@ -6224,12 +6392,12 @@ async def get_provider_reports(provider_id: str, range: str = "lifetime"):
             {"error": f"range must be one of {list(plexar_client.REPORT_RANGES)}"},
             status_code=400,
         )
-    return JSONResponse(
+    return JSONResponse(_demote_forbidden_capability(provider_id, "reports",
         await asyncio.to_thread(
             plexar_client.fetch_reports, provider["management_url"], range,
             provider.get("auth"),
         )
-    )
+    ))
 
 
 @app.get("/api/local/{provider_id}/identity")
@@ -6249,11 +6417,17 @@ async def get_provider_identity(provider_id: str):
         return JSONResponse({"error": "unknown provider"}, status_code=404)
     if "identity" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
-    return JSONResponse(
-        await asyncio.to_thread(
-            plexar_client.fetch_me, provider["management_url"], provider.get("auth")
-        )
-    )
+
+    def _fetch_and_learn_scope() -> dict:
+        # /api/me IS the scope's source, so this call answers the route AND
+        # refreshes the capability narrowing for free -- no second round trip,
+        # and it is already off the loop in the to_thread below.
+        me = plexar_client.fetch_me(provider["management_url"], provider.get("auth"))
+        if provider.get("kind") == "plexar":
+            _plexar_scope_refresh(provider, me)
+        return me
+
+    return JSONResponse(await asyncio.to_thread(_fetch_and_learn_scope))
 
 
 @app.get("/api/local/{provider_id}/timeseries")
@@ -6285,13 +6459,13 @@ async def get_provider_timeseries(
             {"error": f"bucket must be one of {list(plexar_client.TIMESERIES_BUCKETS)}"},
             status_code=400,
         )
-    return JSONResponse(
+    return JSONResponse(_demote_forbidden_capability(provider_id, "timeseries",
         await asyncio.to_thread(
             plexar_client.fetch_timeseries,
             provider["management_url"], range, bucket, instance_id,
             provider.get("auth"),
         )
-    )
+    ))
 
 
 @app.get("/api/local/{provider_id}/gpus")
@@ -6302,9 +6476,9 @@ async def get_provider_gpus(provider_id: str):
         return JSONResponse({"error": "unknown provider"}, status_code=404)
     if "gpus" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
-    return JSONResponse(
+    return JSONResponse(_demote_forbidden_capability(provider_id, "gpus",
         await asyncio.to_thread(plexar_client.fetch_gpus, provider["management_url"], provider.get("auth"))
-    )
+    ))
 
 
 # ── Model control (load / unload / restart) ───────────────
