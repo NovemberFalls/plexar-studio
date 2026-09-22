@@ -7,6 +7,7 @@
 import { useState, useEffect } from "react";
 import { PanelLeft, PanelRight, ChevronDown, KeyRound, Cpu, LayoutGrid, Rows3, StretchHorizontal } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
+import PlexarKeyModal from "./PlexarKeyModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 import {
   FALLBACK_MODEL_GROUPS,
@@ -112,6 +113,8 @@ export default function TopBar({
   const [effortOpen, setEffortOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
   const [openRouterOpen, setOpenRouterOpen] = useState(false);
+  const [plexarOpen, setPlexarOpen] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
   const [localOpen, setLocalOpen] = useState(false);
   // tri-state: null = not yet checked, true/false = last known GET result
   const [openRouterConfigured, setOpenRouterConfigured] = useState(null);
@@ -192,6 +195,7 @@ export default function TopBar({
     setEffortOpen(false);
     setThemeOpen(false);
     setLocalOpen(false);
+    setKeysOpen(false);
   }
 
   // Report model-picker visibility upward (see onPickerOpenChange).
@@ -464,16 +468,58 @@ export default function TopBar({
         )}
       </div>
 
-      {/* OpenRouter settings */}
-      <button
-        onClick={() => { closeAll(); setOpenRouterOpen(true); }}
-        className="transition-colors hover-bg-surface"
-        style={{ display: "flex", padding: 5, borderRadius: 7, color: "var(--cc-dim, var(--text-secondary))" }}
-        title="OpenRouter settings"
-        aria-label="OpenRouter settings"
-      >
-        <KeyRound size={16} />
-      </button>
+      {/* Provider keys. There is more than one credentialed provider now
+          (OpenRouter, and a Plexar-LLM rig reached the same way — an address
+          and a bearer token), so the key icon opens a chooser rather than one
+          provider's dialog. The model picker's disabled-group hints point
+          here by name, so this control must stay the single place a user goes
+          to make a provider group light up. */}
+      <div className="relative">
+        <button
+          onClick={() => { const wasOpen = keysOpen; closeAll(); setKeysOpen(!wasOpen); }}
+          className="transition-colors hover-bg-surface"
+          style={{ display: "flex", padding: 5, borderRadius: 7, color: "var(--cc-dim, var(--text-secondary))" }}
+          title="Provider keys"
+          aria-label="Provider keys"
+          aria-expanded={keysOpen}
+          aria-haspopup="menu"
+        >
+          <KeyRound size={16} />
+        </button>
+        {keysOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setKeysOpen(false)} aria-hidden="true" />
+            <div
+              role="menu"
+              aria-label="Provider keys"
+              className="absolute right-0 mt-1 rounded-lg py-1 z-50"
+              style={{
+                minWidth: 190,
+                backgroundColor: "var(--bg-elevated)",
+                border: "1px solid var(--border-color)",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+              }}
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setKeysOpen(false); setOpenRouterOpen(true); }}
+                className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                style={{ color: "var(--text-primary)" }}
+              >
+                OpenRouter
+              </button>
+              <button
+                role="menuitem"
+                onClick={() => { setKeysOpen(false); setPlexarOpen(true); }}
+                className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                style={{ color: "var(--text-primary)" }}
+              >
+                Plexar-LLM
+              </button>
+            </div>
+          </>
+        )}
+      </div>
 
       {/* Theme settings (palette / accent / glow) */}
       <div className="relative">
@@ -594,13 +640,18 @@ export default function TopBar({
               {visibleGroups.map((group, gi) => {
                 const isOpenRouterGroup = group.provider === "openrouter";
                 const isLocalGroup = group.provider === "local";
-                const groupDisabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localLaunchEnabled);
+                // A local group the user configured by hand (URL + key) is
+                // live on that basis alone — the master local-inference flag
+                // is an Engine-page toggle, and requiring it as well means a
+                // correctly-configured rig still reads as unavailable.
+                const localUsable = localLaunchEnabled || group.configured === true;
+                const groupDisabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localUsable);
                 // A group may carry its own note — e.g. a local provider that
                 // does not publish a model list. That is NOT an offline claim,
                 // so it must not be phrased or styled as an error.
                 const groupHint = group.note
                   ? group.note
-                  : isLocalGroup && !localLaunchEnabled
+                  : isLocalGroup && !localUsable
                     ? "Enable the local broker to launch local models"
                     : groupDisabled
                       ? "Add a key via the key icon to enable"
@@ -634,11 +685,11 @@ export default function TopBar({
                       const unservable = isLocalGroup && m.selectable === false;
                       const disabled =
                         (isOpenRouterGroup && !openRouterConfigured) ||
-                        (isLocalGroup && !localLaunchEnabled) ||
+                        (isLocalGroup && !localUsable) ||
                         unservable;
                       const showLoad =
                         isLocalGroup &&
-                        localLaunchEnabled &&
+                        localUsable &&
                         m.loaded === false &&
                         m.canLoad !== false &&
                         onLoadLocalModel;
@@ -911,11 +962,18 @@ export default function TopBar({
   );
 
   const modal = (
-    <OpenRouterModal
-      open={openRouterOpen}
-      onClose={() => setOpenRouterOpen(false)}
-      onToast={onToast}
-    />
+    <>
+      <OpenRouterModal
+        open={openRouterOpen}
+        onClose={() => setOpenRouterOpen(false)}
+        onToast={onToast}
+      />
+      <PlexarKeyModal
+        open={plexarOpen}
+        onClose={() => setPlexarOpen(false)}
+        onToast={onToast}
+      />
+    </>
   );
 
   if (embedded) {

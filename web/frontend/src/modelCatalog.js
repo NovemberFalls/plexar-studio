@@ -134,6 +134,17 @@ export const FORBIDDEN_NOTE =
   "This engine is running and the key is valid, but it is not permitted to " +
   "list models here. Ask the rig owner to widen its scope.";
 
+/** Group-level note for a keyed provider that answered NOTHING and has no
+ *  credential set — the OpenRouter group's "add a key" case, for a backend
+ *  whose model list happens to be live rather than static.
+ *
+ *  This note REPLACES a silent omission, and only for `needs_key && !configured`.
+ *  That ordering is the whole point: a keyless loopback Plexar that is serving
+ *  fine never reaches here (it has models), and a rig that is up and REFUSING
+ *  a key is caught earlier by UNAUTHORIZED_NOTE. So this can only ever appear
+ *  over an absence we have actually observed, never over a working engine. */
+export const NEEDS_KEY_NOTE = "Add a URL and key via the key icon to enable";
+
 /** Builds one picker group per reachable local provider that has >=1 model,
  *  from GET /api/local/providers + per-provider GET /api/local/{id}/models
  *  responses. Ids are namespaced "local:<providerId>:<modelId>" so they can
@@ -174,7 +185,26 @@ export function buildLocalGroups(providers, modelsByProviderId) {
       });
       continue;
     }
-    if (!resp || resp.reachable === false || !Array.isArray(resp.models) || resp.models.length === 0) continue;
+    if (!resp || resp.reachable === false || !Array.isArray(resp.models) || resp.models.length === 0) {
+      // Nothing to list. A provider that takes a credential and has none set
+      // gets the OpenRouter treatment — a visible, disabled group naming the
+      // fix — instead of vanishing, because vanishing is indistinguishable
+      // from "this backend does not exist" and is precisely why a user with a
+      // Plexar rig could not find any way to reach it. Everything else still
+      // omits: an unkeyed backend that is simply down has nothing to say here
+      // that the health dot does not already say better.
+      if (provider.needs_key && !provider.configured) {
+        groups.push({
+          label: provider.label || provider.id,
+          provider: "local",
+          localProviderId: provider.id,
+          needsKey: true,
+          models: [],
+          note: NEEDS_KEY_NOTE,
+        });
+      }
+      continue;
+    }
     // Whether Plexar Studio can make an unserved model become the served one. Without
     // it, "pick this model for my session" and "load this model" come apart:
     // only the served model can actually answer a request, and nothing in
@@ -203,6 +233,11 @@ export function buildLocalGroups(providers, modelsByProviderId) {
       provider: "local",
       localProviderId: provider.id,
       canLoad,
+      // A provider the user has explicitly configured (URL + key) is usable on
+      // its own authority, exactly like an OpenRouter group with a key — it
+      // does not additionally require the master local-inference flag, which
+      // is an Engine-page toggle no one looking for their rig would ever find.
+      configured: provider.needs_key ? Boolean(provider.configured) : false,
       models,
       ...(canLoad ? null : { note: BROWSE_ONLY_NOTE }),
     });

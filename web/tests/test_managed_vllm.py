@@ -148,8 +148,14 @@ async def test_providers_never_leak_urls_or_auth(client, vllm_ownership):
     for p in body["providers"]:
         assert set(p) == {
             "id", "label", "kind", "scope", "capabilities", "endpoint_hint", "managed",
+            # Two booleans about the CREDENTIAL, never the credential: the
+            # picker needs to tell "this backend takes a key and has none" from
+            # "this backend is down", and neither answer may carry the key.
+            "needs_key", "configured",
         }
         assert isinstance(p["managed"], bool)
+        assert isinstance(p["needs_key"], bool)
+        assert isinstance(p["configured"], bool)
     dumped = str(body)
     assert "http://" not in dumped and "https://" not in dumped
     assert "auth" not in dumped

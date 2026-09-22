@@ -4482,6 +4482,30 @@ def _provider_managed(p: dict) -> bool:
     return False
 
 
+def _provider_key_state(p: dict) -> dict:
+    """Whether this provider takes a credential, and whether one is set.
+
+    Two booleans, no secret: `needs_key` is a property of the BACKEND KIND and
+    `configured` says only that a non-empty value exists, never what it is or
+    whether the provider accepts it. Whether a key WORKS is what
+    /api/local/{id}/models already answers with `authorized`, and the picker
+    must keep telling those apart -- a rejected key and a missing one send the
+    user to opposite fixes.
+
+    `needs_key` is TRUE for Plexar even though a loopback, unproxied Plexar
+    needs no credential at all. It means "this backend has a credential the
+    user can set", not "this backend will refuse you without one" -- so the
+    picker uses it only to explain an absence it has ALREADY observed, never to
+    put an "add a key" prompt over a keyless rig that is serving fine.
+    """
+    if p.get("scope") != "local":
+        return {"needs_key": False, "configured": True}
+    if p.get("kind") == "plexar":
+        _url, auth = _plexar_config()
+        return {"needs_key": True, "configured": bool(auth.get("bearer"))}
+    return {"needs_key": False, "configured": True}
+
+
 @app.get("/api/local/providers")
 async def get_local_providers():
     """List registered providers -- full URLs and auth are never sent to the
@@ -4497,6 +4521,7 @@ async def get_local_providers():
                 "capabilities": p["capabilities"],
                 "endpoint_hint": _endpoint_hint(p),
                 "managed": _provider_managed(p),
+                **_provider_key_state(p),
             }
             for p in _PROVIDERS.values()
         ]
@@ -5501,7 +5526,16 @@ def resolve_local_base_url(provider_id: str, terminal_id: str | None = None) -> 
     terminal_id is never interpolated into the URL -- falls back to the
     un-scoped form instead (same behavior as terminal_id=None).
     """
-    provider = _PROVIDERS.get(provider_id)
+    # _require_provider, NOT _PROVIDERS.get: for a plexar-kind provider the
+    # registry's broker_url is the value frozen at IMPORT from
+    # COCKPIT_PLEXAR_URL, and a URL entered in Settings only lands on the entry
+    # when _require_provider refreshes it. Reading the dict directly meant the
+    # picker and every /api/local/* route used the new address while the
+    # SPAWNED SESSION kept pointing at the old one -- the model was listed,
+    # selectable, and then every turn failed against a host the user had
+    # already corrected. Same call-time-resolution rule as
+    # resolve_local_auth_token directly below.
+    provider = _require_provider(provider_id)
     if provider is None or provider.get("scope") != "local":
         return None
 

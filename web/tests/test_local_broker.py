@@ -112,10 +112,17 @@ async def test_metrics_garbage_200_returns_502_not_data(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_providers_list_shape_no_urls(client, vllm_ownership):
+async def test_providers_list_shape_no_urls(client, vllm_ownership, monkeypatch):
     # Pin the vLLM ownership state so the expected capability list does not
     # depend on the developer's own COCKPIT_MANAGED_VLLM (read at import).
     vllm_ownership("0")
+    # Plexar's `configured` reads the REAL key store, so on a developer machine
+    # that has a Plexar key it is True and on CI it is False. Pin it, or this
+    # exact-shape assertion passes or fails according to whose laptop it is.
+    monkeypatch.setattr(
+        server_module.settings_store, "resolve_provider_key",
+        lambda provider: (None, None),
+    )
     res = await client.get("/api/local/providers")
     assert res.status_code == 200
     body = res.json()
@@ -142,6 +149,10 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
         # LM Studio is somebody else's process and always was; the broker was
         # the only thing Studio ever managed at this address.
         "managed": False,
+        # No credential concept at this backend, so nothing to configure and
+        # nothing the picker should prompt for.
+        "needs_key": False,
+        "configured": True,
     }
     assert by_id["vllm-local"] == {
         "id": "vllm-local",
@@ -151,6 +162,8 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
         "capabilities": ["models", "health", "metrics", "model-discovery"],
         "endpoint_hint": "127.0.0.1:8001",
         "managed": False,
+        "needs_key": False,
+        "configured": True,
     }
     # Plexar is the vLLM face: a fixed-bind gateway that owns container
     # lifecycle. No "model-control" (Cockpit does not own its containers). "timeseries" is
@@ -164,6 +177,12 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership):
                          "timeseries", "model-control", "identity"],
         "endpoint_hint": "127.0.0.1:8760",
         "managed": False,
+        # Plexar is the one backend with a credential the user can set, and no
+        # key is configured in this fixture. `needs_key` is a property of the
+        # KIND, not a prediction that the rig will refuse -- a loopback,
+        # unproxied Plexar serves fine with no key at all.
+        "needs_key": True,
+        "configured": False,
     }
     dumped = str(body)
     # SSRF stance: local providers may expose a display-only host:port

@@ -242,3 +242,42 @@ def test_a_provider_without_auth_is_unchanged(monkeypatch):
     monkeypatch.setattr(server_module, "_NO_REDIRECT_OPENER", _Opener())
     server_module._mgmt_get({"management_url": "http://x"}, "/models")
     assert "authorization" not in seen["headers"]
+
+
+def test_spawn_url_follows_the_setting_not_the_import(monkeypatch):
+    """A Plexar URL entered in Settings must reach the SPAWNED SESSION.
+
+    THE BUG THIS PINS. `resolve_local_base_url` read `_PROVIDERS[...]` straight,
+    and that entry's `broker_url` is whatever COCKPIT_PLEXAR_URL was at IMPORT.
+    Only `_require_provider` refreshes it from the store. So every /api/local/*
+    route and the model picker used the newly-entered address while the session
+    the user then launched was pointed at the old one: the rig's models were
+    listed, selectable, and every turn failed against a host the user had
+    already corrected -- with nothing on screen naming the stale value.
+
+    Deliberately asserted through the PUBLIC resolver rather than by poking the
+    registry, because the registry entry being stale is the normal state, not
+    the defect. The defect is only whether the resolver refreshes before
+    reading.
+    """
+    monkeypatch.setenv("COCKPIT_PLEXAR_URL", "http://127.0.0.1:8760")
+    # Stale by construction: this is what the import-time entry still holds.
+    server_module._PROVIDERS["plexar-vllm"]["broker_url"] = "http://127.0.0.1:8760"
+
+    settings_store.update_settings(
+        {"providers": {"plexar": {"base_url": "https://rig.example.com"}}}
+    )
+
+    assert server_module.resolve_local_base_url("plexar-vllm") == "https://rig.example.com"
+
+
+def test_spawn_url_clears_back_to_the_environment(monkeypatch):
+    """Clearing the stored URL falls back, rather than pinning the old value.
+
+    The empty string is a MEANINGFUL setting (the POST route says so), so the
+    resolver has to honour it the same way -- otherwise a URL entered once can
+    never be undone from the UI, only overwritten.
+    """
+    monkeypatch.setenv("COCKPIT_PLEXAR_URL", "http://10.0.0.5:8760")
+    settings_store.update_settings({"providers": {"plexar": {"base_url": ""}}})
+    assert server_module.resolve_local_base_url("plexar-vllm") == "http://10.0.0.5:8760"

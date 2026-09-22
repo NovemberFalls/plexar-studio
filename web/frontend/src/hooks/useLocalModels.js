@@ -516,13 +516,6 @@ export function useLocalModelsCatalog({ pollMs = CATALOG_MS } = {}) {
   useEffect(() => {
     let cancelled = false;
     const discover = async () => {
-      if (!readLocalEnabled()) {
-        if (cancelled) return;
-        config = { ...config, catalogEnabled: false, catalogProviders: null };
-        publish({ providers: null, byProvider: EMPTY });
-        syncScheduler();
-        return;
-      }
       let list = null;
       try {
         const res = await fetch("/api/local/providers");
@@ -534,8 +527,35 @@ export function useLocalModelsCatalog({ pollMs = CATALOG_MS } = {}) {
         // swallow — keep whatever registry we had; the picker still works
       }
       if (cancelled || list === null) return;
-      config = { ...config, catalogEnabled: true, catalogProviders: list };
-      publish({ providers: list });
+      // WHICH PROVIDERS MAY BE POLLED is the gate now — not whether discovery
+      // runs at all. Discovery is one loopback GET on a 20s timer; paying it
+      // unconditionally is what lets a configured provider appear in the
+      // picker without the user first finding the master local-inference
+      // toggle, which lives behind an unlabelled Cpu icon on the Engine page
+      // and is off by default. That toggle was a hard gate on the whole tier:
+      // a user with a working Plexar rig, a URL and a key saw no Plexar
+      // anywhere in Studio and no hint that one existed.
+      //
+      // A provider the user explicitly configured is self-enabling, the same
+      // rule the OpenRouter group already follows: a key present means the
+      // group is live. Everything else still waits for the master flag.
+      const enabledAll = readLocalEnabled();
+      const pollable = enabledAll
+        ? list
+        : list.filter((p) => p && p.needs_key && p.configured);
+      // Switching the master flag OFF must still clear the tier it was gating,
+      // so what gets PUBLISHED narrows too — not just what gets polled. The
+      // keyed providers survive: a configured one to show its models, an
+      // unconfigured one to show the "add a key" row that is the only signpost
+      // a user has that the backend can be reached at all.
+      const visible = enabledAll ? list : list.filter((p) => p && p.needs_key);
+      const visibleIds = new Set(visible.map((p) => p.id));
+      const keptResponses = {};
+      for (const [id, resp] of Object.entries(snapshot.byProvider || EMPTY)) {
+        if (visibleIds.has(id)) keptResponses[id] = resp;
+      }
+      config = { ...config, catalogEnabled: pollable.length > 0, catalogProviders: pollable };
+      publish({ providers: visible, byProvider: keptResponses });
       syncScheduler();
     };
 
