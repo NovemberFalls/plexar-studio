@@ -116,13 +116,19 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership, monkeypatch)
     # Pin the vLLM ownership state so the expected capability list does not
     # depend on the developer's own COCKPIT_MANAGED_VLLM (read at import).
     vllm_ownership("0")
-    # Plexar's `configured` reads the REAL key store, so on a developer machine
-    # that has a Plexar key it is True and on CI it is False. Pin it, or this
-    # exact-shape assertion passes or fails according to whose laptop it is.
+    # EVERY Plexar-derived field in this payload is read from the developer's
+    # OWN configuration at request time -- the gateway URL and key come from the
+    # real settings/config store, and `responses_api` is a live HTTP probe of
+    # whatever that URL points at. Unpinned, this exact-shape assertion passes
+    # or fails according to whose laptop runs it and what is listening on it,
+    # and the failure names fields the author never touched. One seam for the
+    # config, one for the probe.
     monkeypatch.setattr(
-        server_module.settings_store, "resolve_provider_key",
-        lambda provider: (None, None),
+        server_module, "_plexar_config",
+        lambda: ("http://127.0.0.1:8760", {"type": "bearer", "bearer": "",
+                                           "cf_client_id": "", "cf_client_secret": ""}),
     )
+    monkeypatch.setattr(server_module, "_probe_responses_api", lambda provider: None)
     res = await client.get("/api/local/providers")
     assert res.status_code == 200
     body = res.json()
@@ -153,6 +159,7 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership, monkeypatch)
         # nothing the picker should prompt for.
         "needs_key": False,
         "configured": True,
+        "responses_api": None,
     }
     assert by_id["vllm-local"] == {
         "id": "vllm-local",
@@ -164,6 +171,7 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership, monkeypatch)
         "managed": False,
         "needs_key": False,
         "configured": True,
+        "responses_api": None,
     }
     # Plexar is the vLLM face: a fixed-bind gateway that owns container
     # lifecycle. No "model-control" (Cockpit does not own its containers). "timeseries" is
@@ -183,6 +191,7 @@ async def test_providers_list_shape_no_urls(client, vllm_ownership, monkeypatch)
         # unproxied Plexar serves fine with no key at all.
         "needs_key": True,
         "configured": False,
+        "responses_api": None,
     }
     dumped = str(body)
     # SSRF stance: local providers may expose a display-only host:port

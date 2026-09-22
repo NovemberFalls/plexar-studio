@@ -40,6 +40,8 @@ import {
   FALLBACK_MODEL_GROUPS,
   HARNESSES,
   OPENROUTER_GROUP,
+  __resetLocalResponsesApi,
+  buildLocalGroups,
   defaultModelForHarness,
   getModelHarness,
   groupsForHarness,
@@ -54,12 +56,24 @@ const { useState, useCallback, useEffect } = React;
 // literally rather than through buildLocalGroups so this file pins
 // groupsForHarness's contract with the SHAPE, not with another function's
 // current behaviour.
-function localGroup() {
+/** Records a MEASURED verdict for a provider, through the same path production
+ *  uses (buildLocalGroups reads it off GET /api/local/providers) rather than by
+ *  poking the module's internals — so these tests break if that wiring does. */
+function measureProvider(id, responses_api) {
+  __resetLocalResponsesApi();
+  buildLocalGroups([{ id, label: id, capabilities: ["models"], responses_api }], {});
+}
+
+function localGroup(responsesApi = false) {
   return {
     label: "LM Studio",
     provider: "local",
     localProviderId: "lmstudio-local",
     canLoad: true,
+    // true / false / null, as MEASURED by the server's /v1/responses probe.
+    // Defaults to false here so the existing "Codex cannot use this" cases
+    // still describe an engine that genuinely cannot.
+    responsesApi,
     models: [
       {
         id: "local:lmstudio-local:qwen3-coder-30b",
@@ -131,7 +145,7 @@ describe("groupsForHarness — codex", () => {
     expect(or.models.every((m) => !m.unavailableReason)).toBe(true);
   });
 
-  it("shows local groups but marks every model unselectable with the reason", () => {
+  it("marks a MEASURED-unsupported local group unselectable with the reason", () => {
     const out = groupsForHarness(input, "codex");
     const local = out.find((g) => g.provider === "local");
     // VISIBLE, not omitted — omission is what "down" looks like, and this
@@ -142,6 +156,24 @@ describe("groupsForHarness — codex", () => {
       expect(m.selectable).toBe(false);
       expect(m.unavailableReason).toBe(CODEX_LOCAL_UNSUPPORTED_NOTE);
     }
+  });
+
+  // The twin. Without it the case above passes on a build that narrows EVERY
+  // local group, which is the bug this whole change exists to remove: Plexar
+  // serves /v1/responses and codex drives it end to end.
+  it("leaves a local group that DOES serve Responses fully selectable", () => {
+    const out = groupsForHarness([...FALLBACK_MODEL_GROUPS, localGroup(true)], "codex");
+    const local = out.find((g) => g.provider === "local");
+    expect(local).toBeTruthy();
+    expect(local.note).toBeUndefined();
+    for (const m of local.models) expect(m.selectable).toBe(true);
+  });
+
+  it("leaves a local group of UNKNOWN protocol selectable — unknown is not false", () => {
+    const out = groupsForHarness([...FALLBACK_MODEL_GROUPS, localGroup(null)], "codex");
+    const local = out.find((g) => g.provider === "local");
+    expect(local.note).toBeUndefined();
+    for (const m of local.models) expect(m.selectable).toBe(true);
   });
 
   it("does not mutate the input groups or their model entries", () => {
@@ -184,15 +216,19 @@ describe("Codex catalog — retired ids are absent", () => {
     expect(getModelHarness("gpt-5.6-terra")).toBe("codex");
     expect(getModelHarness("sonnet")).toBe("claude-code");
     expect(getModelHarness("deepseek/deepseek-v4-pro")).toBe("any");
-    // WAS "any", and that was a FALSE CLAIM about the backend — corrected
-    // 2026-09-07. create_terminal raises ValueError for harness="codex" with
-    // provider="local" ("Local providers are not supported by the Codex
-    // harness"), and the picker already renders those rows non-selectable
-    // under Codex. "any" made every harness check pass for a pair the server
-    // throws on, so a local model selected BEFORE switching to Codex survived
-    // the switch and spawned a guaranteed failure. OpenRouter above is the
-    // only genuine "any": both CLIs really do reach it.
+    // LOCAL DEPENDS ON THE ENGINE, and has been wrong in both directions.
+    // It returned "any" while the backend refused the pair outright (a false
+    // claim about the backend, corrected 2026-09-07 to a flat "claude-code"),
+    // and that flat answer then became false itself once Plexar started
+    // serving /v1/responses and codex drove it end to end. The answer is now
+    // the MEASURED protocol, so this asserts all three verdicts.
+    measureProvider("lmstudio-local", false);
     expect(getModelHarness("local:lmstudio-local:qwen3")).toBe("claude-code");
+    measureProvider("lmstudio-local", true);
+    expect(getModelHarness("local:lmstudio-local:qwen3")).toBe("any");
+    // Unmeasured: unknown is NOT false, so the pairing stays offered.
+    __resetLocalResponsesApi();
+    expect(getModelHarness("local:lmstudio-local:qwen3")).toBe("any");
     expect(defaultModelForHarness("codex")).toBe("gpt-5.6-terra");
     // WAS "sonnet". That bare alias is exactly the id GET /api/models never
     // returns, which is how the pill came to render "Opus 5" for a Sonnet
@@ -373,10 +409,20 @@ describe("reconcileModelForHarness — the pair that 2.1.0 could not spawn", () 
     expect(out.model).toBe("gpt-5.6-terra");
   });
 
-  it("resets a LOCAL model under Codex — the pair the server refuses outright", () => {
+  it("resets a local model under Codex ONLY when the engine cannot serve it", () => {
+    measureProvider("lmstudio-local", false);
     const out = reconcileModelForHarness("local:lmstudio-local:qwen3", "codex");
     expect(out.changed).toBe(true);
     expect(out.model).toBe("gpt-5.6-terra");
+  });
+
+  it("KEEPS a local model under Codex when the engine serves Responses", () => {
+    // The twin. A reconciler that reset every local selection would pass the
+    // case above while throwing away a pairing that demonstrably works.
+    measureProvider("plexar-vllm", true);
+    const out = reconcileModelForHarness("local:plexar-vllm:qwen3.8-27b", "codex");
+    expect(out.changed).toBe(false);
+    expect(out.model).toBe("local:plexar-vllm:qwen3.8-27b");
   });
 
   it("resets a Codex model under Claude Code", () => {

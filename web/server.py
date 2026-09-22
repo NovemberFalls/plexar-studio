@@ -4511,9 +4511,13 @@ async def get_local_providers():
     """List registered providers -- full URLs and auth are never sent to the
     browser; local providers carry a display-only host:port endpoint_hint and a
     `managed` boolean saying whether Plexar Studio owns that service's lifecycle."""
-    return JSONResponse({
-        "providers": [
-            {
+    def _rows() -> list[dict]:
+        rows = []
+        for p in _PROVIDERS.values():
+            # Refreshed first so a plexar entry carries the URL and credential
+            # the user configured -- the probe below dials it.
+            resolved = _require_provider(p["id"]) or p
+            rows.append({
                 "id": p["id"],
                 "label": p["label"],
                 "kind": p["kind"],
@@ -4521,11 +4525,19 @@ async def get_local_providers():
                 "capabilities": p["capabilities"],
                 "endpoint_hint": _endpoint_hint(p),
                 "managed": _provider_managed(p),
+                # true / false / null -- null is UNKNOWN and must never be
+                # rendered as "no". See _probe_responses_api.
+                "responses_api": (
+                    _probe_responses_api(resolved) if p.get("scope") == "local" else None
+                ),
                 **_provider_key_state(p),
-            }
-            for p in _PROVIDERS.values()
-        ]
-    })
+            })
+        return rows
+
+    # The probe is a blocking HTTP call per local provider (cached 5 min), and
+    # no route in this file may be a plain `def` or block the loop -- see the
+    # event-loop hygiene rule in CLAUDE.md.
+    return JSONResponse({"providers": await asyncio.to_thread(_rows)})
 
 
 
@@ -4610,6 +4622,81 @@ def _mgmt_get(provider: dict, path: str) -> dict:
     )
     with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_PROVIDER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+# ── Which wire protocol does this engine speak? (Codex support) ──
+#
+# THE CODEX HARNESS NEEDS THE RESPONSES API, AND THIS IS MEASURED, NOT ASSUMED.
+# Studio refused every local provider under Codex on the stated grounds that
+# "Codex speaks only the Responses API; LM Studio / vLLM / Plexar serve Chat
+# Completions". Half of that is still true -- the CLI rejects
+# `wire_api = "chat"` outright, verified against codex-cli 0.153.4 -- and half
+# went stale: vLLM gained a Responses endpoint and Plexar passes it through, so
+# a live rig answers POST /v1/responses with a proper response object and
+# `codex` drives it end to end. The refusal was defending a premise that had
+# stopped being true, which is the DEC-36/R38 failure exactly: a number nobody
+# re-measured after the world moved.
+#
+# So the question is asked of the engine instead of inferred from its kind.
+# GET /v1/responses is used as the probe because it is SIDE-EFFECT FREE: a POST
+# would bill a real generation just to find out whether a route exists. The
+# route answering "wrong method" is proof it is there.
+#
+#   200 / 405  -> the route exists          -> True
+#   404        -> the route is absent       -> False
+#   anything else (timeout, 5xx, refused)   -> None, meaning UNKNOWN
+#
+# UNKNOWN IS NOT FALSE. A provider that could not be reached has told us nothing
+# about its protocols, and rendering that as "does not support Codex" is the
+# same false claim about machine state that `authorized` exists to avoid. Only a
+# measured False may disable the Codex pairing; None leaves it offered.
+#
+# NOTE, stated because it is not yet verified: the 404 arm is reasoned, not
+# observed. No Chat-Completions-only engine was running on this machine when
+# this was written, so the negative case has never been seen in the wild. If a
+# real one turns out to answer something other than 404 for an absent route,
+# this lands in UNKNOWN and stays offered -- which is the safe direction.
+_RESPONSES_PROBE_TTL = 300.0
+_responses_probe_cache: dict[str, tuple[float, bool | None]] = {}
+
+
+def _probe_responses_api(provider: dict) -> bool | None:
+    """True / False / None -- see the block comment above. Cached, best-effort."""
+    import urllib.error
+    import urllib.request
+
+    provider_id = provider.get("id") or ""
+    now = _time.monotonic()
+    cached = _responses_probe_cache.get(provider_id)
+    if cached and (now - cached[0]) < _RESPONSES_PROBE_TTL:
+        return cached[1]
+
+    base = (provider.get("management_url") or "").rstrip("/")
+    verdict: bool | None = None
+    if base:
+        req = urllib.request.Request(
+            f"{base}/v1/responses",
+            headers=plexar_client.auth_headers(provider.get("auth")),
+        )
+        try:
+            with _NO_REDIRECT_OPENER.open(req, timeout=_LOCAL_PROVIDER_TIMEOUT) as resp:
+                verdict = resp.getcode() in (200, 405)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                verdict = False
+            elif exc.code in (200, 405):
+                verdict = True
+            else:
+                # 401/403 mean the credential is the problem, NOT that the route
+                # is missing -- a refusal is not an absence, the same rule the
+                # models route already follows.
+                verdict = None
+        except (urllib.error.URLError, OSError, ValueError):
+            logger.debug("Responses-API probe failed for %s", provider_id, exc_info=True)
+            verdict = None
+
+    _responses_probe_cache[provider_id] = (now, verdict)
+    return verdict
 
 
 # ── vLLM /metrics adapter (Prometheus → the metrics contract) ──
@@ -5549,6 +5636,37 @@ def resolve_local_base_url(provider_id: str, terminal_id: str | None = None) -> 
     if provider_id == "lmstudio-local":
         return f"http://127.0.0.1:{port}/shim/lmstudio{scoped_segment}"
     return provider.get("broker_url")
+
+
+def resolve_local_openai_base_url(provider_id: str) -> str | None:
+    """The OpenAI-style base URL a `codex` session should be pointed at.
+
+    NOT resolve_local_base_url. That one hands back Studio's own
+    /shim/lmstudio and /shim/vllm routes, which exist to translate the
+    ANTHROPIC wire shape for the `claude` CLI -- pointing Codex at them would
+    hand an Anthropic translator a Responses request. Codex wants the engine's
+    own OpenAI surface, so this returns the provider's real address with the
+    /v1 prefix Codex expects to append its paths to.
+
+    None for an unknown or non-local id, the same contract as its sibling.
+    """
+    provider = _require_provider(provider_id)
+    if provider is None or provider.get("scope") != "local":
+        return None
+    base = (provider.get("management_url") or provider.get("broker_url") or "").rstrip("/")
+    return f"{base}/v1" if base else None
+
+
+def provider_speaks_responses(provider_id: str) -> bool | None:
+    """Seam for pty_manager: can this provider serve the Codex harness?
+
+    Three-valued on purpose (see _probe_responses_api). pty_manager refuses the
+    pairing ONLY on a measured False.
+    """
+    provider = _require_provider(provider_id)
+    if provider is None or provider.get("scope") != "local":
+        return None
+    return _probe_responses_api(provider)
 
 
 def resolve_local_auth_token(provider_id: str) -> str | None:

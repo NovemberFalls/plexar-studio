@@ -32,7 +32,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { Cloud, KeyRound, Lock, TriangleAlert } from "lucide-react";
+import { Cloud, KeyRound, Lock, Server, TriangleAlert } from "lucide-react";
 
 // ── tokens / shared style fragments (idiom from ProvidersSettings) ──
 const ACCENT_FG = "#0f1216"; // the one permitted literal: accent-button foreground
@@ -97,6 +97,31 @@ const KEY_PROVIDERS = [
     purpose:
       "Used for daily pricing snapshots and for routing sessions through OpenRouter when the provider lever selects it.",
     notConsumed: null, // this one is genuinely wired up
+  },
+  {
+    id: "plexar",
+    label: "Plexar-LLM",
+    route: "/api/settings/plexar",
+    envVar: "COCKPIT_PLEXAR_KEY",
+    icon: Server,
+    token: "var(--cc-idle)",
+    placeholder: "plx_…",
+    purpose:
+      "Points Plexar Studio at a Plexar-LLM rig. Its models then appear in the model picker for " +
+      "both the Claude Code and Codex harnesses.",
+    notConsumed: null,
+    // The ONLY provider here with an address as well as a credential:
+    // OpenRouter and Anthropic each have one well-known endpoint, a rig does
+    // not. An empty value is MEANINGFUL and is sent as such — it clears the
+    // override and falls back to the environment, then loopback — so this
+    // field must never refuse to submit just because it is blank.
+    hasUrl: true,
+    urlPlaceholder: "http://127.0.0.1:8760",
+    urlHint: "Empty falls back to COCKPIT_PLEXAR_URL, then loopback",
+    // A loopback rig that is not behind a tunnel needs no credential at all,
+    // so "no key" is a perfectly healthy state here and must not read as
+    // unfinished setup.
+    keyOptionalNote: "A rig on loopback that is not proxied needs no key.",
   },
 ];
 
@@ -283,7 +308,10 @@ function maskedStatus({ configured, source, masked }) {
 // ── one provider card ─────────────────────────────────────
 
 function KeyCard({ provider }) {
-  const { id, label, route, envVar, icon, token, placeholder, purpose, notConsumed } = provider;
+  const {
+    id, label, route, envVar, icon, token, placeholder, purpose, notConsumed,
+    hasUrl, urlPlaceholder, urlHint, keyOptionalNote,
+  } = provider;
 
   // Server-owned state. Never part of the Settings draft.
   const [configured, setConfigured] = useState(false);
@@ -298,6 +326,10 @@ function KeyCard({ provider }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null); // failure text (from the server)
   const [ok, setOk] = useState(null); // success text
+  // Address, for the one provider that has one. Unlike the key this IS seeded
+  // from the server — it is not a secret, and a user editing an address needs
+  // to see the current one.
+  const [urlInput, setUrlInput] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -309,6 +341,7 @@ function KeyCard({ provider }) {
         setConfigured(Boolean(data?.configured));
         setSource(data?.source ?? null);
         setMasked(data?.masked ?? null);
+        if (typeof data?.base_url === "string") setUrlInput(data.base_url);
         setReadError(null);
       }
     } catch (err) {
@@ -348,6 +381,40 @@ function KeyCard({ provider }) {
         // The server's own message: it is the only thing that knows what was
         // wrong with the value.
         setNotice(data?.error || "The server rejected this key but gave no reason.");
+      }
+    } catch (err) {
+      setNotice(`Could not reach Plexar Studio's server: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveUrl = async () => {
+    if (busy) return;
+    setNotice(null);
+    setOk(null);
+    const url = urlInput.trim();
+    // Empty is deliberately allowed through to the server: it CLEARS the
+    // override. Refusing it here would make a stored address impossible to
+    // undo from this page, only overwritable.
+    if (url && !/^https?:\/\//i.test(url)) {
+      setNotice("The address must start with http:// or https://");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(route, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base_url: url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.ok) {
+        if (typeof data.base_url === "string") setUrlInput(data.base_url);
+        setReadError(null);
+        setOk("Address saved. It applies to the next session you start.");
+      } else {
+        setNotice(data?.error || "The server rejected this address but gave no reason.");
       }
     } catch (err) {
       setNotice(`Could not reach Plexar Studio's server: ${err.message}`);
@@ -411,9 +478,53 @@ function KeyCard({ provider }) {
         </Callout>
       )}
 
+      {hasUrl && (
+        <FieldRow
+          label="Gateway address"
+          hint={urlHint}
+          action={
+            <ActionButton
+              label={busy ? "Saving…" : "Save"}
+              onClick={saveUrl}
+              disabled={busy}
+              testId={`${id}-url-save`}
+              title={`Point Plexar Studio at this ${label} rig`}
+            />
+          }
+        >
+          <input
+            type="text"
+            value={urlInput}
+            onChange={(e) => {
+              setUrlInput(e.target.value);
+              setNotice(null);
+              setOk(null);
+            }}
+            placeholder={urlPlaceholder}
+            autoComplete="off"
+            spellCheck={false}
+            aria-label={`${label} gateway address`}
+            data-testid={`${id}-url-input`}
+            className="w-full rounded"
+            style={{
+              width: "100%",
+              height: 26,
+              padding: "0 8px",
+              fontSize: 11,
+              fontFamily: MONO,
+              borderRadius: 7,
+              background: "var(--cc-elev)",
+              border: "1px solid var(--cc-border)",
+              color: "var(--cc-fg)",
+              outline: "none",
+            }}
+          />
+        </FieldRow>
+      )}
+
       {/* Masked only. This is a <span>, not an input: there is no full value in
           the DOM to reveal, and no reveal control exists. */}
-      <FieldRow label="Current key" hint="Masked by the server">
+      <FieldRow label="Current key" hint={keyOptionalNote || "Masked by the server"}>
         <span
           data-testid={`${id}-masked`}
           style={{ fontSize: 11, fontFamily: MONO, color: "var(--cc-dim)" }}

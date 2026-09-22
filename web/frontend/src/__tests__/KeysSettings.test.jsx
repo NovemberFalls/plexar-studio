@@ -96,10 +96,22 @@ describe("KeysSettings", () => {
     const text = document.body.textContent;
     expect(text).not.toMatch(/sk-[A-Za-z0-9_-]{12,}/);
 
-    // No input holds a value, and neither password field can be revealed.
-    document.querySelectorAll("input").forEach((el) => {
+    // Every KEY field is empty and unrevealable. Scoped to the key inputs by
+    // testid rather than to every <input> on the page: the Plexar card also
+    // carries a gateway ADDRESS, which is not a secret, is deliberately seeded
+    // from the server so a user can edit the current value, and would fail a
+    // blanket type=password assertion for the right reason. Narrowing the
+    // selector keeps the guarantee this test exists for -- no key-shaped string
+    // reaches the DOM -- while letting a non-secret field be a text field.
+    const keyInputs = document.querySelectorAll('input[data-testid$="-input"]:not([data-testid$="-url-input"])');
+    expect(keyInputs.length).toBeGreaterThan(0);
+    keyInputs.forEach((el) => {
       expect(el.value).toBe("");
       expect(el.type).toBe("password");
+    });
+    // ...and the address field, whatever it holds, is never a key.
+    document.querySelectorAll('input[data-testid$="-url-input"]').forEach((el) => {
+      expect(el.value).not.toMatch(/sk-|plx_/);
     });
     expect(screen.queryByLabelText(/show typed key/i)).not.toBeInTheDocument();
   });

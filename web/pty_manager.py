@@ -703,9 +703,30 @@ _OPENROUTER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-\.]*\/[a-z0-9][a-z0-9\-\.:]
 # Local model id format: LM Studio/vLLM model ids can contain path-ish
 # segments ("/"), dots, colons, and dashes (e.g. "qwen3-coder-30b-a3b-awq" or
 # "/models/Qwen3-Coder-30B-A3B-AWQ"). First char must be alnum to block a
-# "--flag"-style injection landing in ANTHROPIC_MODEL. Only ever placed into
-# env vars, never the cmd string, but validated anyway as defense in depth.
+# "--flag"-style injection landing in ANTHROPIC_MODEL.
+#
+# THIS IS NOW A COMMAND-LINE VALUE, not only an env var. The old comment here
+# said "only ever placed into env vars, never the cmd string" -- true while the
+# claude harness owned this path, and false the moment a local model could ride
+# `codex -m <id>`. The charset was already safe for that (no whitespace, no
+# quote, no shell metacharacter), so the widened use needs no change to the
+# pattern -- but the reason it is safe is now load-bearing rather than
+# incidental, and must not be relaxed.
 _LOCAL_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-\/]{0,127}$")
+
+# A local provider id, for the same reason. Under the codex harness the id is
+# interpolated into `-c model_provider=<id>` and three `model_providers.<id>.*`
+# keys, so it crosses shlex and (for .cmd installs) cmd.exe. Ids come from the
+# registry -- including one an operator supplies via COCKPIT_PROVIDERS_FILE --
+# so "it can only be one of ours" is an assumption about a config file, not a
+# guarantee. Also a valid TOML bare key, which is what codex parses it as.
+_LOCAL_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
+
+# The env var a codex session's provider config names as its `env_key`. One
+# fixed name rather than one per provider: a session talks to exactly one
+# engine, and a per-provider name would have to be derived from the id, which
+# contains hyphens and is therefore not a legal env var name everywhere.
+_CODEX_LOCAL_KEY_ENV = "PLEXAR_STUDIO_LOCAL_KEY"
 
 
 class PtyManager:
@@ -999,14 +1020,32 @@ class PtyManager:
         # which CLI gets resolved.
         if harness not in _ALLOWED_HARNESSES:
             raise ValueError(f"Invalid harness: {harness!r}")
-        if harness == "codex" and provider == "local":
-            # Defense in depth: the frontend renders local models as
-            # non-selectable under Codex, but a direct POST must not get a
-            # session whose every turn 404s on a Responses-API call.
-            raise ValueError(
-                "Local providers are not supported by the Codex harness — "
-                "switch to Claude Code."
-            )
+        # A local engine under Codex is refused ONLY when the engine has been
+        # MEASURED not to serve the Responses API.
+        #
+        # This used to be a blanket refusal on the grounds that local providers
+        # serve Chat Completions and Codex speaks Responses. The second half is
+        # still true (codex-cli rejects `wire_api = "chat"` outright); the first
+        # half went stale -- vLLM gained /v1/responses and Plexar passes it
+        # through, so `codex` drives a Plexar rig end to end. Refusing the pair
+        # on the KIND rather than on the engine's actual protocol locked users
+        # out of a combination that works.
+        #
+        # The check is deferred to the probe in server.py, which answers
+        # True / False / None. None means the engine could not be reached and
+        # has therefore told us nothing: it is NOT a refusal, because reporting
+        # "your engine cannot do this" about an engine we failed to ask is the
+        # same false claim about machine state that the models route's
+        # `authorized` split exists to prevent.
+        if harness == "codex" and provider == "local" and provider_model:
+            import server as _probe_server
+            _pid = provider_model.split("::", 1)[0]
+            if _probe_server.provider_speaks_responses(_pid) is False:
+                raise ValueError(
+                    f"{_pid} does not serve the Responses API, which is the only "
+                    "wire protocol the Codex CLI speaks. Switch the harness to "
+                    "Claude Code to use this engine."
+                )
 
         # Generated up front (not down with the rest of the session fields
         # below) so the provider="local" branch can pass it into
@@ -1045,6 +1084,8 @@ class PtyManager:
             local_provider_id, local_model_id = provider_model.split("::", 1)
             if not _LOCAL_MODEL_ID_RE.match(local_model_id):
                 raise ValueError(f"Invalid local model id: {local_model_id!r}")
+            if not _LOCAL_PROVIDER_ID_RE.match(local_provider_id):
+                raise ValueError(f"Invalid local provider id: {local_provider_id!r}")
             # URL resolution is server-side only (SSRF stance) — the browser
             # never supplies a URL, only the provider id. server.py owns the
             # provider registry, so we lazy-import it here (server.py already
@@ -1053,7 +1094,14 @@ class PtyManager:
             # safe since server.py is fully loaded by the time a session is
             # created).
             import server as _server
-            local_base_url = _server.resolve_local_base_url(local_provider_id, terminal_id)
+            if harness == "codex":
+                # Codex needs the ENGINE's own OpenAI surface. resolve_local_base_url
+                # hands back Studio's /shim/* routes, which translate the Anthropic
+                # wire shape for the `claude` CLI -- handing a Responses request to an
+                # Anthropic translator would 404 every turn.
+                local_base_url = _server.resolve_local_openai_base_url(local_provider_id)
+            else:
+                local_base_url = _server.resolve_local_base_url(local_provider_id, terminal_id)
             if not local_base_url:
                 raise ValueError(f"Unknown or non-local provider id: {local_provider_id!r}")
         elif harness == "codex":
@@ -1276,6 +1324,22 @@ class PtyManager:
                 ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
                  "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"],
             )
+        elif provider == "local" and harness == "codex":
+            # Codex is routed by the `-c model_providers.*` config emitted in the
+            # command build, and that config names _CODEX_LOCAL_KEY_ENV as its
+            # env_key. The ONE thing this branch owes the child is that variable
+            # -- exactly the shape the openrouter+codex branch above uses.
+            #
+            # The dummy matters: codex refuses a provider whose env_key names an
+            # unset variable, and an engine that needs no credential (LM Studio)
+            # would otherwise be unlaunchable. Same reasoning as the "local"
+            # dummy on the claude path -- None from resolve_local_auth_token
+            # means "none needed", never "we could not find one".
+            env[_CODEX_LOCAL_KEY_ENV] = (
+                _server.resolve_local_auth_token(local_provider_id) or "local"
+            )
+            logger.info("Local provider (codex harness): set env vars %s",
+                        [_CODEX_LOCAL_KEY_ENV])
         elif provider == "local":
             # Reroute this session's `claude` CLI onto a local inference
             # server (LM Studio via the broker, or vLLM via cockpit's own
@@ -1344,7 +1408,11 @@ class PtyManager:
             # `codex -m <model>`: unlike the claude CLI there is no env-var
             # route for model selection, so the id (or the OpenRouter slug)
             # always rides the command line. Both are regex-validated above.
-            codex_model = provider_model if provider == "openrouter" else model
+            codex_model = (
+                provider_model if provider == "openrouter"
+                else local_model_id if provider == "local"
+                else model
+            )
             # Embedded panes need the normal screen buffer: Codex's alternate
             # screen has no terminal scrollback. Its inline mode is the Codex
             # equivalent of CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN above.
@@ -1359,6 +1427,26 @@ class PtyManager:
                     " -c model_providers.openrouter.base_url=https://openrouter.ai/api/v1"
                     " -c model_providers.openrouter.env_key=OPENROUTER_API_KEY"
                     " -c model_providers.openrouter.wire_api=responses"
+                )
+            elif provider == "local":
+                # The same override shape as OpenRouter above, pointed at the
+                # engine the user picked. `wire_api=responses` is not a choice:
+                # codex-cli refuses `chat` outright ("`wire_api = \"chat\"` is no
+                # longer supported"), which is why create_terminal refuses a
+                # provider measured not to serve Responses rather than emitting
+                # a config that cannot work.
+                #
+                # The provider id is the config key. It is validated against
+                # _LOCAL_PROVIDER_ID_RE before interpolation -- these strings go
+                # through shlex and, for .cmd installs, cmd.exe, so an id
+                # carrying a space or a shell metacharacter is a command
+                # injection, not a typo.
+                cmd += (
+                    f" -c model_provider={local_provider_id}"
+                    f" -c model_providers.{local_provider_id}.name={local_provider_id}"
+                    f" -c model_providers.{local_provider_id}.base_url={local_base_url}"
+                    f" -c model_providers.{local_provider_id}.env_key={_CODEX_LOCAL_KEY_ENV}"
+                    f" -c model_providers.{local_provider_id}.wire_api=responses"
                 )
         elif provider in ("openrouter", "local"):
             # OpenRouter slugs and local model ids (e.g. "qwen/qwen3-coder-next"

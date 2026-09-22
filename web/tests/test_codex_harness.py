@@ -421,11 +421,54 @@ class TestHarnessValidation:
             _call_create(mgr, name="t", workdir="C:\\Code",
                          harness="bogus", model="sonnet")
 
-    def test_codex_plus_local_provider_raises(self, mgr):
-        with pytest.raises(ValueError, match="not supported by the Codex harness"):
+    def test_codex_plus_local_is_refused_only_when_MEASURED_unsupported(self, mgr, monkeypatch):
+        """A local engine under Codex is gated on the ENGINE, not on its kind.
+
+        This was a blanket refusal ("Local providers are not supported by the
+        Codex harness"), written when every local provider served Chat
+        Completions only. vLLM then gained /v1/responses and Plexar passes it
+        through, so the pairing works -- verified against codex-cli 0.153.4
+        driving a live rig end to end. The gate is now the measured protocol.
+        """
+        import server as server_module
+        monkeypatch.setattr(server_module, "provider_speaks_responses", lambda pid: False)
+        with pytest.raises(ValueError, match="does not serve the Responses API"):
             _call_create(mgr, name="t", workdir="C:\\Code",
                          harness="codex", provider="local",
                          provider_model="lmstudio-local::qwen3-coder-30b")
+
+    def test_codex_plus_local_is_allowed_when_the_engine_serves_responses(self, mgr, monkeypatch):
+        """The positive twin, so the refusal above cannot be passing by
+        refusing everything -- the failure shape this repo keeps hitting."""
+        import server as server_module
+        monkeypatch.setattr(server_module, "provider_speaks_responses", lambda pid: True)
+        session, cmd, env = _call_create(
+            mgr, name="t", workdir="C:\\Code",
+            harness="codex", provider="local",
+            provider_model="lmstudio-local::qwen3-coder-30b")
+        assert session.harness == "codex"
+        # The engine's OWN OpenAI surface, never Studio's /shim/* routes: those
+        # translate the Anthropic wire shape for the `claude` CLI, so a
+        # Responses request handed to one would 404 on every turn.
+        assert "/shim/" not in cmd
+        assert "-c model_provider=lmstudio-local" in cmd
+        assert "wire_api=responses" in cmd
+        # codex refuses a provider whose env_key names an unset variable, so an
+        # engine needing no credential must still get the dummy.
+        assert env["PLEXAR_STUDIO_LOCAL_KEY"]
+
+    def test_codex_plus_local_is_allowed_when_the_probe_is_unknown(self, mgr, monkeypatch):
+        """UNKNOWN IS NOT FALSE. An engine we could not reach has told us
+        nothing about its protocols, and refusing on that is a false claim
+        about machine state -- the same split `authorized` exists to keep."""
+        import server as server_module
+        monkeypatch.setattr(server_module, "provider_speaks_responses", lambda pid: None)
+        session, cmd, _env = _call_create(
+            mgr, name="t", workdir="C:\\Code",
+            harness="codex", provider="local",
+            provider_model="lmstudio-local::qwen3-coder-30b")
+        assert session.harness == "codex"
+        assert "wire_api=responses" in cmd
 
     @pytest.mark.parametrize("model", ["--dangerously-skip-permissions", "-m evil",
                                        "a b", "a;rm -rf /", ""])

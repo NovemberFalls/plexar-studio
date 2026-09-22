@@ -90,6 +90,28 @@ export function parseLocalModelId(id) {
   return { providerId, modelId };
 }
 
+/** providerId -> does this engine serve the Responses API? true | false | null.
+ *
+ *  Written by buildLocalGroups from what the server MEASURED (see
+ *  _probe_responses_api in server.py), read by getModelHarness, which is handed
+ *  only a model id and therefore cannot ask a provider anything itself.
+ *
+ *  A module-level map rather than a parameter because getModelHarness is the
+ *  single arbiter called from a dozen places (harness pill, dialog, restore
+ *  paths, the Inspector); threading provider state through every one of them is
+ *  how a rule ends up enforced per site and disagreeing with itself, which is
+ *  the exact history the groupsForHarness doc records.
+ *
+ *  ABSENT MEANS UNKNOWN, AND UNKNOWN IS NOT FALSE. An id whose provider has not
+ *  been measured stays offerable; only a measured `false` narrows a model to
+ *  Claude Code. */
+const LOCAL_RESPONSES_API = new Map();
+
+/** Test seam: reset the measured-protocol registry between cases. */
+export function __resetLocalResponsesApi() {
+  LOCAL_RESPONSES_API.clear();
+}
+
 /** Shown instead of a model list for a provider that does not declare the
  *  `models` capability. Deliberately NOT an offline/unreachable message: such a
  *  provider may be perfectly healthy, it simply does not publish a list, and
@@ -161,6 +183,14 @@ export function buildLocalGroups(providers, modelsByProviderId) {
   const groups = [];
   for (const provider of providers) {
     if (!provider || typeof provider.id !== "string") continue;
+    // Recorded for EVERY provider, before any of the omission branches below:
+    // a provider that publishes no list, or is unreachable, still has a known
+    // (or knowably-unknown) protocol, and getModelHarness may be asked about a
+    // remembered selection of one long after it dropped out of the picker.
+    LOCAL_RESPONSES_API.set(
+      provider.id,
+      typeof provider.responses_api === "boolean" ? provider.responses_api : null,
+    );
     if (!offersModels(provider)) {
       groups.push({
         label: provider.label || provider.id,
@@ -238,6 +268,8 @@ export function buildLocalGroups(providers, modelsByProviderId) {
       // does not additionally require the master local-inference flag, which
       // is an Engine-page toggle no one looking for their rig would ever find.
       configured: provider.needs_key ? Boolean(provider.configured) : false,
+      responsesApi:
+        typeof provider.responses_api === "boolean" ? provider.responses_api : null,
       models,
       ...(canLoad ? null : { note: BROWSE_ONLY_NOTE }),
     });
@@ -479,17 +511,24 @@ export const CODEX_MODEL_GROUPS = [
 
 const CODEX_IDS = new Set(CODEX_MODEL_GROUPS.flatMap((g) => g.models.map((m) => m.id)));
 
-/** Row- and group-level reason for a LOCAL engine under the Codex harness.
- *  This is a protocol mismatch, not an outage and not a permission problem: the
- *  engine is up, it publishes its models, and Codex simply cannot talk to it —
- *  it speaks the Responses API where these engines serve Chat Completions. So
- *  the group stays VISIBLE (omitting it is what "down" looks like, the same
- *  argument UNAUTHORIZED_NOTE makes) and the note says what to DO — switch the
- *  harness — rather than pointing at another screen or implying a fix that does
- *  not exist on the engine's side. */
+/** Row- and group-level reason for a local engine MEASURED not to serve the
+ *  Responses API, under the Codex harness.
+ *
+ *  A protocol mismatch, not an outage and not a permission problem: the engine
+ *  is up and publishes its models, and Codex cannot talk to it. So the group
+ *  stays VISIBLE (omitting it is what "down" looks like, the same argument
+ *  UNAUTHORIZED_NOTE makes) and the note says what to DO — switch the harness —
+ *  rather than pointing at another screen or implying a fix on the engine's side.
+ *
+ *  IT NO LONGER CLAIMS THE ENGINE "SERVES CHAT COMPLETIONS", because that is not
+ *  what was measured. The probe asks one question — does /v1/responses exist —
+ *  and a 404 answers only that. Which protocols the engine DOES speak is a
+ *  separate fact nobody checked, and asserting it was how the blanket "local
+ *  engines serve Chat Completions" rule survived long after vLLM had gained a
+ *  Responses endpoint. State the measurement, not the inference. */
 export const CODEX_LOCAL_UNSUPPORTED_NOTE =
-  "Codex talks the Responses API; this engine serves the Chat Completions API. " +
-  "Switch the harness to Claude Code to use it.";
+  "This engine does not serve the Responses API, which is the only protocol Codex " +
+  "speaks. Switch the harness to Claude Code to use it.";
 
 /** Which harness can run `modelId`. "any" ONLY for OpenRouter, which both CLIs
  *  genuinely reach (Codex via its custom model_provider, Claude Code via the
@@ -498,21 +537,30 @@ export const CODEX_LOCAL_UNSUPPORTED_NOTE =
  *  getModelProvider() calls them anthropic: an id we do not know is far more
  *  likely a model newer than this file than a foreign one.
  *
- *  LOCAL IS "claude-code", NOT "any" — corrected 2026-09-07. This function's
- *  own doc comment used to say local was "reachable from both CLIs (... local
- *  via Claude Code)", which names ONE CLI while the code returned "any". The
- *  code was the wrong half: `create_terminal` REFUSES harness="codex" with
- *  provider="local" outright (pty_manager.py, "Local providers are not
- *  supported by the Codex harness"), and the picker already renders those rows
- *  non-selectable under Codex with CODEX_LOCAL_UNSUPPORTED_NOTE. Claiming
- *  "any" made every caller's harness check pass for a pair the backend throws
- *  on, so a local model selected BEFORE the switch to Codex survived the
- *  switch and spawned a guaranteed failure. */
+ *  LOCAL DEPENDS ON THE ENGINE, and is the one answer this function cannot give
+ *  from the id alone. History, because it has now been wrong in both
+ *  directions: it returned "any" while the backend refused the pair outright,
+ *  so a local model selected before switching to Codex survived the switch and
+ *  spawned a guaranteed failure (corrected 2026-09-07 to a flat "claude-code").
+ *  That correction then became wrong itself — vLLM gained /v1/responses and
+ *  Plexar passes it through, so `codex` drives a Plexar rig end to end
+ *  (verified against codex-cli 0.153.4), and a flat "claude-code" locked users
+ *  out of a working combination.
+ *
+ *  Both mistakes were the same mistake: answering from the KIND instead of the
+ *  engine. The answer now comes from LOCAL_RESPONSES_API, which holds what the
+ *  server measured. Only a measured `false` narrows a local model to Claude
+ *  Code; unknown stays "any", because refusing on an engine we never reached is
+ *  a claim about machine state we have not earned. */
 export function getModelHarness(modelId) {
   if (CODEX_IDS.has(modelId)) return "codex";
   const provider = getModelProvider(modelId);
   if (provider === "openrouter") return "any";
-  if (provider === "local") return "claude-code";
+  if (provider === "local") {
+    const parsed = parseLocalModelId(modelId);
+    const speaks = parsed ? LOCAL_RESPONSES_API.get(parsed.providerId) : undefined;
+    return speaks === false ? "claude-code" : "any";
+  }
   return "claude-code";
 }
 
@@ -551,17 +599,26 @@ export function groupsForHarness(groups, harness) {
   const list = Array.isArray(groups) ? groups : [];
   if (harness !== "codex") return list; // claude-code: exactly today's behaviour
   const openrouter = list.filter((g) => g?.provider === "openrouter");
+  // Only an engine MEASURED not to serve the Responses API is narrowed here.
+  // `responsesApi` is true / false / null from the server's probe, and null
+  // (unreachable, or refused the credential) leaves the group offerable —
+  // painting "Codex cannot use this" over an engine we failed to ask is the
+  // same false claim the UNAUTHORIZED / omission split exists to prevent.
   const local = list
     .filter((g) => g?.provider === "local")
-    .map((g) => ({
-      ...g,
-      note: CODEX_LOCAL_UNSUPPORTED_NOTE,
-      models: (g.models || []).map((m) => ({
-        ...m,
-        selectable: false,
-        unavailableReason: CODEX_LOCAL_UNSUPPORTED_NOTE,
-      })),
-    }));
+    .map((g) =>
+      g.responsesApi === false
+        ? {
+            ...g,
+            note: CODEX_LOCAL_UNSUPPORTED_NOTE,
+            models: (g.models || []).map((m) => ({
+              ...m,
+              selectable: false,
+              unavailableReason: CODEX_LOCAL_UNSUPPORTED_NOTE,
+            })),
+          }
+        : g,
+    );
   return [...CODEX_MODEL_GROUPS, ...openrouter, ...local];
 }
 
