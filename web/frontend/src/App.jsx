@@ -593,8 +593,16 @@ export default function App() {
                 // Shut down the backend sidecar before the NSIS installer runs.
                 // Without this, Windows locks the sidecar exe and the installer
                 // cannot replace it, leaving the old version running after restart.
-                try { await fetch("/api/shutdown", { method: "POST" }); } catch (_) {}
-                await new Promise((r) => setTimeout(r, 800)); // wait for process exit
+                // `reason=update` makes the sidecar exit with a code the
+                // supervisor will NOT restart (it used to respawn after 2 s, mid-
+                // download, re-locking the exe so the install never took). Then
+                // wait until it has really stopped answering, instead of a fixed
+                // 800 ms guess, capped so a stuck server cannot block the update.
+                try { await fetch("/api/shutdown?reason=update", { method: "POST" }); } catch (_) {}
+                for (let i = 0; i < 40; i++) {
+                  await new Promise((r) => setTimeout(r, 250));
+                  try { await fetch("/api/version", { cache: "no-store" }); } catch (_) { break; }
+                }
                 await update.downloadAndInstall();
                 const { relaunch } = await import("@tauri-apps/plugin-process");
                 await relaunch();

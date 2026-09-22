@@ -402,6 +402,16 @@ fn spawn_sidecar(
                         break;
                     }
 
+                    // Exit 4 = server.UPDATE_EXIT_CODE: stopped ON PURPOSE so the
+                    // updater can replace the exe. Restarting here respawned the
+                    // sidecar mid-download, it re-locked plexar-studio-server.exe,
+                    // NSIS could not overwrite it, and the update never took --
+                    // offered again on every launch.
+                    if status.code == Some(4) {
+                        supervisor_log("sidecar exited 4: stopped for an update — not restarting");
+                        break;
+                    }
+
                     // ── Was this termination ours? ─────────────────────────
                     //
                     // The watchdog raises this flag before it kills the

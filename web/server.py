@@ -7578,12 +7578,33 @@ async def frontend_root_files(request: Request):
     return HTMLResponse("Not found", 404)
 
 
+#: Exit code meaning "stopped so the installer can replace me -- do NOT restart".
+#: lib.rs treats it like ATTACH_EXIT_CODE (3): the supervisor stands down.
+UPDATE_EXIT_CODE = 4
+
+
 @app.post("/api/shutdown")
-async def api_shutdown():
-    """Initiate graceful shutdown — called by the auto-updater before replacing the sidecar exe."""
+async def api_shutdown(reason: str = ""):
+    """Stop the sidecar -- called by the auto-updater before replacing the exe.
+
+    WHY `reason=update` EXISTS. The plain path ends the process with an exit the
+    Tauri supervisor cannot tell from a crash, so its Terminated handler restarted
+    the sidecar after a 2 s backoff -- while the updater was still downloading a
+    52 MB installer. By the time NSIS ran, a fresh sidecar held
+    plexar-studio-server.exe open, the file could not be replaced, the install
+    did not take, and the next launch offered the same update again. A user saw
+    "update available" on every start. Exiting UPDATE_EXIT_CODE tells lib.rs this
+    exit was requested, so nothing respawns into the installer's way.
+
+    os._exit, not a signal: on Windows os.kill(pid, 15) is TerminateProcess with
+    code 15 anyway (no graceful path existed), and _exit lets us choose the code.
+    """
     loop = asyncio.get_event_loop()
-    loop.call_later(0.3, lambda: os.kill(os.getpid(), 15))  # SIGTERM after response is sent
-    return {"status": "shutting down"}
+    if reason == "update":
+        loop.call_later(0.3, lambda: os._exit(UPDATE_EXIT_CODE))
+    else:
+        loop.call_later(0.3, lambda: os.kill(os.getpid(), 15))  # after the response is sent
+    return {"status": "shutting down", "reason": reason or None}
 
 
 # Hosts considered loopback-only — anything else means the API (which has no
