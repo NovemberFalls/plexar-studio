@@ -1,9 +1,13 @@
-import { LayoutGrid, FolderOpen, List, Cpu, ChartColumn, Settings } from "lucide-react";
+import { LayoutGrid, FolderOpen, List, Cpu, ChartColumn, MessageSquare, Settings } from "lucide-react";
 import { LogoMark } from "../ActivityRail";
 
+// This list is RAIL ITEMS, and ONE of them is not a destination: PROJECTS
+// toggles the drawer (see isActive below) rather than replacing the content
+// area. Everything else, CHAT included, is a real section.
 const SECTIONS = [
   { id: "work", label: "WORK", icon: LayoutGrid },
   { id: "projects", label: "PROJECTS", icon: FolderOpen },
+  { id: "chat", label: "CHAT", icon: MessageSquare },
   { id: "fleet", label: "FLEET", icon: List },
   { id: "engine", label: "ENGINE", icon: Cpu },
   { id: "reports", label: "REPORTS", icon: ChartColumn },

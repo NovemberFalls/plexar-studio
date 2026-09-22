@@ -36,6 +36,7 @@ import LaneStrip from "./components/shell/LaneStrip";
 import Inspector from "./components/shell/Inspector";
 import StatusStrip from "./components/shell/StatusStrip";
 import SettingsView from "./components/settings/SettingsView";
+import ChatView from "./components/ChatView.jsx";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneStripFrom } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
@@ -122,10 +123,18 @@ function normalizeWorkdir(dir) {
   return dir.replace(/\//g, "\\").replace(/\\$/, "");
 }
 
+/** Where Plexar Chat lives when `chat.url` cannot be read from the server.
+ *  The SAME default as settings_store.DEFAULT_SETTINGS["chat"]["url"] — a
+ *  second spelling of a default is the drift this repo keeps paying for
+ *  (DEFAULT_MODEL_ID exists for exactly this reason), so a test pins them
+ *  equal rather than trusting the two files to stay in step. */
+const CHAT_URL_FALLBACK = "https://plexar-chat.boord-its.com";
+
 /** Command-bar title per rail destination. "projects" is absent by design — it
  *  opens the drawer over Workspace rather than replacing the content area. */
 const SECTION_TITLES = {
   work: "Workspace",
+  chat: "Plexar Chat",
   fleet: "Fleet",
   engine: "Engine",
   reports: "Reports",
@@ -2049,6 +2058,42 @@ export default function App() {
   // Everything the redesigned chrome renders is DERIVED from state that already
   // existed; the shell restructure adds no new polling and no duplicate stores.
 
+  /** The address Plexar Chat lives at, resolved once and handed to ChatView.
+   *
+   *  A SETTING, not a constant: DEC-175 makes Chat's address "known and shown,
+   *  editable only behind 'Use a different address' for self-hosters", so a
+   *  self-hoster points Studio at their own Chat without a rebuild.
+   *
+   *  Fetched once on mount rather than polled — it changes about never. A
+   *  failed read falls back to the built-in default, because being unable to
+   *  read a preference is not a reason to render nothing.
+   *
+   *  Only ever http(s). `settings.json` is an operator-editable file, and a
+   *  `javascript:`/`file:` value there would otherwise be handed to a browsing
+   *  context carrying the app's own trust. */
+  const [chatUrl, setChatUrl] = useState(CHAT_URL_FALLBACK);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/settings");
+        if (!res.ok) return;
+        const data = await res.json();
+        const configured = data?.settings?.chat?.url;
+        if (cancelled || typeof configured !== "string" || !configured.trim()) return;
+        const trimmed = configured.trim();
+        if (!/^https?:\/\//i.test(trimmed)) {
+          toast(`Plexar Chat address must start with http:// or https:// — got "${trimmed}"`, "error");
+          return;
+        }
+        setChatUrl(trimmed);
+      } catch {
+        /* keep the default */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [toast]);
+
   /** Switch destination. Selecting the section you are already in returns to
    *  Workspace, preserving the old rail's toggle feel. "projects" opens the
    *  drawer rather than a full-area section — the tree overlays the panes. */
@@ -2746,7 +2791,11 @@ export default function App() {
             />
 
           <div className="flex flex-1 min-h-0">
-            {sidebarOpen && (
+            {/* CHAT hides the Projects drawer to reclaim the width -- the one
+                section that does. `sidebarOpen` is NOT cleared, so leaving Chat
+                restores the drawer exactly as the user had it; forcing it shut
+                would silently discard their layout. */}
+            {sidebarOpen && activeSection !== "chat" && (
               <div
                 className="flex flex-shrink-0"
                 style={{
@@ -2973,6 +3022,17 @@ export default function App() {
                   section={settingsSection}
                   onSelectSection={setSettingsSection}
                 />
+              </ViewBoundary>
+            )}
+
+            {/* CHAT renders Plexar Chat in the content area, exactly where the
+                pane grid was. The grid above is display:none'd like every other
+                section, so terminals and their WebSockets survive the trip.
+                ChatView owns the native child webview; see its header for why
+                this is not an iframe. */}
+            {activeSection === "chat" && (
+              <ViewBoundary name="Plexar Chat" resetKey={activeSection}>
+                <ChatView url={chatUrl} onError={(m) => toast(`Plexar Chat: ${m}`, "error")} />
               </ViewBoundary>
             )}
 

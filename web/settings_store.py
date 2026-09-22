@@ -264,6 +264,19 @@ DEFAULT_SETTINGS = {
         # beat an env var an operator deliberately set.
         "plexar": {"base_url": ""},
     },
+    # Plexar Chat, opened in a Studio-OWNED WINDOW rather than embedded.
+    #
+    # NOT AN IFRAME, AND THAT IS NOT A STYLE CHOICE. Measured 2026-09-22: Chat
+    # serves `frame-ancestors 'none'` and Studio's own Tauri CSP is
+    # `default-src 'self'` with no frame-src -- two independent refusals, and
+    # relaxing Chat's would spend a public product's clickjacking defence so one
+    # desktop client could embed it. A Tauri WebviewWindow is a top-level
+    # browsing context, so neither header applies and neither has to move.
+    #
+    # The address is a SETTING, not a constant in the frontend: DEC-175 makes
+    # Chat's address "known and shown, editable only behind 'Use a different
+    # address' for self-hosters". Empty means "use the built-in default".
+    "chat": {"url": "https://plexar-chat.boord-its.com"},
     # Terminal rendering. `no_color` is OFF by default and is the ONLY way to
     # get a colourless terminal: `pty_manager` STRIPS an inherited NO_COLOR
     # (launcher noise -- a GUI app's rendering must not depend on which shell
