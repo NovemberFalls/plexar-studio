@@ -1,6 +1,6 @@
 [package]
 name = "plexar-studio"
-version = "2.1.32"
+version = "2.1.33-chat.1"
 license = "AGPL-3.0-or-later"
 edition = "2021"
 
