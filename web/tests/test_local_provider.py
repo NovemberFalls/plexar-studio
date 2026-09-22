@@ -111,7 +111,13 @@ class TestLocalProviderCmdAndEnv:
         assert session.model == "qwen3-coder-30b"
         assert session.provider == "local"
 
-    def test_local_skips_effort_and_fast(self):
+    def test_local_PASSES_effort_through(self):
+        """This test used to assert the OPPOSITE ("local skips effort"), pinning a
+        premise that was false. Measured 2026-09-22 against a Plexar rig: --effort
+        low/medium -> OK, high -> the engine's own 400 naming its supported set.
+        Skipping the flag did not mean no effort was sent -- the CLI fell back to
+        the USER's Claude Code config, so a user configured for `high` got a 400
+        on every turn while Studio's pill read "low"."""
         backend, _ = _make_mock_backend()
         with patch("server.resolve_local_base_url", return_value="http://127.0.0.1:1235"):
             _, cmd, _ = _call_create(
@@ -120,10 +126,30 @@ class TestLocalProviderCmdAndEnv:
                 model="opus",
                 provider="local",
                 provider_model="lmstudio-local::qwen3-coder-30b",
+                effort="low",
+            )
+        assert "--effort low" in cmd
+
+    def test_local_effort_is_passed_VERBATIM_not_remapped(self):
+        """A choice the engine refuses must surface the engine's own error, not be
+        silently swapped for a neighbour it accepts (the R-169 shape)."""
+        backend, _ = _make_mock_backend()
+        with patch("server.resolve_local_base_url", return_value="http://127.0.0.1:1235"):
+            _, cmd, _ = _call_create(
+                self.mgr, backend, name="t", workdir="C:\\Code", model="opus",
+                provider="local", provider_model="lmstudio-local::qwen3-coder-30b",
                 effort="high",
+            )
+        assert "--effort high" in cmd
+
+    def test_local_still_skips_fast_mode(self):
+        backend, _ = _make_mock_backend()
+        with patch("server.resolve_local_base_url", return_value="http://127.0.0.1:1235"):
+            _, cmd, _ = _call_create(
+                self.mgr, backend, name="t", workdir="C:\\Code", model="opus",
+                provider="local", provider_model="lmstudio-local::qwen3-coder-30b",
                 fast=True,
             )
-        assert "--effort" not in cmd
         assert "--settings" not in cmd
 
     def test_model_id_containing_double_colon_splits_on_first_separator_only(self):

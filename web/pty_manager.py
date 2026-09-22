@@ -1536,13 +1536,26 @@ class PtyManager:
             cmd += f" --permission-mode {permission_mode}"
 
         # Effort level: empty string means "use model default" (no flag appended).
-        # Skipped entirely for openrouter/local — foreign/local models don't support --effort.
+        #
+        # LOCAL IS NO LONGER SKIPPED -- the old comment claimed local models "don't
+        # support --effort", and that was wrong in the way that hurts. Measured
+        # 2026-09-22, claude CLI against a Plexar rig: --effort low -> OK, medium ->
+        # OK, high -> 400 "Unexpected reasoning effort high. Supported types are
+        # xhigh (default), medium, and low". The engine takes effort; it just names
+        # its own set. Skipping the flag did not mean "no effort was sent": the CLI
+        # then sent whatever the USER's own Claude Code config said, so a user whose
+        # config was `high` got a 400 on every turn while Studio's pill read "low" --
+        # a control displaying a value it was not applying (NOTE-170).
+        # Passed VERBATIM, never remapped: a choice this engine refuses surfaces the
+        # engine's own error naming the supported set, which is honest and
+        # actionable; silently substituting a neighbour would be the R-169 shape.
+        # OpenRouter stays skipped -- unmeasured, and not this defect.
         if effort and harness == "codex":
             # Codex takes reasoning effort as a config override, not a flag.
             # Values are allowlist-validated above and share the {low..max}
             # vocabulary, so the same string carries across.
             cmd += f" -c model_reasoning_effort={effort}"
-        elif effort and provider in ("openrouter", "local"):
+        elif effort and provider == "openrouter":
             logger.info("Effort level %r requested but skipped — not supported for provider=%s", effort, provider)
         elif effort:
             # Value is allowlist-validated above — safe to interpolate.
