@@ -281,6 +281,9 @@ DEFAULT_SETTINGS = {
     # webview the same way Chat is. Loopback by default -- the framework has
     # no auth of its own, so this must never be widened to a public address.
     "framework": {"url": "http://127.0.0.1:8430"},
+    # Plexar Harness (the `plexar-harness` session kind). The KEY is NOT here --
+    # it lives in config.json. `root` is a dev-only fallback harness checkout.
+    "harness": {"permission_mode": "workspace-write", "root": ""},
     # Terminal rendering. `no_color` is OFF by default and is the ONLY way to
     # get a colourless terminal: `pty_manager` STRIPS an inherited NO_COLOR
     # (launcher noise -- a GUI app's rendering must not depend on which shell

@@ -45,3 +45,6 @@ select = ["E", "F"]
 # importing the modules under test (see conftest-less path bootstrap at the
 # top of each test file) — E402 (import not at top) is expected there.
 "web/tests/*" = ["E402"]
+# Vendored byte-for-byte from plexar-harness (contract v3); pinned by
+# tests/test_harness_client_pin.py, so it is never reformatted here.
+"web/plexar_harness_client.py" = ["E501"]

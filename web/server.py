@@ -60,6 +60,9 @@ import mailbox_bridge  # noqa: E402 -- module handle for _MAILBOX_ROOT; same rea
 from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E402 -- _paste_and_submit, never _wrap: the submit CR must be a separate write or the TUI eats it as pasted content
 import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
 import framework_client  # noqa: E402 -- grouped with the other local-module imports above
+from harness_manager import harness_manager  # noqa: E402 -- the plexar-harness session kind (not a PTY)
+import harness_manager as harness_manager_module  # noqa: E402
+from plexar_harness_client import HarnessError  # noqa: E402
 import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
 import voice_service  # noqa: E402 -- free to import: every ML dependency inside it is lazy
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
@@ -268,6 +271,11 @@ async def lifespan(app: FastAPI):
     await pty_manager.stop_state_ticker()
 
     await stop_managed_vllm()
+
+    try:
+        await harness_manager.stop_all()
+    except Exception:
+        logger.error("Stopping Plexar Harness runtimes failed", exc_info=True)
 
     try:
         await asyncio.to_thread(remote_tunnel.shutdown)
@@ -2008,6 +2016,212 @@ async def get_framework_events(since: str | None = None):
     """
     base = _framework_base_url()
     return JSONResponse(await asyncio.to_thread(framework_client.fetch_events, base, since))
+
+
+# ── Plexar Harness: the `plexar-harness` session kind (NOT a PTY) ──────────
+#
+# harness_manager owns the runtimes; these routes are a thin shell over it.
+# The key lives in config.json and is NEVER returned. Contract: harness
+# docs/plexar/07-studio-api-contract.md (v3).
+
+def _harness_error(exc: HarnessError, default: str = "start_failed") -> JSONResponse:
+    reason = getattr(exc, "reason", None)
+    return JSONResponse(
+        {"error": reason or default, "message": harness_manager_module.friendly(reason)},
+        status_code=502,
+    )
+
+
+async def _json_body(request: Request) -> dict | None:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+@app.get("/api/harness/status")
+async def harness_status():
+    return JSONResponse(await harness_manager.status())
+
+
+@app.put("/api/harness/key")
+async def harness_set_key(request: Request):
+    body = await _json_body(request)
+    key = (body or {}).get("key")
+    if not isinstance(key, str) or not key.strip() or any(ch.isspace() for ch in key.strip()):
+        return JSONResponse({"error": "key must be a non-empty string without whitespace"}, status_code=400)
+    await asyncio.to_thread(harness_manager_module.set_key, key.strip())
+    logger.info("Plexar Harness key saved")
+    return JSONResponse({"key_set": True})
+
+
+@app.delete("/api/harness/key")
+async def harness_clear_key():
+    await asyncio.to_thread(harness_manager_module.clear_key)
+    logger.info("Plexar Harness key cleared")
+    return JSONResponse({"key_set": False})
+
+
+@app.get("/api/harness/sessions")
+async def harness_list_sessions(workspace: str | None = None):
+    try:
+        sessions = await harness_manager.list_sessions(workspace or "")
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except HarnessError as exc:
+        return _harness_error(exc)
+    return JSONResponse({"sessions": sessions})
+
+
+@app.post("/api/harness/sessions")
+async def harness_new_session(request: Request):
+    body = await _json_body(request)
+    if body is None:
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    label = body.get("label")
+    if label is not None and not isinstance(label, str):
+        return JSONResponse({"error": "label must be a string"}, status_code=400)
+    try:
+        return JSONResponse(await harness_manager.new_session(body.get("workspace") or "", label))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except HarnessError as exc:
+        return _harness_error(exc)
+
+
+@app.post("/api/harness/sessions/{sid}/resume")
+async def harness_resume_session(sid: str, request: Request):
+    body = await _json_body(request)
+    if body is None:
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    try:
+        return JSONResponse(await harness_manager.resume_session(sid, body.get("workspace") or ""))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except HarnessError as exc:
+        return _harness_error(exc)
+
+
+@app.post("/api/harness/sessions/{sid}/prompt")
+async def harness_prompt(sid: str, request: Request):
+    body = await _json_body(request)
+    text = (body or {}).get("text")
+    if not isinstance(text, str) or not text:
+        return JSONResponse({"error": "text must be a non-empty string"}, status_code=400)
+    try:
+        await harness_manager.prompt(sid, text)
+    except harness_manager_module.UnknownSession:
+        return JSONResponse({"error": "unknown session"}, status_code=404)
+    except harness_manager_module.SessionBusy:
+        return JSONResponse({"error": "busy"}, status_code=409)
+    return JSONResponse({"accepted": True}, status_code=202)
+
+
+@app.post("/api/harness/sessions/{sid}/cancel")
+async def harness_cancel(sid: str):
+    try:
+        await harness_manager.cancel(sid)
+    except harness_manager_module.UnknownSession:
+        return JSONResponse({"error": "unknown session"}, status_code=404)
+    except HarnessError as exc:
+        return _harness_error(exc, "harness_error")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/harness/sessions/{sid}/close")
+async def harness_close(sid: str):
+    try:
+        await harness_manager.close(sid)
+    except harness_manager_module.UnknownSession:
+        return JSONResponse({"error": "unknown session"}, status_code=404)
+    except HarnessError as exc:
+        return _harness_error(exc, "harness_error")
+    return JSONResponse({"ok": True})
+
+
+@app.put("/api/harness/sessions/{sid}/label")
+async def harness_label(sid: str, request: Request):
+    body = await _json_body(request)
+    label = (body or {}).get("label")
+    if label is not None and not isinstance(label, str):
+        return JSONResponse({"error": "label must be a string"}, status_code=400)
+    try:
+        await asyncio.to_thread(harness_manager_module.write_label, sid, (label or "").strip() or None)
+    except OSError:
+        logger.error("Could not write harness label", exc_info=True)
+        return JSONResponse({"error": "could not save label"}, status_code=500)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/harness/sessions/{sid}/config")
+async def harness_config(sid: str, request: Request):
+    body = await _json_body(request) or {}
+    config_id, value = body.get("config_id"), body.get("value")
+    if config_id not in ("model", "reasoning_effort") or not isinstance(value, str) or not value:
+        return JSONResponse({"error": "config_id must be model|reasoning_effort and value a string"}, status_code=400)
+    try:
+        result = await harness_manager.set_config(sid, config_id, value)
+    except harness_manager_module.UnknownSession:
+        return JSONResponse({"error": "unknown session"}, status_code=404)
+    except HarnessError as exc:
+        return _harness_error(exc, "harness_error")
+    return JSONResponse(result)
+
+
+@app.post("/api/harness/permissions/{request_id}")
+async def harness_permission(request_id: str, request: Request):
+    body = await _json_body(request) or {}
+    option_id = body.get("option_id")
+    if option_id not in harness_manager_module.ALLOWED_OPTIONS:
+        return JSONResponse({"error": "option_id must be allow-once or reject-once"}, status_code=400)
+    if not harness_manager.answer_permission(request_id, option_id):
+        return JSONResponse({"error": "unknown or expired request"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.websocket("/ws/harness")
+async def websocket_harness(websocket: WebSocket):
+    """Server -> browser stream of harness frames for ONE workspace."""
+    # Same rule and placement as /ws/terminal: BEFORE accept().
+    reason = origin_guard.check_websocket(
+        websocket.headers.get("host", ""),
+        websocket.headers.get("origin"),
+    )
+    if reason:
+        logger.warning("Refused WS /ws/harness — %s", reason)
+        await websocket.close(code=4403, reason="Origin not allowed — reload the app")
+        return
+    try:
+        key, q = harness_manager.subscribe(websocket.query_params.get("workspace") or "")
+    except ValueError:
+        await websocket.close(code=4400, reason="workspace must be an absolute directory")
+        return
+    await websocket.accept()
+
+    async def sender():
+        while True:
+            frame = await q.get()
+            await websocket.send_text(json.dumps(frame))
+
+    send_task = asyncio.create_task(sender())
+    try:
+        while True:
+            receive = asyncio.create_task(websocket.receive())
+            done, _ = await asyncio.wait({receive, send_task}, return_when=asyncio.FIRST_COMPLETED)
+            if send_task in done:
+                receive.cancel()
+                break
+            msg = receive.result()
+            if msg.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("Harness WS ended with an error", exc_info=True)
+    finally:
+        send_task.cancel()
+        harness_manager.unsubscribe(key, q)
 
 
 @app.post("/api/bridge/manual")
