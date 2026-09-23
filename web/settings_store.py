@@ -218,6 +218,23 @@ def resolve_anthropic_key() -> tuple[str | None, str | None]:
     return resolve_provider_key("anthropic")
 
 
+def resolve_plexar_base_url() -> str:
+    """The Plexar provider's rig address, precedence shared by every caller
+    that talks to the Plexar rig (server.py's ``_plexar_config`` and
+    harness_manager.py's rig resolution): stored ``providers.plexar.base_url``
+    -> ``COCKPIT_PLEXAR_URL`` env var -> the loopback default. Both call sites
+    MUST stay in sync with this precedence; this function is the single
+    source of it."""
+    stored_url = ""
+    try:
+        stored_url = (read_settings()
+                      .get("providers", {}).get("plexar", {}).get("base_url") or "")
+    except Exception:
+        logger.warning("Could not read the stored Plexar URL", exc_info=True)
+    return (stored_url or os.getenv("COCKPIT_PLEXAR_URL")
+            or "http://127.0.0.1:8760").rstrip("/")
+
+
 def mask_key(key: str) -> str:
     """Mask *key* for safe display/logging -- the full key must NEVER appear
     in any log line or API response.
@@ -283,7 +300,12 @@ DEFAULT_SETTINGS = {
     "framework": {"url": "http://127.0.0.1:8430"},
     # Plexar Harness (the `plexar-harness` session kind). The KEY is NOT here --
     # it lives in config.json. `root` is a dev-only fallback harness checkout.
-    "harness": {"permission_mode": "workspace-write", "root": ""},
+    # `rig_url` overrides the harness's own default rig address (LAN-only by
+    # default) -- e.g. the public tunnel, for a machine off the LAN. Empty
+    # means "harness default". Validated (http/https) in harness_manager, not
+    # here -- a malformed value is a graceful start-time refusal, not a 400
+    # on save (the same reason `chat.url` is unvalidated at this layer).
+    "harness": {"permission_mode": "workspace-write", "root": "", "rig_url": ""},
     # Terminal rendering. `no_color` is OFF by default and is the ONLY way to
     # get a colourless terminal: `pty_manager` STRIPS an inherited NO_COLOR
     # (launcher noise -- a GUI app's rendering must not depend on which shell

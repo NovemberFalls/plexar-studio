@@ -184,6 +184,13 @@ export default function HarnessView({ session, onClose, toast, onOpenSettings })
           case "usage_update":
             setUsage(payload);
             break;
+          case "config_option_update":
+            // Same full-configOptions shape as a set_config reply -- redraw
+            // from it, never from separately cached data (effort is per-model).
+            if (Array.isArray(payload.configOptions) && payload.configOptions.length > 0) {
+              setConfigOptions(payload.configOptions);
+            }
+            break;
           default:
             // unknown kinds are ignored silently, per contract
             break;
@@ -248,15 +255,25 @@ export default function HarnessView({ session, onClose, toast, onOpenSettings })
   const changeConfig = useCallback(
     async (configId, value) => {
       if (!sessionId) return;
+      // Optimistic local update so the changed control reflects the pick
+      // immediately; then redraw from the REPLY's full configOptions (never
+      // from separately cached data) since effort is per-model and a model
+      // change can add/drop/replace the whole reasoning_effort entry.
       setConfigOptions((prev) =>
-        prev.map((c) => (c.config_id === configId ? { ...c, value } : c))
+        prev.map((c) => (c.id === configId ? { ...c, currentValue: value } : c))
       );
       try {
-        await fetch(`/api/harness/sessions/${sessionId}/config`, {
+        const res = await fetch(`/api/harness/sessions/${sessionId}/config`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ config_id: configId, value }),
         });
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          if (data && Array.isArray(data.configOptions) && data.configOptions.length > 0) {
+            setConfigOptions(data.configOptions);
+          }
+        }
       } catch {
         toast?.("Failed to update config", "error");
       }
@@ -281,6 +298,33 @@ export default function HarnessView({ session, onClose, toast, onOpenSettings })
     [toast]
   );
 
+  // configOptions is the RAW wire shape (see harness_manager.py's docstring
+  // for the fixture): {id, name, category, type, currentValue, options}. The
+  // "model" entry's `options` may be GROUPED ({group, name, options: [...]})
+  // while others (e.g. "reasoning_effort") are flat {value, name} leaves.
+  // Flatten either shape to {id, label} so both render the same way.
+  const flattenLeaves = (entry) => {
+    // `value: ""` ("Provider default") is a REAL value -- checked with
+    // `!= null`, never truthiness, or it silently vanishes from the list.
+    const leaves = [];
+    for (const opt of entry?.options || []) {
+      if (opt && Array.isArray(opt.options)) {
+        for (const leaf of opt.options) {
+          if (leaf && leaf.value != null) leaves.push({ id: leaf.value, label: leaf.name || leaf.value || "Provider default" });
+        }
+      } else if (opt && opt.value != null) {
+        leaves.push({ id: opt.value, label: opt.name || opt.value || "Provider default" });
+      }
+    }
+    return leaves;
+  };
+
+  const modelEntry = configOptions.find((c) => c.id === "model");
+  const effortEntry = configOptions.find((c) => c.id === "reasoning_effort");
+  const otherEntries = configOptions.filter((c) => c.id !== "model" && c.id !== "reasoning_effort");
+  const modelLeaves = modelEntry ? flattenLeaves(modelEntry) : [];
+  const effortLeaves = effortEntry ? flattenLeaves(effortEntry) : [];
+
   const usagePercent =
     usage && usage.context_window ? Math.round((usage.used_tokens / usage.context_window) * 100) : null;
 
@@ -298,18 +342,59 @@ export default function HarnessView({ session, onClose, toast, onOpenSettings })
         <span style={{ fontSize: 12, fontWeight: 700, flex: 1, minWidth: 0 }} className="truncate">
           {session.name}
         </span>
-        {configOptions.map((c) => (
+        {modelEntry && (
           <select
-            key={c.config_id}
-            aria-label={c.label || c.config_id}
-            data-testid={`harness-config-${c.config_id}`}
-            value={c.value || ""}
-            onChange={(e) => changeConfig(c.config_id, e.target.value)}
+            key={modelEntry.id}
+            aria-label={modelEntry.name || modelEntry.id}
+            data-testid={`harness-config-${modelEntry.id}`}
+            value={modelEntry.currentValue || ""}
+            onChange={(e) => changeConfig(modelEntry.id, e.target.value)}
             style={{ fontSize: 11, background: "var(--cc-elev)", border: "1px solid var(--cc-border)", borderRadius: 6 }}
           >
-            {(c.options || []).map((o) => (
+            {modelLeaves.map((o) => (
               <option key={o.id} value={o.id}>
-                {o.label || o.id}
+                {o.label}
+              </option>
+            ))}
+          </select>
+        )}
+        {/* `effortEntry` absent from configOptions altogether = genuinely
+            unknown/unobserved for this model ("effort set after start").
+            `effortEntry` present but its `options` empty = OBSERVED: this
+            model declares no reasoning support at all, so no control and no
+            label either. The two must render distinctly, never collapsed. */}
+        {effortEntry ? (
+          effortLeaves.length > 0 && (
+            <select
+              key={effortEntry.id}
+              aria-label={effortEntry.name || effortEntry.id}
+              data-testid={`harness-config-${effortEntry.id}`}
+              value={effortEntry.currentValue || ""}
+              onChange={(e) => changeConfig(effortEntry.id, e.target.value)}
+              style={{ fontSize: 11, background: "var(--cc-elev)", border: "1px solid var(--cc-border)", borderRadius: 6 }}
+            >
+              {effortLeaves.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          )
+        ) : (
+          <span style={{ fontSize: 10, color: "var(--cc-muted)" }}>effort set after start</span>
+        )}
+        {otherEntries.map((c) => (
+          <select
+            key={c.id}
+            aria-label={c.name || c.id}
+            data-testid={`harness-config-${c.id}`}
+            value={c.currentValue || ""}
+            onChange={(e) => changeConfig(c.id, e.target.value)}
+            style={{ fontSize: 11, background: "var(--cc-elev)", border: "1px solid var(--cc-border)", borderRadius: 6 }}
+          >
+            {flattenLeaves(c).map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
               </option>
             ))}
           </select>

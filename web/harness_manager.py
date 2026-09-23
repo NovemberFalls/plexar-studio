@@ -33,6 +33,7 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import app_paths
 import settings_store
@@ -53,6 +54,7 @@ FRIENDLY = {
     "rig_unreachable": "The model server did not answer. Check that it is running.",
     "node_too_old": "Node.js 22.19 or newer is required to run the Plexar Harness.",
     "profile_install_failed": "The Plexar Harness could not create its plexar-acp profile.",
+    "bad_rig_url": "The Plexar Harness rig URL in Settings is not a valid http(s) address.",
 }
 DEFAULT_FRIENDLY = "The Plexar Harness could not start."
 
@@ -112,6 +114,191 @@ def _harness_settings() -> dict:
 
 def permission_mode() -> str:
     return str(_harness_settings().get("permission_mode") or "workspace-write")
+
+
+def _valid_http_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def resolve_rig_url(settings: dict) -> tuple[str | None, str]:
+    """Rig URL precedence, three tiers:
+
+    1. ``harness.rig_url`` setting, if non-empty -- validated http(s); a set
+       but invalid value raises HarnessError(reason="bad_rig_url"), a graceful
+       refusal, never an unhandled exception.
+    2. else the resolved Plexar provider ``base_url``
+       (``settings_store.resolve_plexar_base_url()`` -- the SAME precedence
+       server.py's ``_plexar_config`` uses: stored setting -> COCKPIT_PLEXAR_URL
+       env -> loopback default), if non-empty.
+    3. else ``(None, "harness_default")`` -- PLEXAR_RIG_URL is omitted from the
+       runtime env entirely and the harness falls back to its own built-in
+       default.
+
+    Returns ``(url_or_None, source)`` where source is
+    ``"harness"|"plexar_provider"|"harness_default"``.
+    """
+    rig_url = str(settings.get("rig_url") or "").strip()
+    if rig_url:
+        if not _valid_http_url(rig_url):
+            raise HarnessError("harness.rig_url setting is not a valid http(s) URL", None, "bad_rig_url")
+        return rig_url, "harness"
+    provider_url = settings_store.resolve_plexar_base_url()
+    if provider_url:
+        return provider_url, "plexar_provider"
+    return None, "harness_default"
+
+
+def _build_env(api_key: str, settings: dict) -> tuple[dict[str, str], str]:
+    """The runtime child env, plus the rig_url_source that resolved it. See
+    `resolve_rig_url` for the precedence. Raises HarnessError(reason=
+    "bad_rig_url") the same way `resolve_rig_url` does."""
+    env = {
+        "PLEXAR_HARNESS_KEY": api_key,
+        "DSH_PERMISSION_MODE": str(settings.get("permission_mode") or "workspace-write"),
+    }
+    rig_url, source = resolve_rig_url(settings)
+    if rig_url:
+        env["PLEXAR_RIG_URL"] = rig_url
+    return env, source
+
+
+# ---------------------------------------------------------------------------
+# Model/effort catalog -- session-observed configOptions, cached in memory and
+# persisted to disk. See tests/fixtures/harness_config_options_live.json for
+# the real shape captured 2026-09-23 against https://plexar-llm.boord-its.com:
+# configOptions is a list of {id, name, category, type, currentValue, options}.
+# The "model" entry's `options` is a list of GROUPS ({group, name, options}),
+# each group's `options` a list of {value, name} leaves -- `value` is itself a
+# JSON-encoded string (e.g. '["plexar","qwen3.8-27b"]') and IS what set_config
+# expects as its `value` argument, so it is used verbatim as our model id.
+# The "reasoning_effort" entry is FLAT (no groups): a list of {value, name}.
+#
+# Effort is per-model, and it is derived from the CURRENTLY SELECTED model
+# (contract docs/plexar/07-studio-api-contract.md, "Effort is per model"):
+# `reasoning_effort` can be entirely absent from a configOptions reply for a
+# model that declares no reasoning. There is exactly one model, `qwen3.8-27b`,
+# available on the live rig today; only ONE model's efforts have ever been
+# observed. `parse_models_from_config_options` therefore applies the single
+# observed `reasoning_effort` list (or `None` if absent) to every model in the
+# SAME reply -- there is no known shape yet for per-model effort lists among
+# several models at once, and none is invented here.
+#
+# There is deliberately NO rig `/v1/models` HTTP fallback: that endpoint lists
+# `plexar-signal` (a classifier, `/v1/evaluate`, never a selectable chat
+# model) indistinguishably from `qwen3.8-27b`, and carries no effort data.
+# Sources are exactly "session" (in-memory, this process) | "cache" (the last
+# session-observed data, persisted to disk, read back after a restart) |
+# "none" (never observed, this process or a prior one).
+# ---------------------------------------------------------------------------
+
+_config_cache_lock = threading.Lock()
+_last_config_options: list[dict] | None = None
+_MODELS_CACHE_FILENAME = "harness_models_cache.json"
+
+
+def _models_cache_path() -> Path:
+    return app_paths.data_path(_MODELS_CACHE_FILENAME)
+
+
+def _write_models_cache(config_options: list[dict]) -> None:
+    """Atomic temp-file + rename, same pattern as `write_label`. Best-effort:
+    a failed cache write must not break the in-memory session source."""
+    path = _models_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"configOptions": config_options}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("Could not write the harness models cache", exc_info=True)
+
+
+def _read_models_cache() -> list[dict] | None:
+    path = _models_cache_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        logger.warning("Could not read harness models cache at %s", path, exc_info=True)
+        return None
+    config_options = data.get("configOptions") if isinstance(data, dict) else None
+    return config_options if isinstance(config_options, list) else None
+
+
+def record_config_options(config_options: list[dict] | None) -> None:
+    """Cache the most recent configOptions seen from ANY harness session
+    (new_session, resume_session, a set_config_option reply, or a
+    config_option_update frame). Most recent wins, across the whole process --
+    there is one Plexar rig. Also persists to disk so a later process restart
+    still has a "cache"-sourced answer instead of "none". Does blocking disk
+    I/O -- callers off the update-pump thread must wrap it in
+    `asyncio.to_thread`."""
+    global _last_config_options
+    if not config_options:
+        return
+    with _config_cache_lock:
+        _last_config_options = config_options
+    _write_models_cache(config_options)
+
+
+def _flatten_model_leaves(option_entry: dict) -> list[dict]:
+    """Flatten the "model" configOption's (possibly grouped) `options` into a
+    flat list of {"id": value, "label": name}."""
+    leaves: list[dict] = []
+    for opt in option_entry.get("options") or []:
+        if not isinstance(opt, dict):
+            continue
+        if "options" in opt:  # a group: {group, name, options: [...]}
+            for leaf in opt.get("options") or []:
+                if isinstance(leaf, dict) and leaf.get("value"):
+                    leaves.append({"id": leaf["value"], "label": leaf.get("name") or leaf["value"]})
+        elif opt.get("value"):  # an ungrouped leaf
+            leaves.append({"id": opt["value"], "label": opt.get("name") or opt["value"]})
+    return leaves
+
+
+def _flatten_effort_values(option_entry: dict) -> list[str]:
+    """`""` ("Provider default") is a REAL value, never dropped -- checked
+    with `is not None`/`"value" in opt`, never truthiness."""
+    values: list[str] = []
+    for opt in option_entry.get("options") or []:
+        if isinstance(opt, dict) and "value" in opt and opt["value"] is not None and opt["value"] not in values:
+            values.append(opt["value"])
+    return values
+
+
+def parse_models_from_config_options(config_options: list[dict]) -> list[dict]:
+    """[{"id", "label", "efforts": [...] | None}]. `efforts: None` means the
+    reply carried no `reasoning_effort` entry at all (genuinely unknown for
+    this model -- distinct from `efforts: []`, which would mean the entry was
+    present but offered nothing, not observed on the live rig to date)."""
+    model_entry = next((c for c in config_options if isinstance(c, dict) and c.get("id") == "model"), None)
+    effort_entry = next((c for c in config_options if isinstance(c, dict) and c.get("id") == "reasoning_effort"), None)
+    models = _flatten_model_leaves(model_entry) if model_entry else []
+    efforts = _flatten_effort_values(effort_entry) if effort_entry is not None else None
+    return [{"id": m["id"], "label": m["label"], "efforts": list(efforts) if efforts is not None else None}
+            for m in models]
+
+
+def list_models() -> dict:
+    """{"models": [...], "source": "session"|"cache"|"none"}. The Plexar key
+    never appears in the result or in a log line from this function. No rig
+    HTTP fallback -- see the module comment above `_config_cache_lock`."""
+    with _config_cache_lock:
+        cached = _last_config_options
+    if cached:
+        return {"models": parse_models_from_config_options(cached), "source": "session"}
+    disk = _read_models_cache()
+    if disk:
+        return {"models": parse_models_from_config_options(disk), "source": "cache"}
+    return {"models": [], "source": "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -191,12 +378,15 @@ class UnknownSession(Exception):
 
 
 class _Entry:
-    def __init__(self, key: str, workspace: str, runtime: Any) -> None:
+    def __init__(self, key: str, workspace: str, runtime: Any, env: dict[str, str] | None = None,
+                 rig_url_source: str = "harness_default") -> None:
         self.key = key
         self.workspace = workspace
         self.runtime = runtime
         self.open: set[str] = set()
         self.stopping = False
+        self.env = dict(env or {})
+        self.rig_url_source = rig_url_source
 
 
 class HarnessManager:
@@ -236,25 +426,55 @@ class HarnessManager:
             logger.info("Loop closed; dropped a harness frame", exc_info=True)
 
     # -- runtimes --------------------------------------------------------------
+    def _entry_busy(self, entry: _Entry) -> bool:
+        return any(self._session_ws.get(s) == entry.key for s in self._busy)
+
+    async def _restart_if_env_changed(self, entry: _Entry) -> _Entry | None:
+        """Returns the entry unchanged (keep using it), or None after stopping
+        it (caller falls through and starts a fresh one). A runtime already
+        started keeps its existing env even if the setting changes later,
+        UNTIL the next ensure_runtime call with no prompt in flight for it."""
+        api_key = await asyncio.to_thread(get_key)
+        if not api_key:
+            return entry
+        settings = await asyncio.to_thread(_harness_settings)
+        try:
+            desired_env, _desired_source = await asyncio.to_thread(_build_env, api_key, settings)
+        except HarnessError:
+            # A now-bad rig_url setting must not kill a runtime that is
+            # already running fine on its old env.
+            return entry
+        if desired_env == entry.env:
+            return entry
+        if self._entry_busy(entry):
+            return entry
+        logger.info("Harness settings changed for %s; restarting the runtime", entry.workspace)
+        await self._stop_entry(entry)
+        return None
+
     async def ensure_runtime(self, workspace: str) -> _Entry:
         key = normalize_workspace(workspace)
         self._bind_loop()
         entry = self._runtimes.get(key)
         if entry is not None:
-            return entry
+            entry = await self._restart_if_env_changed(entry)
+            if entry is not None:
+                return entry
         lock = self._start_locks.setdefault(key, asyncio.Lock())
         async with lock:
             entry = self._runtimes.get(key)
             if entry is not None:
-                return entry
+                entry = await self._restart_if_env_changed(entry)
+                if entry is not None:
+                    return entry
             api_key = await asyncio.to_thread(get_key)
             if not api_key:
                 raise HarnessError("no PLEXAR_HARNESS_KEY configured", None, "key_missing")
             settings = await asyncio.to_thread(_harness_settings)
+            env, rig_url_source = await asyncio.to_thread(_build_env, api_key, settings)
             kwargs: dict[str, Any] = {
                 "workspace": Path(workspace),
-                "env": {"PLEXAR_HARNESS_KEY": api_key,
-                        "DSH_PERMISSION_MODE": str(settings.get("permission_mode") or "workspace-write")},
+                "env": env,
                 "on_permission": self._permission_handler(key),
             }
             root = str(settings.get("root") or "").strip()
@@ -271,7 +491,7 @@ class HarnessManager:
                 except Exception:
                     logger.warning("Stopping a failed harness runtime failed", exc_info=True)
                 raise
-            entry = _Entry(key, workspace, runtime)
+            entry = _Entry(key, workspace, runtime, env, rig_url_source)
             self._runtimes[key] = entry
             threading.Thread(target=self._pump, args=(entry,), name=f"harness-pump-{len(self._runtimes)}",
                              daemon=True).start()
@@ -282,6 +502,8 @@ class HarnessManager:
     def _pump(self, entry: _Entry) -> None:
         try:
             for upd in entry.runtime.updates():
+                if upd.kind == "config_option_update" and isinstance(upd.payload, dict):
+                    record_config_options(upd.payload.get("configOptions"))
                 self._threadsafe_broadcast(entry.key, {
                     "type": "update", "session_id": upd.session_id, "kind": upd.kind, "payload": upd.payload,
                 })
@@ -443,19 +665,23 @@ class HarnessManager:
         entry = await self.ensure_runtime(workspace)
         res = await asyncio.to_thread(entry.runtime.new_session) or {}
         sid = res.get("sessionId")
+        config_options = res.get("configOptions") or []
+        await asyncio.to_thread(record_config_options, config_options)
         if sid:
             entry.open.add(sid)
             self._session_ws[sid] = entry.key
             if label:
                 await asyncio.to_thread(write_label, sid, label)
-        return {"session_id": sid, "config_options": res.get("configOptions") or []}
+        return {"session_id": sid, "config_options": config_options}
 
     async def resume_session(self, session_id: str, workspace: str) -> dict:
         entry = await self.ensure_runtime(workspace)
         res = await asyncio.to_thread(entry.runtime.resume_session, session_id) or {}
+        config_options = res.get("configOptions") or []
+        await asyncio.to_thread(record_config_options, config_options)
         entry.open.add(session_id)
         self._session_ws[session_id] = entry.key
-        return {"config_options": res.get("configOptions") or []}
+        return {"config_options": config_options}
 
     async def prompt(self, session_id: str, text: str) -> None:
         entry = self._entry_for(session_id)
@@ -495,12 +721,21 @@ class HarnessManager:
 
     async def set_config(self, session_id: str, config_id: str, value: str) -> Any:
         entry = self._entry_for(session_id)
-        return await asyncio.to_thread(entry.runtime.set_option, session_id, config_id, value)
+        result = await asyncio.to_thread(entry.runtime.set_option, session_id, config_id, value)
+        if isinstance(result, dict) and result.get("configOptions"):
+            await asyncio.to_thread(record_config_options, result["configOptions"])
+        return result
 
     # -- status ----------------------------------------------------------------
     async def status(self) -> dict:
         source = await asyncio.to_thread(key_source)
         version = await asyncio.to_thread(_node_version)
+        settings = await asyncio.to_thread(_harness_settings)
+        try:
+            _resolved_rig_url, rig_url_source = await asyncio.to_thread(resolve_rig_url, settings)
+        except HarnessError:
+            # A bad harness.rig_url setting was still an attempt at tier 1.
+            rig_url_source = "harness"
         return {
             "key_set": source is not None,
             "key_source": source,
@@ -508,6 +743,8 @@ class HarnessManager:
             "node_version": version,
             "node_ok": node_ok(version),
             "permission_mode": await asyncio.to_thread(permission_mode),
+            "rig_url": str(settings.get("rig_url") or ""),
+            "rig_url_source": rig_url_source,
         }
 
 

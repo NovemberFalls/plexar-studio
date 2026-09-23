@@ -767,10 +767,23 @@ export default function App() {
         return next;
       });
       try {
+        // The TopBar model/effort pills persist to these same keys; read
+        // them here rather than threading two more props through, matching
+        // how `harness` itself round-trips via HARNESS_KEY above.
+        let harnessModel = "";
+        let harnessEffort = "";
+        try {
+          harnessModel = localStorage.getItem("cockpit-harness-model") || "";
+          harnessEffort = localStorage.getItem("cockpit-harness-effort") || "";
+        } catch { /* per-viewer convenience only */ }
         const res = await fetch("/api/harness/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspace: dir, ...(name ? { label: name } : {}) }),
+          body: JSON.stringify({
+            workspace: dir, ...(name ? { label: name } : {}),
+            ...(harnessModel ? { model: harnessModel } : {}),
+            ...(harnessEffort ? { effort: harnessEffort } : {}),
+          }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {

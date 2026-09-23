@@ -2045,6 +2045,13 @@ async def harness_status():
     return JSONResponse(await harness_manager.status())
 
 
+@app.get("/api/harness/models")
+async def harness_models():
+    # list_models() does its own blocking work (a disk read for the "cache"
+    # source) so it must not run on the event loop.
+    return JSONResponse(await asyncio.to_thread(harness_manager_module.list_models))
+
+
 @app.put("/api/harness/key")
 async def harness_set_key(request: Request):
     body = await _json_body(request)
@@ -2076,6 +2083,44 @@ async def harness_list_sessions(workspace: str | None = None):
     return JSONResponse({"sessions": sessions})
 
 
+async def _apply_initial_model_and_effort(session_id: str, model: str | None, effort: str | None) -> list[dict]:
+    """Applies model then effort (in that order) via set_config, after a
+    session has just started. Effort is read from THAT set_config("model", ...)
+    reply's configOptions -- never from separately cached data -- because
+    effort is per-model (contract docs/plexar/07-studio-api-contract.md,
+    "Effort is per model"). If the requested effort is not offered for the
+    chosen model, it is dropped rather than sent. `effort == ""` ("Provider
+    default") is a real, requestable value -- checked with `is not None`,
+    never truthiness. Returns the latest known config_options."""
+    config_options: list[dict] = []
+    if model:
+        try:
+            result = await harness_manager.set_config(session_id, "model", model)
+            if isinstance(result, dict):
+                config_options = result.get("configOptions") or config_options
+        except (harness_manager_module.UnknownSession, HarnessError):
+            logger.warning("Could not apply initial harness model %r for session %s", model, session_id,
+                           exc_info=True)
+    if effort is not None:
+        offered = harness_manager_module.parse_models_from_config_options(config_options) if config_options else []
+        model_row = next((m for m in offered if m["id"] == model), None) if model else None
+        effort_ok = True
+        if model_row is not None and model_row.get("efforts") is not None and effort not in model_row["efforts"]:
+            effort_ok = False
+        if not effort_ok:
+            logger.warning("Requested harness effort %r is not offered for model %r on session %s; dropping it",
+                           effort, model, session_id)
+        else:
+            try:
+                result = await harness_manager.set_config(session_id, "reasoning_effort", effort)
+                if isinstance(result, dict):
+                    config_options = result.get("configOptions") or config_options
+            except (harness_manager_module.UnknownSession, HarnessError):
+                logger.warning("Could not apply initial harness effort %r for session %s", effort, session_id,
+                               exc_info=True)
+    return config_options
+
+
 @app.post("/api/harness/sessions")
 async def harness_new_session(request: Request):
     body = await _json_body(request)
@@ -2084,12 +2129,23 @@ async def harness_new_session(request: Request):
     label = body.get("label")
     if label is not None and not isinstance(label, str):
         return JSONResponse({"error": "label must be a string"}, status_code=400)
+    model = body.get("model")
+    effort = body.get("effort")
+    if model is not None and not isinstance(model, str):
+        return JSONResponse({"error": "model must be a string"}, status_code=400)
+    if effort is not None and not isinstance(effort, str):
+        return JSONResponse({"error": "effort must be a string"}, status_code=400)
     try:
-        return JSONResponse(await harness_manager.new_session(body.get("workspace") or "", label))
+        result = await harness_manager.new_session(body.get("workspace") or "", label)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except HarnessError as exc:
         return _harness_error(exc)
+    if result.get("session_id") and (model or effort is not None):
+        config_options = await _apply_initial_model_and_effort(result["session_id"], model, effort)
+        if config_options:
+            result["config_options"] = config_options
+    return JSONResponse(result)
 
 
 @app.post("/api/harness/sessions/{sid}/resume")
@@ -2160,7 +2216,10 @@ async def harness_label(sid: str, request: Request):
 async def harness_config(sid: str, request: Request):
     body = await _json_body(request) or {}
     config_id, value = body.get("config_id"), body.get("value")
-    if config_id not in ("model", "reasoning_effort") or not isinstance(value, str) or not value:
+    # value == "" is a real, requestable value ("Provider default" for
+    # reasoning_effort) and must not be rejected as empty -- checked with
+    # `is None`, never truthiness.
+    if config_id not in ("model", "reasoning_effort") or not isinstance(value, str) or value is None:
         return JSONResponse({"error": "config_id must be model|reasoning_effort and value a string"}, status_code=400)
     try:
         result = await harness_manager.set_config(sid, config_id, value)
@@ -5824,15 +5883,7 @@ def _plexar_config() -> tuple[str, dict]:
     reads as "the key does not work". Precedence matches every other provider
     key: a UI-configured value beats the environment variable.
     """
-    stored_url = ""
-    try:
-        stored_url = (settings_store.read_settings()
-                      .get("providers", {}).get("plexar", {}).get("base_url") or "")
-    except Exception:
-        logger.warning("Could not read the stored Plexar URL", exc_info=True)
-
-    url = (stored_url or os.getenv("COCKPIT_PLEXAR_URL")
-           or "http://127.0.0.1:8760").rstrip("/")
+    url = settings_store.resolve_plexar_base_url()
 
     key = None
     try:

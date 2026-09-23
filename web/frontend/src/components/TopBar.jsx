@@ -119,6 +119,86 @@ export default function TopBar({
   // tri-state: null = not yet checked, true/false = last known GET result
   const [openRouterConfigured, setOpenRouterConfigured] = useState(null);
 
+  // Plexar Harness model/effort pickers. Persisted locally like the other
+  // launch levers on this bar; the model list itself is fetched, never
+  // hardcoded, from GET /api/harness/models (see harness_manager.list_models).
+  const [harnessModelOpen, setHarnessModelOpen] = useState(false);
+  const [harnessEffortOpen, setHarnessEffortOpen] = useState(false);
+  const [harnessModels, setHarnessModels] = useState([]);
+  const [harnessModelsSource, setHarnessModelsSource] = useState(null);
+  const [harnessModelsError, setHarnessModelsError] = useState(null);
+  const [harnessModelsLoading, setHarnessModelsLoading] = useState(false);
+  const [harnessModel, setHarnessModelState] = useState(() => {
+    try { return localStorage.getItem("cockpit-harness-model") || ""; } catch { return ""; }
+  });
+  // "" means nothing stored yet; stored-but-invalid-for-this-model must render
+  // verbatim rather than silently substitute, so this is not conflated with "".
+  const [harnessEffort, setHarnessEffortState] = useState(() => {
+    try { return localStorage.getItem("cockpit-harness-effort") ?? ""; } catch { return ""; }
+  });
+  const [harnessEffortStored, setHarnessEffortStored] = useState(() => {
+    try { return localStorage.getItem("cockpit-harness-effort") !== null; } catch { return false; }
+  });
+
+  const setHarnessModel = (id) => {
+    setHarnessModelState(id);
+    try { localStorage.setItem("cockpit-harness-model", id); } catch { /* per-viewer convenience only */ }
+  };
+  const setHarnessEffort = (id) => {
+    setHarnessEffortState(id);
+    setHarnessEffortStored(true);
+    try { localStorage.setItem("cockpit-harness-effort", id); } catch { /* per-viewer convenience only */ }
+  };
+
+  const fetchHarnessModels = () => {
+    setHarnessModelsLoading(true);
+    setHarnessModelsError(null);
+    fetch("/api/harness/models")
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("bad status"))))
+      .then((data) => {
+        const models = Array.isArray(data.models) ? data.models : [];
+        setHarnessModels(models);
+        setHarnessModelsSource(data.source ?? null);
+      })
+      .catch(() => {
+        setHarnessModelsSource(null);
+        setHarnessModelsError("Could not load Plexar Harness models");
+      })
+      .finally(() => setHarnessModelsLoading(false));
+  };
+
+  // Fetched when the harness pill is selected (isPlexarHarness true), and
+  // again whenever the model dropdown itself is opened.
+  useEffect(() => {
+    if (harness === "plexar-harness") fetchHarnessModels();
+  }, [harness]);
+
+  // Unset ("") is fine to default to the first offering — that is not the
+  // banned `|| list[0]` shape, which only ever applies to a SET value.
+  useEffect(() => {
+    if (harnessModel === "" && harnessModels.length > 0) setHarnessModel(harnessModels[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [harnessModels]);
+
+  const harnessModelsSourceNone = harnessModelsSource === "none";
+  const selectedHarnessModelRow = harnessModels.find((m) => m.id === harnessModel) || null;
+  // `efforts` distinguishes null (genuinely unknown/unobserved for this
+  // model) from [] (observed — this model has no effort control at all).
+  // Never collapse the two: they render distinctly below.
+  const harnessModelEffortsRaw = selectedHarnessModelRow ? selectedHarnessModelRow.efforts : undefined;
+  const harnessEffortsUnknown = selectedHarnessModelRow != null && harnessModelEffortsRaw == null;
+  const harnessModelEfforts = Array.isArray(harnessModelEffortsRaw) ? harnessModelEffortsRaw : [];
+  const harnessHasEfforts = harnessModelEfforts.length > 0;
+  // Only fall back to the model's first effort when NOTHING is stored at
+  // all. A stored-but-invalid value for THIS model is rendered verbatim and
+  // marked unavailable instead — never silently substituted.
+  const effectiveHarnessEffort = !harnessEffortStored && harnessHasEfforts
+    ? harnessModelEfforts[0]
+    : harnessEffort;
+  const harnessEffortUnavailable = Boolean(
+    harnessHasEfforts && harnessEffortStored && !harnessModelEfforts.includes(harnessEffort)
+  );
+
   // Live, account-accurate catalog (falls back to the static list offline).
   const { groups: modelGroups } = useModelCatalog();
   // The picker only OFFERS what the selected harness can run, but the pill's
@@ -197,6 +277,8 @@ export default function TopBar({
     setThemeOpen(false);
     setLocalOpen(false);
     setKeysOpen(false);
+    setHarnessModelOpen(false);
+    setHarnessEffortOpen(false);
   }
 
   // Report model-picker visibility upward (see onPickerOpenChange).
@@ -598,13 +680,172 @@ export default function TopBar({
           do not apply. Shown as a visible reason, never as silently inert controls.
           The stored Claude model is kept untouched for when the user switches back. */}
       {isPlexarHarness ? (
-        <span
-          className="text-xs px-3 py-1"
-          style={{ color: "var(--text-muted)" }}
-          title="Plexar Harness sessions pick their model and effort inside the session"
-        >
-          Model and effort are set inside each harness session
-        </span>
+        harnessModelsSourceNone && !harnessModelsLoading && !harnessModelsError ? (
+          <>
+            {/* No configOptions have ever been observed (source "none") --
+                neither this process nor a prior one has started a Plexar
+                Harness session, so there is nothing to pick from yet. */}
+            <span
+              className="text-xs px-3 py-1 rounded-full"
+              style={{ color: "var(--text-secondary)", border: "1px solid var(--border-color)" }}
+              data-testid="harness-model-pill"
+              title="No Plexar Harness session has started yet; the model will be the harness's own default"
+            >
+              Model: harness default
+            </span>
+            <span
+              className="text-xs px-3 py-1"
+              style={{ color: "var(--text-muted)" }}
+              title="This model's effort choices are not known until the harness session starts"
+            >
+              effort set after start
+            </span>
+          </>
+        ) : (
+        <>
+          {/* Plexar Harness model picker */}
+          <div className="relative">
+            <button
+              onClick={() => { closeAll(); setHarnessModelOpen((v) => !v); if (!harnessModelOpen) fetchHarnessModels(); }}
+              className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
+              style={{
+                color: harnessModelsError ? "var(--cc-error, var(--text-secondary))" : "var(--text-secondary)",
+                border: "1px solid var(--border-color)",
+                backgroundColor: "var(--bg-surface)",
+              }}
+              aria-label={
+                harnessModelsLoading
+                  ? "Plexar Harness model: loading"
+                  : harnessModelsError
+                    ? `Plexar Harness model: ${harnessModelsError}`
+                    : `Plexar Harness model: ${selectedHarnessModelRow?.label || harnessModel || "none selected"}`
+              }
+              aria-expanded={harnessModelOpen}
+              aria-haspopup="listbox"
+              data-testid="harness-model-pill"
+            >
+              {harnessModelsLoading
+                ? "Loading…"
+                : harnessModelsError
+                  ? "Model: unavailable"
+                  : selectedHarnessModelRow?.label || harnessModel || "Select model"}
+              <ChevronDown size={10} />
+            </button>
+            {harnessModelOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setHarnessModelOpen(false)} aria-hidden="true" />
+                <div
+                  role="listbox"
+                  aria-label="Plexar Harness model"
+                  className="absolute right-0 mt-1 rounded-lg py-1 z-50 min-w-[170px]"
+                  style={{
+                    backgroundColor: "var(--bg-elevated)",
+                    border: "1px solid var(--border-color)",
+                    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                  }}
+                >
+                  {harnessModelsError && (
+                    <div role="alert" className="text-[11px] px-3 py-1.5" style={{ color: "var(--cc-error, var(--text-muted))" }}>
+                      {harnessModelsError}
+                    </div>
+                  )}
+                  {!harnessModelsError && harnessModels.length === 0 && !harnessModelsLoading && (
+                    <div className="text-[11px] px-3 py-1.5" style={{ color: "var(--text-muted)" }}>
+                      No models available
+                    </div>
+                  )}
+                  {harnessModels.map((m) => (
+                    <button
+                      key={m.id}
+                      role="option"
+                      aria-selected={m.id === harnessModel}
+                      onClick={() => { setHarnessModel(m.id); setHarnessModelOpen(false); }}
+                      className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                      style={{
+                        color: m.id === harnessModel ? "var(--accent)" : "var(--text-secondary)",
+                        fontWeight: m.id === harnessModel ? 600 : 400,
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Plexar Harness effort picker — follows the SELECTED model's own
+              effort list (never a global list). `efforts: null` (genuinely
+              unknown for this model) renders the "effort set after start"
+              label; `efforts: []` (observed — this model has no effort
+              control at all) renders NEITHER control nor label. The two must
+              never collapse into one rendering. */}
+          {harnessHasEfforts ? (
+            <div className="relative">
+              <button
+                onClick={() => { closeAll(); setHarnessEffortOpen((v) => !v); }}
+                className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
+                style={{
+                  color: harnessEffortUnavailable ? "var(--cc-error, var(--text-secondary))" : "var(--text-secondary)",
+                  border: "1px solid var(--border-color)",
+                  backgroundColor: "var(--bg-surface)",
+                }}
+                aria-label={
+                  harnessEffortUnavailable
+                    ? `Plexar Harness effort: ${effectiveHarnessEffort} — not available for this model`
+                    : `Plexar Harness effort: ${effectiveHarnessEffort || "provider default"}`
+                }
+                title={harnessEffortUnavailable ? "Not offered for this model" : undefined}
+                aria-expanded={harnessEffortOpen}
+                aria-haspopup="listbox"
+                data-testid="harness-effort-pill"
+              >
+                {effectiveHarnessEffort || "default"}
+                <ChevronDown size={10} />
+              </button>
+              {harnessEffortOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setHarnessEffortOpen(false)} aria-hidden="true" />
+                  <div
+                    role="listbox"
+                    aria-label="Plexar Harness effort"
+                    className="absolute right-0 mt-1 rounded-lg py-1 z-50 min-w-[110px]"
+                    style={{
+                      backgroundColor: "var(--bg-elevated)",
+                      border: "1px solid var(--border-color)",
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                    }}
+                  >
+                    {harnessModelEfforts.map((eid) => (
+                      <button
+                        key={eid}
+                        role="option"
+                        aria-selected={eid === effectiveHarnessEffort}
+                        onClick={() => { setHarnessEffort(eid); setHarnessEffortOpen(false); }}
+                        className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                        style={{
+                          color: eid === effectiveHarnessEffort ? "var(--accent)" : "var(--text-secondary)",
+                          fontWeight: eid === effectiveHarnessEffort ? 600 : 400,
+                        }}
+                      >
+                        {eid || "provider default"}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          ) : harnessEffortsUnknown ? (
+            <span
+              className="text-xs px-3 py-1"
+              style={{ color: "var(--text-muted)" }}
+              title="This model's effort choices are not known until the harness session starts"
+            >
+              effort set after start
+            </span>
+          ) : null}
+        </>
+        )
       ) : (
       <>
       {/* Model picker */}

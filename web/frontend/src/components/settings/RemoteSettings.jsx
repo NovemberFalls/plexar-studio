@@ -345,6 +345,7 @@ function HarnessCard({ get, setField }) {
   // Same fallback as harness_manager.permission_mode() and DEFAULT_SETTINGS, so the
   // picker never shows a mode the backend is not actually using.
   const permissionModeDraft = get("harness.permission_mode", "workspace-write") || "workspace-write";
+  const rigUrlDraft = get("harness.rig_url", "") || "";
 
   const [status, setStatus] = useState(null);
   const [statusError, setStatusError] = useState(null);
@@ -504,6 +505,32 @@ function HarnessCard({ get, setField }) {
             </option>
           ))}
         </select>
+      </div>
+
+      <div style={{ ...FIELD_GRID, gridTemplateColumns: "200px 1fr" }}>
+        <span style={LABEL}>Rig URL</span>
+        <input
+          type="text"
+          data-testid="harness-rig-url"
+          aria-label="Plexar Harness rig URL"
+          placeholder="defaults to the configured Plexar provider address"
+          value={rigUrlDraft}
+          onChange={(e) => setField("harness.rig_url", e.target.value)}
+          style={{
+            height: 30,
+            padding: "0 9px",
+            borderRadius: 8,
+            background: "var(--cc-elev)",
+            border: "1px solid var(--cc-border)",
+            color: "var(--cc-fg)",
+            fontFamily: MONO,
+            fontSize: 12,
+          }}
+        />
+      </div>
+      <div style={{ fontSize: 11, color: "var(--cc-dim)", marginTop: -6, marginBottom: 4 }}>
+        Leave blank to use the configured Plexar provider address (Settings ▸ Providers), or the
+        harness's own built-in default if that is not set either.
       </div>
     </div>
   );
