@@ -88,6 +88,23 @@ const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`
  */
 const PERMISSION_OPTIONS = PERMISSION_MODES;
 
+/** A third harness choice, local to this dialog only (not added to the shared
+ *  HARNESSES list in modelCatalog.js — that list also drives the TopBar pill,
+ *  which has no Plexar Harness support yet). Selecting it routes session
+ *  creation through /api/harness/sessions instead of /api/terminals; see
+ *  App.jsx's createSession. */
+const PLEXAR_HARNESS_ID = "plexar-harness";
+const HARNESS_OPTIONS = [...HARNESSES, { id: PLEXAR_HARNESS_ID, label: "Plexar Harness" }];
+
+/** Shown beside Model / Permission / Effort when Plexar Harness is selected —
+ *  those three selects were built for the Claude Code / Codex launch path and
+ *  do not apply here, so they are rendered visibly disabled with this reason
+ *  rather than silently inert (the UNSERVED_MODEL_REASON /
+ *  CODEX_LOCAL_UNSUPPORTED_NOTE pattern this file already follows elsewhere). */
+const PLEXAR_HARNESS_CONFIG_REASON =
+  "Plexar Harness sessions don't use a model, permission mode or effort level here — " +
+  "pick the model and reasoning effort from the session's own header once it opens.";
+
 /**
  * ConfigSelect — a listbox-ish dropdown that is reachable in every position.
  *
@@ -106,7 +123,7 @@ const PERMISSION_OPTIONS = PERMISSION_MODES;
  * nominal gain. Selection is conveyed with `aria-current`, which is valid on a
  * button (`aria-selected` is not).
  */
-export function ConfigSelect({ label, value, options, onChange }) {
+export function ConfigSelect({ label, value, options, onChange, disabled = false, disabledReason }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -226,27 +243,32 @@ export function ConfigSelect({ label, value, options, onChange }) {
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => (open ? close(false) : openAt(Math.max(0, options.findIndex((o) => o.id === value))))}
-        onKeyDown={onTriggerKeyDown}
+        onClick={() =>
+          disabled ? undefined : (open ? close(false) : openAt(Math.max(0, options.findIndex((o) => o.id === value))))
+        }
+        onKeyDown={disabled ? undefined : onTriggerKeyDown}
         aria-label={label}
         aria-expanded={open}
         aria-haspopup="listbox"
+        aria-disabled={disabled ? "true" : undefined}
+        title={disabled ? disabledReason : undefined}
         className="flex items-center justify-between rounded-lg"
         style={{
           height: 34,
           padding: "0 11px",
           fontSize: 12,
           fontWeight: 600,
-          color: "var(--cc-fg)",
+          color: disabled ? "var(--cc-muted)" : "var(--cc-fg)",
           background: "var(--cc-elev)",
           border: "1px solid var(--cc-border)",
-          cursor: "pointer",
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.6 : 1,
         }}
       >
         {current.label}
         <ChevronDown size={10} style={{ color: "var(--cc-muted)" }} />
       </button>
-      {open &&
+      {open && !disabled &&
         createPortal(
           <>
             {/*
@@ -387,9 +409,15 @@ export default function NewSessionDialog({
    */
   const changeHarness = (next) => {
     setHarnessSel(next);
+    // Plexar Harness is not in the shared catalog's harness vocabulary —
+    // reconcileModelForHarness only knows claude-code/codex/any, so skip it
+    // rather than have it "fix" the model to something meaningless for a
+    // harness that does not use this dialog's model select at all.
+    if (next === PLEXAR_HARNESS_ID) return;
     const { model: fixed, changed } = reconcileModelForHarness(modelSel, next);
     if (changed) setModelSel(fixed);
   };
+  const isPlexarHarness = harnessSel === PLEXAR_HARNESS_ID;
   const [validation, setValidation] = useState({ state: "unknown", error: "" });
   const [git, setGit] = useState(null);
   const pathInputRef = useRef(null);
@@ -710,18 +738,39 @@ export default function NewSessionDialog({
               <ConfigSelect
                 label="Harness"
                 value={harnessSel}
-                options={HARNESSES}
+                options={HARNESS_OPTIONS}
                 onChange={changeHarness}
               />
-              <ConfigSelect label="Model" value={modelSel} options={modelOptions} onChange={setModelSel} />
+              <ConfigSelect
+                label="Model"
+                value={modelSel}
+                options={modelOptions}
+                onChange={setModelSel}
+                disabled={isPlexarHarness}
+                disabledReason={PLEXAR_HARNESS_CONFIG_REASON}
+              />
               <ConfigSelect
                 label="Permission"
                 value={permissionSel}
                 options={PERMISSION_OPTIONS}
                 onChange={setPermissionSel}
+                disabled={isPlexarHarness}
+                disabledReason={PLEXAR_HARNESS_CONFIG_REASON}
               />
-              <ConfigSelect label="Effort" value={effortSel} options={EFFORT_OPTIONS} onChange={setEffortSel} />
+              <ConfigSelect
+                label="Effort"
+                value={effortSel}
+                options={EFFORT_OPTIONS}
+                onChange={setEffortSel}
+                disabled={isPlexarHarness}
+                disabledReason={PLEXAR_HARNESS_CONFIG_REASON}
+              />
             </div>
+            {isPlexarHarness && (
+              <span role="note" data-testid="plexar-harness-config-reason" style={{ fontSize: 10, color: "var(--cc-muted)", lineHeight: 1.4 }}>
+                {PLEXAR_HARNESS_CONFIG_REASON}
+              </span>
+            )}
 
             <div className="flex items-center justify-between gap-3">
               <div className="flex flex-col" style={{ gap: 3 }}>

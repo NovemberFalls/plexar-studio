@@ -1,4 +1,4 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search, Bot, Pencil, Check } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback } from "react";
 
 /** Open a URL in the system's default browser (Tauri-safe), falling back to a new tab. */
@@ -356,6 +356,147 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
 // Sidebar — main export
 // ---------------------------------------------------------------------------
 
+/** One row in a Plexar Harness location group: open/resume on click, an
+ *  inline (NOT window.prompt) rename input behind a pencil button. */
+function HarnessSessionRow({ s, onOpen, onRename }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(s.label || "");
+  const label = s.label || `Session ${s.session_id.slice(0, 8)}`;
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next) onRename(next);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1" style={{ padding: "2px 6px" }}>
+        <input
+          autoFocus
+          className="flex-1 text-xs px-1.5 py-0.5 rounded"
+          style={{
+            background: "var(--cc-surface)",
+            color: "var(--cc-fg)",
+            border: "1px solid var(--cc-border)",
+            outline: "none",
+            minWidth: 0,
+          }}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") {
+              setEditing(false);
+              setDraft(s.label || "");
+            }
+          }}
+        />
+        <button
+          onClick={commit}
+          className="p-0.5 rounded hover-bg-surface"
+          style={{ color: "var(--cc-muted)" }}
+          title="Save name"
+          aria-label="Save name"
+        >
+          <Check size={11} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group flex items-center gap-1.5 rounded-md hover-bg-surface" style={{ padding: "2px 6px" }}>
+      <button
+        onClick={onOpen}
+        className="flex items-center gap-1.5 flex-1 text-left min-w-0"
+        title={s.open ? "Open" : "Resume"}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: 999,
+            flexShrink: 0,
+            background: s.open ? "var(--cc-idle)" : "var(--cc-muted)",
+          }}
+        />
+        <span className="text-xs truncate" style={{ color: "var(--cc-dim)" }}>{label}</span>
+        {s.busy && <span style={{ fontSize: 9, color: "var(--cc-working)", flexShrink: 0 }}>busy</span>}
+        {!s.open && <span style={{ fontSize: 9, color: "var(--cc-muted)", flexShrink: 0 }}>closed</span>}
+      </button>
+      <button
+        onClick={() => {
+          setDraft(s.label || "");
+          setEditing(true);
+        }}
+        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover-bg-surface"
+        style={{ color: "var(--cc-muted)" }}
+        title="Rename"
+        aria-label="Rename"
+      >
+        <Pencil size={10} />
+      </button>
+    </div>
+  );
+}
+
+/** One saved workspace's Plexar Harness sessions. A one-shot fetch per
+ *  workspace path — NOT a poller, per the "no new /api/harness polling"
+ *  constraint; the WS in HarnessView is the live channel once a pane opens. */
+function HarnessLocationGroup({ location, onOpen }) {
+  const [sessions, setSessions] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/harness/sessions?workspace=${encodeURIComponent(location.path)}`)
+      .then((r) => (r.ok ? r.json() : { sessions: [] }))
+      .then((data) => {
+        if (!cancelled) {
+          setSessions(data.sessions || []);
+          setLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [location.path]);
+
+  const rename = useCallback((sid, label) => {
+    setSessions((prev) => prev.map((s) => (s.session_id === sid ? { ...s, label } : s)));
+    fetch(`/api/harness/sessions/${sid}/label`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    }).catch(() => {
+      // best-effort; the row already shows the optimistic label
+    });
+  }, []);
+
+  if (!loaded || sessions.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 2 }}>
+      <div className="text-[10px] truncate" style={{ color: "var(--cc-muted)", padding: "2px 6px" }}>
+        {shortPath(location.path)}
+      </div>
+      {sessions.map((s) => (
+        <HarnessSessionRow
+          key={s.session_id}
+          s={s}
+          onOpen={() => onOpen(s.session_id, location.path, s.label, s.open)}
+          onRename={(label) => rename(s.session_id, label)}
+        />
+      ))}
+    </div>
+  );
+}
+
 export default function Sidebar({
   sessions,
   activeIds,
@@ -378,6 +519,7 @@ export default function Sidebar({
   onSaveWorkspace,
   onLoadWorkspace,
   onDeleteWorkspace,
+  onOpenHarnessSession,
 }) {
   // Context menu state (location tree)
   const [ctxMenu, setCtxMenu] = useState(null);
@@ -607,6 +749,23 @@ export default function Sidebar({
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {locationTree.map((node) => (
                 <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Plexar Harness sessions, per saved workspace */}
+        {onOpenHarnessSession && savedLocations.length > 0 && (
+          <>
+            <div className="flex items-center justify-between" style={{ padding: "8px 6px 4px" }}>
+              <span className="cc-label flex items-center gap-1">
+                <Bot size={10} />
+                Plexar Harness
+              </span>
+            </div>
+            <div className="flex flex-col" style={{ gap: "1px" }}>
+              {savedLocations.map((loc) => (
+                <HarnessLocationGroup key={loc.path} location={loc} onOpen={onOpenHarnessSession} />
               ))}
             </div>
           </>
