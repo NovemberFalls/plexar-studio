@@ -43,7 +43,11 @@ def test_the_supervisor_stands_down_on_that_exact_code():
     """The Python half is worthless unless lib.rs honours it -- and the two
     numbers must be the same number."""
     lib = open(os.path.join(ROOT, "frontend", "src-tauri", "src", "lib.rs"), encoding="utf-8").read()
-    m = re.search(r"if status\.code == Some\((\d+)\) \{\s*supervisor_log\(\"sidecar exited \d+: stopped for an update[^}]*break;", lib)
+    m = re.search(
+        r"if status\.code == Some\((\d+)\) \{\s*supervisor_log\(\"sidecar exited \d+: "
+        r"stopped for an update[^}]*break;",
+        lib,
+    )
     assert m, "lib.rs must break (not restart) on the update exit code"
     assert int(m.group(1)) == server_module.UPDATE_EXIT_CODE
 
