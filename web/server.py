@@ -59,6 +59,7 @@ import mailbox_bridge  # noqa: E402 -- module handle for _MAILBOX_ROOT; same rea
 # same pattern.
 from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E402 -- _paste_and_submit, never _wrap: the submit CR must be a separate write or the TUI eats it as pasted content
 import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
+import framework_client  # noqa: E402 -- grouped with the other local-module imports above
 import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
 import voice_service  # noqa: E402 -- free to import: every ML dependency inside it is lazy
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
@@ -1973,6 +1974,40 @@ async def get_anthropic_usage(refresh: bool = False):
     timestamps cross to the browser.
     """
     return JSONResponse(await anthropic_usage.fetch_usage(force=refresh))
+
+
+def _framework_base_url() -> str:
+    """Read `framework.url` fresh from settings on every call (not cached at
+    import) -- a freshly-saved Settings value must take effect immediately."""
+    try:
+        return (settings_store.read_settings().get("framework", {}).get("url")
+                or "http://127.0.0.1:8430")
+    except Exception:
+        logger.warning("Could not read the stored framework URL", exc_info=True)
+        return "http://127.0.0.1:8430"
+
+
+@app.get("/api/framework/summary")
+async def get_framework_summary():
+    """Merged Plexar-Framework summary for the TASKS rail badge and deep link.
+
+    ALWAYS 200: the framework sends no CORS headers, so Studio's frontend
+    cannot read its response directly and this route reads it server-side
+    instead (HANDOFF-studio-framework-pilot.md §3.3). Read-only -- never
+    calls a framework write route. Any failure reports `{"up": False,
+    "base": ..., "reason": ...}` rather than a 5xx.
+    """
+    base = _framework_base_url()
+    return JSONResponse(await asyncio.to_thread(framework_client.fetch_summary, base))
+
+
+@app.get("/api/framework/events")
+async def get_framework_events(since: str | None = None):
+    """Paginated Plexar-Framework task-state events, for the "task finished"
+    toast poll (HANDOFF-studio-framework-pilot.md §6). ALWAYS 200; read-only.
+    """
+    base = _framework_base_url()
+    return JSONResponse(await asyncio.to_thread(framework_client.fetch_events, base, since))
 
 
 @app.post("/api/bridge/manual")

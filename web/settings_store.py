@@ -277,6 +277,10 @@ DEFAULT_SETTINGS = {
     # Chat's address "known and shown, editable only behind 'Use a different
     # address' for self-hosters". Empty means "use the built-in default".
     "chat": {"url": "https://plexar-chat.boord-its.com"},
+    # Plexar-Framework (`plexar up`), embedded in the TASKS view's own Tauri
+    # webview the same way Chat is. Loopback by default -- the framework has
+    # no auth of its own, so this must never be widened to a public address.
+    "framework": {"url": "http://127.0.0.1:8430"},
     # Terminal rendering. `no_color` is OFF by default and is the ONLY way to
     # get a colourless terminal: `pty_manager` STRIPS an inherited NO_COLOR
     # (launcher noise -- a GUI app's rendering must not depend on which shell
