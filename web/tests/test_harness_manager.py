@@ -90,6 +90,8 @@ KEY = "plx_test_SECRET_key"
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
+    # The developer's own PLEXAR_HARNESS_KEY must not leak into these tests.
+    monkeypatch.delenv("PLEXAR_HARNESS_KEY", raising=False)
     monkeypatch.setattr(settings_store, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(hm, "_labels_path", lambda: tmp_path / "harness_labels.json")
     monkeypatch.setattr(hm, "_harness_settings", lambda: {"permission_mode": "read-only", "root": ""})
@@ -296,3 +298,14 @@ def test_key_is_stored_in_config_not_settings(env):
 def test_node_ok():
     assert hm.node_ok("v22.19.0") and hm.node_ok("v24.1.0")
     assert not hm.node_ok("v22.18.9") and not hm.node_ok(None)
+
+
+def test_key_falls_back_to_environment_and_settings_wins(env, monkeypatch):
+    assert hm.key_source() is None and hm.get_key() is None
+    monkeypatch.setenv("PLEXAR_HARNESS_KEY", "env-key")
+    assert hm.key_source() == "environment" and hm.get_key() == "env-key"
+    hm.set_key("saved-key")
+    assert hm.key_source() == "settings" and hm.get_key() == "saved-key"
+    hm.clear_key()
+    assert hm.key_source() == "environment"
+

@@ -2060,7 +2060,9 @@ async def harness_set_key(request: Request):
 async def harness_clear_key():
     await asyncio.to_thread(harness_manager_module.clear_key)
     logger.info("Plexar Harness key cleared")
-    return JSONResponse({"key_set": False})
+    # Clearing the saved key can still leave one in the environment; report the truth.
+    source = await asyncio.to_thread(harness_manager_module.key_source)
+    return JSONResponse({"key_set": source is not None, "key_source": source})
 
 
 @app.get("/api/harness/sessions")

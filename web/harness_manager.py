@@ -65,9 +65,27 @@ def friendly(reason: str | None) -> str:
 # Key (config.json, the secrets file) -- same shape as remote_tunnel's token
 # ---------------------------------------------------------------------------
 
+def key_source() -> str | None:
+    """Where this user's harness key comes from: "settings" (saved in Studio's
+    config.json), "environment" (PLEXAR_HARNESS_KEY in Studio's own process env,
+    which is the harness's documented variable), or None.
+
+    Both are per OS user. The harness's OWN fallbacks (its stored-credentials file,
+    project and harness-home .env) are still never used: Studio always passes the key
+    it resolved here, and refuses to start when there is none (DEC-229)."""
+    value = settings_store._read_config().get(KEY_FIELD)
+    if isinstance(value, str) and value:
+        return "settings"
+    if os.environ.get("PLEXAR_HARNESS_KEY"):
+        return "environment"
+    return None
+
+
 def get_key() -> str | None:
     value = settings_store._read_config().get(KEY_FIELD)
-    return value if isinstance(value, str) and value else None
+    if isinstance(value, str) and value:
+        return value
+    return os.environ.get("PLEXAR_HARNESS_KEY") or None
 
 
 def set_key(key: str) -> None:
@@ -481,10 +499,11 @@ class HarnessManager:
 
     # -- status ----------------------------------------------------------------
     async def status(self) -> dict:
-        key_set = bool(await asyncio.to_thread(get_key))
+        source = await asyncio.to_thread(key_source)
         version = await asyncio.to_thread(_node_version)
         return {
-            "key_set": key_set,
+            "key_set": source is not None,
+            "key_source": source,
             "launcher": shutil.which("plexar-harness"),
             "node_version": version,
             "node_ok": node_ok(version),

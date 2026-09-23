@@ -386,7 +386,7 @@ function HarnessCard({ get, setField }) {
       }
       setKeyDraft("");
       setKeySaved(true);
-      setStatus((prev) => (prev ? { ...prev, key_set: true } : prev));
+      setStatus((prev) => (prev ? { ...prev, key_set: true, key_source: "settings" } : prev));
     } catch {
       setKeyError("Could not save the key");
     } finally {
@@ -403,9 +403,11 @@ function HarnessCard({ get, setField }) {
         setKeyError("Could not clear the key");
         return;
       }
+      const data = await res.json().catch(() => ({}));
       setKeyDraft("");
       setKeySaved(false);
-      setStatus((prev) => (prev ? { ...prev, key_set: false } : prev));
+      // A key can remain in the environment after the saved one is cleared.
+      setStatus((prev) => (prev ? { ...prev, key_set: !!data.key_set, key_source: data.key_source ?? null } : prev));
     } catch {
       setKeyError("Could not clear the key");
     } finally {
@@ -455,9 +457,19 @@ function HarnessCard({ get, setField }) {
         />
         <div className="flex items-center gap-2">
           <ActionButton label="Save" accent testId="harness-key-save" onClick={saveKey} disabled={keyBusy || !keyDraft.trim()} />
-          <ActionButton label="Clear" testId="harness-key-clear" onClick={clearKey} disabled={keyBusy || !status?.key_set} icon={KeyRound} />
+          <ActionButton label="Clear" testId="harness-key-clear" onClick={clearKey} disabled={keyBusy || status?.key_source !== "settings"} icon={KeyRound} />
         </div>
       </div>
+      {status?.key_source === "environment" && !keySaved && (
+        <Callout token="var(--cc-idle)" testId="harness-key-env">
+          Using PLEXAR_HARNESS_KEY from your environment. Save a key here to override it.
+        </Callout>
+      )}
+      {status?.key_source === "settings" && !keySaved && (
+        <Callout token="var(--cc-idle)" testId="harness-key-settings">
+          A key is saved in Studio.
+        </Callout>
+      )}
       {keySaved && (
         <Callout token="var(--cc-idle)" testId="harness-key-saved">
           Key saved.

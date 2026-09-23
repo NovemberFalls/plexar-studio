@@ -24,6 +24,8 @@ KEY = "plx_route_SECRET_key"
 
 @pytest.fixture
 def setup(monkeypatch, tmp_path):
+    # The developer's own PLEXAR_HARNESS_KEY must not leak into these tests.
+    monkeypatch.delenv("PLEXAR_HARNESS_KEY", raising=False)
     monkeypatch.setattr(settings_store, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(hm, "_labels_path", lambda: tmp_path / "harness_labels.json")
     monkeypatch.setattr(hm, "_harness_settings", lambda: {"permission_mode": "workspace-write", "root": ""})
@@ -42,7 +44,7 @@ async def test_key_never_returned(setup):
     client, mgr, ws = setup
     r = await client.get("/api/harness/status")
     assert r.status_code == 200 and r.json()["key_set"] is False
-    assert set(r.json()) == {"key_set", "launcher", "node_version", "node_ok", "permission_mode"}
+    assert set(r.json()) == {"key_set", "key_source", "launcher", "node_version", "node_ok", "permission_mode"}
     r = await client.put("/api/harness/key", json={"key": KEY})
     assert r.json() == {"key_set": True}
     bodies = [r.text]
@@ -55,7 +57,7 @@ async def test_key_never_returned(setup):
     bodies.append(r.text)
     assert all(KEY not in b for b in bodies)
     r = await client.delete("/api/harness/key")
-    assert r.json() == {"key_set": False}
+    assert r.json() == {"key_set": False, "key_source": None}
     await mgr.stop_all()
 
 
