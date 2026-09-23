@@ -141,4 +141,22 @@ describe("HarnessView", () => {
       expect(screen.getByTestId("harness-error-banner")).toHaveTextContent("some backend-specific failure text")
     );
   });
+
+  it("a session that failed to start explains itself instead of rendering blank", () => {
+    const onOpenSettings = vi.fn();
+    render(
+      <HarnessView
+        session={{ ...makeSession(), harnessSessionId: null, status: "error",
+          startError: { reason: "key_missing", message: "no PLEXAR_HARNESS_KEY configured" } }}
+        onClose={() => {}}
+        toast={() => {}}
+        onOpenSettings={onOpenSettings}
+      />
+    );
+    expect(screen.getByTestId("harness-error-banner")).toHaveTextContent("Add your Plexar Harness key in Settings.");
+    expect(screen.queryByText("key_missing")).toBeNull();
+    fireEvent.click(screen.getByText("Open Settings"));
+    expect(onOpenSettings).toHaveBeenCalled();
+    expect(screen.getByRole("textbox")).toBeDisabled();
+  });
 });

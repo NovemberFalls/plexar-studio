@@ -774,8 +774,15 @@ export default function App() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {
-          toast(data.error || "Failed to create Plexar Harness session", "error");
-          setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error" } : s)));
+          // The backend sends {error: <reason code>, message: <sentence>}. Show the
+          // sentence, never the bare code, and keep the reason on the session so the
+          // pane itself explains what is wrong instead of sitting blank.
+          const startError = {
+            reason: data.error || "start_failed",
+            message: data.message || data.detail || "Couldn't start Plexar Harness.",
+          };
+          toast(startError.message, "error");
+          setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error", startError } : s)));
           return;
         }
         setSessions((prev) =>
@@ -791,8 +798,9 @@ export default function App() {
           )
         );
       } catch (_err) {
-        toast("Failed to create Plexar Harness session", "error");
-        setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error" } : s)));
+        const startError = { reason: "start_failed", message: "Couldn't reach Studio's server to start Plexar Harness." };
+        toast(startError.message, "error");
+        setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error", startError } : s)));
       }
       return;
     }
@@ -2865,6 +2873,7 @@ export default function App() {
                         session={session}
                         onClose={() => removeSession(session.id)}
                         toast={toast}
+                        onOpenSettings={() => setActiveSection("settings")}
                       />
                     ) : (
                       <TerminalPane

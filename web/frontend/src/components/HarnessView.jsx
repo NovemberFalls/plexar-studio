@@ -131,7 +131,7 @@ function ToolCard({ call }) {
   );
 }
 
-export default function HarnessView({ session, onClose, toast }) {
+export default function HarnessView({ session, onClose, toast, onOpenSettings }) {
   const workspace = session.workdir;
   const sessionId = session.harnessSessionId;
 
@@ -141,7 +141,10 @@ export default function HarnessView({ session, onClose, toast }) {
   const [toolCalls, setToolCalls] = useState([]); // [{id, name, status, args, output}]
   const [usage, setUsage] = useState(null); // {used_tokens, context_window}
   const [busy, setBusy] = useState(false);
-  const [errorBanner, setErrorBanner] = useState(null);
+  // A session that failed to start carries its reason from createSession, so the
+  // pane says what is wrong on first render rather than showing an empty transcript.
+  const [errorBanner, setErrorBanner] = useState(session.startError || null);
+  const startFailed = session.status === "error";
   const [pendingPermissions, setPendingPermissions] = useState([]);
   const [wsStatus, setWsStatus] = useState("connecting");
   const [configOptions, setConfigOptions] = useState(session.harnessConfigOptions || []);
@@ -347,6 +350,18 @@ export default function HarnessView({ session, onClose, toast }) {
         >
           <TriangleAlert size={14} style={{ flexShrink: 0 }} />
           <span style={{ flex: 1 }}>{friendlyError(errorBanner.reason, errorBanner.message)}</span>
+          {errorBanner.reason === "key_missing" || errorBanner.reason === "key_rejected" ? (
+            onOpenSettings && (
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                className="hover-bg-surface"
+                style={{ background: "none", border: "1px solid var(--cc-error)", borderRadius: 6, color: "inherit", cursor: "pointer", padding: "2px 8px", fontSize: 12 }}
+              >
+                Open Settings
+              </button>
+            )
+          ) : null}
           <button
             type="button"
             aria-label="Dismiss error"
@@ -402,7 +417,7 @@ export default function HarnessView({ session, onClose, toast }) {
           type="text"
           aria-label="Message"
           value={prompt}
-          disabled={busy}
+          disabled={busy || startFailed}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -424,7 +439,7 @@ export default function HarnessView({ session, onClose, toast }) {
         <button
           type="button"
           onClick={sendPrompt}
-          disabled={busy}
+          disabled={busy || startFailed}
           aria-label="Send"
           className="hover-bg-surface"
           style={{
