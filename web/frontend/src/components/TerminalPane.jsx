@@ -37,6 +37,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   workflowSummary, // { count: number, inProgressCount: number, items: array } | null — recent workflows
   onRenameSession, // (newName: string, syncClaude: boolean) => Promise<void> — PATCH rename, owned by App.jsx (updates sidebar name)
   usage,           // { total_tokens, est_cost_usd, effort, tokensPerSec } | null | undefined — live usage summary for this session
+  taskDone = false, // boolean — a Plexar-Framework task named this pane's session_id in a done/failed/abandoned event; App.jsx clears it on focus
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -757,6 +758,20 @@ const TerminalPane = forwardRef(function TerminalPane({
             <StateIcon state={activityState} size={10} color={`var(--cc-${dataState})`} />
             {stateWord}
           </span>
+          {taskDone && (
+            <span
+              title="A Plexar-Framework task finished for this session"
+              aria-label="Task finished"
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 999,
+                flexShrink: 0,
+                background: "var(--cc-ok, #51cf66)",
+                boxShadow: "0 0 6px var(--cc-ok, #51cf66)",
+              }}
+            />
+          )}
           {renaming ? (
             <div className="flex items-center gap-1.5 min-w-0" onMouseDown={(e) => e.stopPropagation()}>
               <input

@@ -37,6 +37,7 @@ import Inspector from "./components/shell/Inspector";
 import StatusStrip from "./components/shell/StatusStrip";
 import SettingsView from "./components/settings/SettingsView";
 import ChatView from "./components/ChatView.jsx";
+import TasksView from "./components/TasksView.jsx";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneStripFrom } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
@@ -135,6 +136,7 @@ const CHAT_URL_FALLBACK = "https://plexar-chat.boord-its.com";
 const SECTION_TITLES = {
   work: "Workspace",
   chat: "Plexar Chat",
+  tasks: "Tasks",
   fleet: "Fleet",
   engine: "Engine",
   reports: "Reports",
@@ -2153,6 +2155,115 @@ export default function App() {
   const focusedSessionId = focusedIndex >= 0 && focusedIndex < activeIds.length ? activeIds[focusedIndex] : null;
   const focusedSession = focusedSessionId != null ? sessions.find((s) => s.id === focusedSessionId) || null : null;
 
+  // ── Plexar-Framework / TASKS (HANDOFF-studio-framework-pilot.md §3, §6) ────
+  // TRAP, stated once: neither poll below ever calls `:8430` directly — the
+  // framework sends no CORS headers, so a fetch from this origin could not
+  // read the response anyway. Both go through Studio's own backend routes.
+
+  // B10: rail badge, polled every 10s regardless of which section is open —
+  // the badge must be visible from anywhere, not just while TASKS is open.
+  const [frameworkSummary, setFrameworkSummary] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/framework/summary");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setFrameworkSummary(data);
+      } catch {
+        /* best-effort; the previous reading (if any) is left in place */
+      }
+    };
+    poll();
+    const id = setInterval(poll, 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  const tasksBadge = useMemo(() => {
+    if (!frameworkSummary?.up) return null; // hidden when up:false or 0
+    return frameworkSummary.pending_approvals > 0 ? frameworkSummary.pending_approvals : null;
+  }, [frameworkSummary]);
+
+  // Phase D: "task finished" toasts. Polled every 10s while Studio is open.
+  // The cursor lives ONLY in this ref (never persisted, never in state) per
+  // the handoff's explicit instruction. The FIRST successful call only seeds
+  // the cursor -- it must never toast for history that predates this poll
+  // starting.
+  const frameworkEventsCursorRef = useRef(null);
+  const frameworkEventsSeededRef = useRef(false);
+  const [taskDoneTerminalIds, setTaskDoneTerminalIds] = useState(() => new Set());
+  const [tasksForcedBucket, setTasksForcedBucket] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const cursor = frameworkEventsCursorRef.current;
+        const qs = cursor ? `?since=${encodeURIComponent(cursor)}` : "";
+        const res = await fetch(`/api/framework/events${qs}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || !data?.up) return;
+        const firstRun = !frameworkEventsSeededRef.current;
+        frameworkEventsSeededRef.current = true;
+        if (!firstRun && Array.isArray(data.events)) {
+          for (const ev of data.events) {
+            if (["done", "failed", "abandoned"].includes(ev?.to)) {
+              const bits = [`T-${ev.task_id} ${ev.to}`];
+              if (ev.gate_exit != null) bits.push(`gate ${ev.gate_exit}`);
+              if (ev.branch) bits.push(ev.branch);
+              toast(bits.join(" · "), ev.to === "done" ? "success" : "error", 8000, {
+                label: "View",
+                onClick: () => {
+                  setTasksForcedBucket(ev.bucket || null);
+                  setActiveSection("tasks");
+                },
+              });
+            }
+            // session_id "" is normalised to null by the backend contract.
+            if (ev?.session_id) {
+              const match = sessions.find((s) => s.terminalId === ev.session_id);
+              if (match) {
+                setTaskDoneTerminalIds((prev) => {
+                  if (prev.has(match.terminalId)) return prev;
+                  const next = new Set(prev);
+                  next.add(match.terminalId);
+                  return next;
+                });
+              }
+            }
+          }
+        }
+        if (typeof data.cursor === "string") frameworkEventsCursorRef.current = data.cursor;
+      } catch {
+        /* best-effort; the cursor is simply not advanced this tick */
+      }
+    };
+    poll();
+    const id = setInterval(poll, 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [toast, sessions]);
+
+  // A pane's "task done" dot stands until the pane is FOCUSED, never cleared
+  // by the poll itself (D56: never write into the terminal, and clearing on
+  // arrival would mean the user never gets to notice it).
+  useEffect(() => {
+    const termId = focusedSession?.terminalId;
+    if (!termId) return;
+    setTaskDoneTerminalIds((prev) => {
+      if (!prev.has(termId)) return prev;
+      const next = new Set(prev);
+      next.delete(termId);
+      return next;
+    });
+  }, [focusedSession?.terminalId]);
+
+  // Leaving TASKS clears a forced deep-link so the NEXT open falls back to
+  // the normal active-Location match (B9) rather than silently re-opening
+  // whatever a toast last pointed at.
+  useEffect(() => {
+    if (activeSection !== "tasks") setTasksForcedBucket(null);
+  }, [activeSection]);
+
   // Track which slot each session last occupied so activating it from
   // Projects/Fleet/palette focuses ITS pane instead of reshuffling the grid.
   // RECONCILES, not just inserts: a session evicted from its slot must LOSE its
@@ -2639,6 +2750,7 @@ export default function App() {
                         workflowSummary={workflowsByTerminal[session.terminalId] || null}
                         usage={usageByTerminal[session.terminalId] || null}
                         onRenameSession={(newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
+                        taskDone={taskDoneTerminalIds.has(session.terminalId)}
                       />
                     )}
                     {/* Mailbox bridge overlay (V4) — also carries the grant-rounds
@@ -2736,6 +2848,7 @@ export default function App() {
             activeSection={activeSection}
             onSelectSection={selectSection}
             engineStatus={engineStatus}
+            tasksBadge={tasksBadge}
             user={user}
             projectsDrawerOpen={sidebarOpen}
           />
@@ -3041,6 +3154,20 @@ export default function App() {
             {activeSection === "chat" && (
               <ViewBoundary name="Plexar Chat" resetKey={activeSection}>
                 <ChatView url={chatUrl} onError={(m) => toast(`Plexar Chat: ${m}`, "error")} />
+              </ViewBoundary>
+            )}
+
+            {/* TASKS renders the Plexar-Framework's own page (B1-B9). Same
+                idiom as CHAT: display:none'd grid above, own child webview,
+                own ViewBoundary. B9's bucket match uses the FOCUSED pane's
+                workdir as "the active Location's folder". */}
+            {activeSection === "tasks" && (
+              <ViewBoundary name="Plexar Tasks" resetKey={activeSection}>
+                <TasksView
+                  activeLocationFolder={focusedSession?.workdir || null}
+                  forcedBucket={tasksForcedBucket}
+                  onError={(m) => toast(`Plexar-Framework: ${m}`, "error")}
+                />
               </ViewBoundary>
             )}
 

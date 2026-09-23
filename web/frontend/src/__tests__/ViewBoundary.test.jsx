@@ -199,11 +199,12 @@ describe("structural — the boundaries are actually MOUNTED", () => {
   it("wraps EVERY full-area view", () => {
     // A count, not a spot check: adding a destination without a boundary is the
     // way this regresses, and it should cost a red suite. The number moved 4->5
-    // when Plexar Chat became a full-area section (2026-09-22) — which is this
-    // guard working, not a stale assertion. The views are NAMED rather than
-    // left as a bare integer so the next person to move it has to say which
-    // view they added.
-    const FULL_AREA_VIEWS = ["Workspace", "Settings", "Reports", "Fleet", "Plexar Chat"];
+    // when Plexar Chat became a full-area section (2026-09-22), and 5->6 when
+    // Plexar Tasks did (HANDOFF-studio-framework-pilot.md §3, 2026-09-23) —
+    // which is this guard working, not a stale assertion. The views are NAMED
+    // rather than left as a bare integer so the next person to move it has to
+    // say which view they added.
+    const FULL_AREA_VIEWS = ["Workspace", "Settings", "Reports", "Fleet", "Plexar Chat", "Plexar Tasks"];
     const opens = src.match(/<ViewBoundary\b/g) || [];
     expect(opens.length).toBe(FULL_AREA_VIEWS.length);
     expect((src.match(/<\/ViewBoundary>/g) || []).length).toBe(FULL_AREA_VIEWS.length);

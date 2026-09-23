@@ -1,13 +1,14 @@
-import { LayoutGrid, FolderOpen, List, Cpu, ChartColumn, MessageSquare, Settings } from "lucide-react";
+import { LayoutGrid, FolderOpen, List, Cpu, ChartColumn, MessageSquare, ListChecks, Settings } from "lucide-react";
 import { LogoMark } from "../ActivityRail";
 
 // This list is RAIL ITEMS, and ONE of them is not a destination: PROJECTS
 // toggles the drawer (see isActive below) rather than replacing the content
-// area. Everything else, CHAT included, is a real section.
+// area. Everything else, CHAT and TASKS included, is a real section.
 const SECTIONS = [
   { id: "work", label: "WORK", icon: LayoutGrid },
   { id: "projects", label: "PROJECTS", icon: FolderOpen },
   { id: "chat", label: "CHAT", icon: MessageSquare },
+  { id: "tasks", label: "TASKS", icon: ListChecks },
   { id: "fleet", label: "FLEET", icon: List },
   { id: "engine", label: "ENGINE", icon: Cpu },
   { id: "reports", label: "REPORTS", icon: ChartColumn },
@@ -22,8 +23,12 @@ const ENGINE_STATUS_COLOR = {
   down: "var(--cc-error)",
 };
 
-/** Single rail item: 52px wide, icon above an 8px/800 label. */
-function RailItem({ id, label, icon: Icon, active, onClick, statusDot }) {
+/** Single rail item: 52px wide, icon above an 8px/800 label.
+ *  `badge` (B10) is the TASKS pending-approvals count — rendered in the same
+ *  top-right spot as `statusDot`, styled the same way (small, glowing,
+ *  currentColor), just carrying a number instead of a bare dot. Omitted
+ *  (hidden) rather than shown as 0, same honesty rule as `statusDot`. */
+function RailItem({ id, label, icon: Icon, active, onClick, statusDot, badge }) {
   return (
     <button
       onClick={() => onClick(id)}
@@ -70,6 +75,29 @@ function RailItem({ id, label, icon: Icon, active, onClick, statusDot }) {
           }}
         />
       )}
+      {badge != null && (
+        <span
+          aria-label={`${badge} pending approval${badge === 1 ? "" : "s"}`}
+          style={{
+            position: "absolute",
+            top: 2,
+            right: 4,
+            minWidth: 12,
+            height: 12,
+            padding: "0 3px",
+            borderRadius: 999,
+            background: "var(--cc-error, #ff6b6b)",
+            boxShadow: "0 0 6px currentColor",
+            color: "#fff",
+            fontSize: 8,
+            fontWeight: 800,
+            lineHeight: "12px",
+            textAlign: "center",
+          }}
+        >
+          {badge}
+        </span>
+      )}
     </button>
   );
 }
@@ -79,7 +107,7 @@ function RailItem({ id, label, icon: Icon, active, onClick, statusDot }) {
  * the bottom, and a user avatar. Presentational only — all state and
  * navigation live in the parent (App.jsx).
  */
-export default function Rail({ activeSection, onSelectSection, engineStatus, user, projectsDrawerOpen = false }) {
+export default function Rail({ activeSection, onSelectSection, engineStatus, tasksBadge = null, user, projectsDrawerOpen = false }) {
   const initial = user?.name ? user.name.trim().charAt(0).toUpperCase() || "?" : "?";
   // PROJECTS is a DRAWER toggle, not a destination — it overlays Workspace
   // rather than replacing the content area, so `activeSection` never becomes
@@ -117,6 +145,7 @@ export default function Rail({ activeSection, onSelectSection, engineStatus, use
             active={isActive(s.id)}
             onClick={onSelectSection}
             statusDot={s.id === "engine" && engineStatus ? ENGINE_STATUS_COLOR[engineStatus] : null}
+            badge={s.id === "tasks" ? tasksBadge : null}
           />
         ))}
       </div>
