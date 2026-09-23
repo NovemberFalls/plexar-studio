@@ -159,4 +159,18 @@ describe("HarnessView", () => {
     expect(onOpenSettings).toHaveBeenCalled();
     expect(screen.getByRole("textbox")).toBeDisabled();
   });
+
+  it("shows a start error that arrives after the pane has already rendered", () => {
+    const base = { ...makeSession(), harnessSessionId: null, status: "starting" };
+    const { rerender } = render(<HarnessView session={base} onClose={() => {}} toast={() => {}} />);
+    expect(screen.queryByTestId("harness-error-banner")).toBeNull();
+    rerender(
+      <HarnessView
+        session={{ ...base, status: "error", startError: { reason: "key_missing", message: "x" } }}
+        onClose={() => {}}
+        toast={() => {}}
+      />
+    );
+    expect(screen.getByTestId("harness-error-banner")).toHaveTextContent("Add your Plexar Harness key in Settings.");
+  });
 });

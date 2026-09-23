@@ -145,6 +145,11 @@ export default function HarnessView({ session, onClose, toast, onOpenSettings })
   // pane says what is wrong on first render rather than showing an empty transcript.
   const [errorBanner, setErrorBanner] = useState(session.startError || null);
   const startFailed = session.status === "error";
+  // The pane mounts while the start request is still in flight, so a failure lands
+  // AFTER first render; adopt it when it arrives or the pane stays blank (2.1.39 QA).
+  useEffect(() => {
+    if (session.startError) setErrorBanner(session.startError);
+  }, [session.startError]);
   const [pendingPermissions, setPendingPermissions] = useState([]);
   const [wsStatus, setWsStatus] = useState("connecting");
   const [configOptions, setConfigOptions] = useState(session.harnessConfigOptions || []);

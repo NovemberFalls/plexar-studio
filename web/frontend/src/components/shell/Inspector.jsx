@@ -436,6 +436,17 @@ export default function Inspector({
             <BridgeCard bridge={bridge} onEndBridge={onEndBridge} onOpenTranscript={onOpenTranscript} />
           )}
 
+          {/* Plexar Harness sessions are not a Claude/Codex PTY: the model/permission/
+              effort/fast overrides, the CLI usage figures and Interrupt/Fork/Bridge/Pop out
+              all act on a terminal this session does not have. Say so rather than render
+              controls that silently do nothing. */}
+          {session.harness === "plexar-harness" ? (
+            <div className="text-[11px]" style={{ color: "var(--cc-muted)", lineHeight: 1.5 }}>
+              Plexar Harness session. Model and effort are chosen in the pane header;
+              stop a running answer with the pane&apos;s Stop button.
+            </div>
+          ) : (
+          <>
           {/* This session overrides */}
           <SectionLabel>This session</SectionLabel>
           <div className="grid grid-cols-2 gap-1.5" style={{ marginBottom: 16 }}>
@@ -524,6 +535,8 @@ export default function Inspector({
             <ActionButton icon={Merge} label="Bridge…" onClick={onBridge} />
             <ActionButton icon={ExternalLink} label="Pop out" onClick={onPopOut} />
           </div>
+          </>
+          )}
         </div>
       )}
     </div>
