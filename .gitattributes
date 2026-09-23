@@ -1,2 +1,6 @@
 # Enforce LF for shell scripts so hooks work on all platforms
 .husky/* text eol=lf
+
+# Vendored byte-for-byte and pinned by sha256 (tests/test_harness_client_pin.py):
+# never let checkout rewrite its line endings.
+web/plexar_harness_client.py -text
