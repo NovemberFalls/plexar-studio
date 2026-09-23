@@ -238,6 +238,16 @@ class TestSpawnEnvDisablesAutoupdater:
         _, kwargs = backend.spawn.call_args
         assert kwargs["env"]["DISABLE_AUTOUPDATER"] == "1"
 
+    def test_spawn_env_sets_plexar_session_id_to_terminal_id(self, monkeypatch):
+        """PLEXAR_SESSION_ID is this pane's own id, overriding any inherited value."""
+        monkeypatch.setenv("PLEXAR_SESSION_ID", "inherited")
+        backend = self._make_mock_backend()
+        with patch("pty_backend.get_backend", return_value=backend), \
+             patch("pty_manager.resolve_claude_cli", side_effect=lambda path: ("claude", path)):
+            session = self.mgr.create_terminal(name="t", workdir="C:\\Code", model="sonnet")
+        _, kwargs = backend.spawn.call_args
+        assert kwargs["env"]["PLEXAR_SESSION_ID"] == session.id
+
     def test_spawn_env_does_not_mutate_parent_os_environ(self, monkeypatch):
         """The env override is scoped to the child's env dict, not os.environ.
 

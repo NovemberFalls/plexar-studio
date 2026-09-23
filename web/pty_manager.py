@@ -1247,6 +1247,12 @@ class PtyManager:
         # the running cockpit server's own os.environ.
         env["DISABLE_AUTOUPDATER"] = "1"
 
+        # Session identity for Plexar-Framework (brief rev 3, Phase C). A task queued
+        # from inside this session records which pane sent it, and /api/events hands
+        # it back so the "task done" toast can mark that pane. Always overwritten:
+        # a Studio launched from inside another session inherits that session's id.
+        env["PLEXAR_SESSION_ID"] = terminal_id
+
         import sys as _sys
         meipass = getattr(_sys, "_MEIPASS", None)
         current_path = env.get("PATH", env.get("Path", ""))
