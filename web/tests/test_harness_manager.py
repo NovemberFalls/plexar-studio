@@ -108,6 +108,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(settings_store, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(settings_store, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.setattr(hm, "_labels_path", lambda: tmp_path / "harness_labels.json")
+    monkeypatch.setattr(hm, "_known_path", lambda: tmp_path / "harness_sessions.json")
     monkeypatch.setattr(hm, "_models_cache_path", lambda: tmp_path / "harness_models_cache.json")
     monkeypatch.setattr(hm, "_harness_settings", lambda: {"permission_mode": "read-only", "root": ""})
     FakeRuntime.instances.clear()
@@ -485,3 +486,28 @@ def test_key_falls_back_to_environment_and_settings_wins(env, monkeypatch):
     hm.clear_key()
     assert hm.key_source() == "environment"
 
+
+
+@pytest.mark.asyncio
+async def test_listing_never_starts_a_runtime(env, tmp_path):
+    """2.1.41 owner QA: the sidebar lists every saved location at startup, and a
+    runtime per list started 71 node processes and starved every other launch."""
+    ws, other = env
+    hm.set_key(KEY)
+    m = make()
+    folders = []
+    for i in range(20):
+        d = tmp_path / f"loc{i}"
+        d.mkdir()
+        folders.append(str(d))
+    for f in folders + [ws, other]:
+        assert await m.list_sessions(f) == []
+    assert FakeRuntime.instances == []
+
+    # A session Studio created is still listed after its runtime is gone, still without a spawn.
+    created = await m.new_session(ws, "mine")
+    await m.stop_all()
+    FakeRuntime.instances.clear()
+    rows = await make().list_sessions(ws)
+    assert [(r["session_id"], r["label"], r["open"]) for r in rows] == [(created["session_id"], "mine", False)]
+    assert FakeRuntime.instances == []

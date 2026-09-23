@@ -340,6 +340,45 @@ def write_label(session_id: str, label: str | None) -> None:
         os.replace(tmp, path)
 
 
+# Known sessions (~/.plexar-studio/harness_sessions.json, {session_id: workspace})
+#
+# Listing must NEVER start a runtime. The sidebar asks for every saved location at
+# once, and a runtime per ask launched 71 node processes at startup (2.1.41 owner QA:
+# no session of any kind could launch until they idled out). A workspace with no live
+# runtime is answered from this record of the sessions Studio itself created or
+# resumed there. Sessions made outside Studio appear once a runtime for that folder runs.
+
+def _known_path() -> Path:
+    return app_paths.data_path("harness_sessions.json")
+
+
+def read_known_sessions() -> dict[str, str]:
+    path = _known_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        logger.warning("Could not read known harness sessions at %s", path, exc_info=True)
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
+
+
+def remember_session(session_id: str, workspace_key: str) -> None:
+    with _labels_lock:
+        known = read_known_sessions()
+        if known.get(session_id) == workspace_key:
+            return
+        known[session_id] = workspace_key
+        path = _known_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(known, fh, indent=2)
+        os.replace(tmp, path)
+
+
 # ---------------------------------------------------------------------------
 # Status probes
 # ---------------------------------------------------------------------------
@@ -642,7 +681,16 @@ class HarnessManager:
         return entry
 
     async def list_sessions(self, workspace: str) -> list[dict]:
-        entry = await self.ensure_runtime(workspace)
+        key = normalize_workspace(workspace)
+        entry = self._runtimes.get(key)
+        if entry is None:
+            # No runtime here: answer from Studio's own record, never spawn one.
+            known = await asyncio.to_thread(read_known_sessions)
+            labels = await asyncio.to_thread(read_labels)
+            return [{
+                "session_id": sid, "label": labels.get(sid), "workspace": workspace,
+                "open": False, "busy": False,
+            } for sid, ws in known.items() if ws == key]
         rows: dict[str, dict] = {}
         cursor = None
         for _ in range(MAX_LIST_PAGES):
@@ -670,6 +718,7 @@ class HarnessManager:
         if sid:
             entry.open.add(sid)
             self._session_ws[sid] = entry.key
+            await asyncio.to_thread(remember_session, sid, entry.key)
             if label:
                 await asyncio.to_thread(write_label, sid, label)
         return {"session_id": sid, "config_options": config_options}
@@ -681,6 +730,7 @@ class HarnessManager:
         await asyncio.to_thread(record_config_options, config_options)
         entry.open.add(session_id)
         self._session_ws[session_id] = entry.key
+        await asyncio.to_thread(remember_session, session_id, entry.key)
         return {"config_options": config_options}
 
     async def prompt(self, session_id: str, text: str) -> None:

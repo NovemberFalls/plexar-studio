@@ -280,3 +280,16 @@ async def test_events_route_default_settings_key_present():
     """DEFAULT_SETTINGS carries `framework.url` beside `chat`, so a fresh
     install without any settings.json still has a value to read."""
     assert settings_store.DEFAULT_SETTINGS["framework"] == {"url": "http://127.0.0.1:8430"}
+
+
+def test_unreachable_is_logged_once_until_it_answers(monkeypatch):
+    import framework_client as fc
+    fc._unreachable_logged.clear()
+    import urllib.error
+    monkeypatch.setattr(fc, "_get_json", lambda url: (_ for _ in ()).throw(urllib.error.URLError("timed out")))
+    # cockpit.* loggers do not propagate to root (logging_config), so count calls directly.
+    seen = []
+    monkeypatch.setattr(fc.logger, "info", lambda msg, *a, **k: seen.append(msg % a))
+    for _ in range(5):
+        assert fc.fetch_summary("http://127.0.0.1:8430")["up"] is False
+    assert sum("unreachable" in m for m in seen) == 1

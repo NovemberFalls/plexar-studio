@@ -49,6 +49,26 @@ _EVENTS_LIMIT = 200
 _MAX_PAGES = 5
 
 
+
+# The badge and toast polls hit an unreachable framework every few seconds; a full
+# traceback per poll buried everything else in cockpit.log (241 in 20 minutes during
+# 2.1.41 QA). "Not running" is an expected state: log the transition once, with the
+# traceback, and stay quiet until it answers again.
+_unreachable_logged: set[str] = set()
+
+
+def _log_unreachable(base: str, exc: BaseException) -> None:
+    if base in _unreachable_logged:
+        return
+    _unreachable_logged.add(base)
+    logger.info("framework unreachable at %s (logged once until it answers): %s", base, exc, exc_info=True)
+
+
+def _mark_reachable(base: str) -> None:
+    if base in _unreachable_logged:
+        _unreachable_logged.discard(base)
+        logger.info("framework answering again at %s", base)
+
 def _validate_base_url(url: str) -> Optional[str]:
     """Return *url* stripped of a trailing slash, or None if not http(s)."""
     if not url:
@@ -93,7 +113,7 @@ def fetch_summary(base: str) -> dict:
         logger.info("framework /api/summary or /api/daemon refused: %s", exc, exc_info=True)
         return {"up": False, "base": validated, "reason": f"http {exc.code}"}
     except urllib.error.URLError as exc:
-        logger.info("framework unreachable at %s: %s", validated, exc, exc_info=True)
+        _log_unreachable(validated, exc)
         return {"up": False, "base": validated, "reason": "unreachable"}
     except (TimeoutError, OSError) as exc:
         logger.info("framework request timed out or errored: %s", exc, exc_info=True)
@@ -120,6 +140,7 @@ def fetch_summary(base: str) -> dict:
         logger.info("framework summary/daemon had unexpected shape: %s", exc, exc_info=True)
         return {"up": False, "base": validated, "reason": "bad response"}
 
+    _mark_reachable(validated)
     return {
         "up": True,
         "base": validated,
@@ -173,7 +194,7 @@ def fetch_events(base: str, since: Optional[str]) -> dict:
         logger.info("framework /api/events refused: %s", exc, exc_info=True)
         return {"up": False, "base": validated, "reason": f"http {exc.code}"}
     except urllib.error.URLError as exc:
-        logger.info("framework unreachable at %s: %s", validated, exc, exc_info=True)
+        _log_unreachable(validated, exc)
         return {"up": False, "base": validated, "reason": "unreachable"}
     except (TimeoutError, OSError) as exc:
         logger.info("framework request timed out or errored: %s", exc, exc_info=True)
@@ -182,4 +203,5 @@ def fetch_events(base: str, since: Optional[str]) -> dict:
         logger.info("framework returned unparseable/unexpected JSON: %s", exc, exc_info=True)
         return {"up": False, "base": validated, "reason": "bad response"}
 
+    _mark_reachable(validated)
     return {"up": True, "base": validated, "events": events, "cursor": cursor or (since or "")}

@@ -31,6 +31,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(settings_store, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(settings_store, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.setattr(hm, "_labels_path", lambda: tmp_path / "harness_labels.json")
+    monkeypatch.setattr(hm, "_known_path", lambda: tmp_path / "harness_sessions.json")
     monkeypatch.setattr(hm, "_models_cache_path", lambda: tmp_path / "harness_models_cache.json")
     monkeypatch.setattr(hm, "_harness_settings", lambda: {"permission_mode": "workspace-write", "root": ""})
     monkeypatch.setattr(hm, "_node_version", lambda: "v22.19.0")
