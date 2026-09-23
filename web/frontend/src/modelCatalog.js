@@ -472,6 +472,8 @@ export function ModelCatalogProvider({ children }) {
 export const HARNESSES = [
   { id: "claude-code", label: "Claude Code" },
   { id: "codex", label: "Codex" },
+  // Not a PTY: routed through /api/harness by App.jsx's createSession.
+  { id: "plexar-harness", label: "Plexar Harness" },
 ];
 
 export const DEFAULT_HARNESS = "claude-code";
@@ -581,6 +583,9 @@ export function getModelHarness(modelId) {
  *  Returns the SAME object shape whether or not it changed anything, so a
  *  caller cannot accidentally treat "no change" as "no answer". */
 export function reconcileModelForHarness(model, harness) {
+  // The harness picks its own model per session; keep the stored Claude/Codex
+  // model as-is so switching back does not find it silently replaced.
+  if (harness === "plexar-harness") return { model, changed: false };
   const owner = getModelHarness(model);
   if (owner === "any" || owner === harness) return { model, changed: false };
   return { model: defaultModelForHarness(harness), changed: true };

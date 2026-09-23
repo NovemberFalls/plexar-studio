@@ -132,6 +132,7 @@ export default function TopBar({
   // -- pty_manager accepts `auto`/`dontAsk`, which PERMISSION_MODES omits.
   const currentHarness = resolveVocabChoice(harness, HARNESSES);
   const isCodexHarness = harness === "codex";
+  const isPlexarHarness = harness === "plexar-harness";
   // NOT `modelList.find(...) || modelList[0]`. That fallback rendered the first
   // catalog entry ("Opus 5") whenever the id was unrecognized — which the bare
   // alias "sonnet" always is, since /api/models returns only dated ids — so the
@@ -592,6 +593,20 @@ export default function TopBar({
         )}
       </div>
 
+      {/* Plexar Harness sessions take model, effort and approvals from the harness
+          itself (set inside each session's header), so the Claude/Codex launch pills
+          do not apply. Shown as a visible reason, never as silently inert controls.
+          The stored Claude model is kept untouched for when the user switches back. */}
+      {isPlexarHarness ? (
+        <span
+          className="text-xs px-3 py-1"
+          style={{ color: "var(--text-muted)" }}
+          title="Plexar Harness sessions pick their model and effort inside the session"
+        >
+          Model and effort are set inside each harness session
+        </span>
+      ) : (
+      <>
       {/* Model picker */}
       <div className="relative">
         <button
@@ -913,6 +928,8 @@ export default function TopBar({
       >
         Fast
       </button>
+      </>
+      )}
 
       {/* Avatar */}
       {user?.picture ? (

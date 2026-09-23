@@ -88,13 +88,11 @@ const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`
  */
 const PERMISSION_OPTIONS = PERMISSION_MODES;
 
-/** A third harness choice, local to this dialog only (not added to the shared
- *  HARNESSES list in modelCatalog.js — that list also drives the TopBar pill,
- *  which has no Plexar Harness support yet). Selecting it routes session
- *  creation through /api/harness/sessions instead of /api/terminals; see
- *  App.jsx's createSession. */
+/** Plexar Harness is in the shared HARNESSES list (it also drives the TopBar
+ *  pill). Selecting it routes session creation through /api/harness/sessions
+ *  instead of /api/terminals; see App.jsx's createSession. */
 const PLEXAR_HARNESS_ID = "plexar-harness";
-const HARNESS_OPTIONS = [...HARNESSES, { id: PLEXAR_HARNESS_ID, label: "Plexar Harness" }];
+const HARNESS_OPTIONS = HARNESSES;
 
 /** Shown beside Model / Permission / Effort when Plexar Harness is selected —
  *  those three selects were built for the Claude Code / Codex launch path and
