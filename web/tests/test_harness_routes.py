@@ -1,7 +1,6 @@
-"""The /api/harness/* routes and /ws/harness, over a FAKE runtime (no node)."""
+"""The surviving /api/harness/* routes (status, key, models), over a FAKE runtime (no node)."""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -38,6 +37,8 @@ def setup(monkeypatch, tmp_path):
     mgr = hm.HarnessManager(runtime_factory=FakeRuntime)
     monkeypatch.setattr(server, "harness_manager", mgr)
     monkeypatch.setattr(hm, "_last_config_options", None)
+    monkeypatch.setattr(hm, "_last_config_at", None)
+    monkeypatch.setattr(hm, "_probe_runtime_factory", FakeRuntime)
     FakeRuntime.instances.clear()
     FakeRuntime.instances_pending_config = None
     ws = tmp_path / "ws"
@@ -59,68 +60,10 @@ async def test_key_never_returned(setup):
     r = await client.get("/api/harness/status")
     assert r.json()["key_set"] is True and r.json()["node_ok"] is True
     bodies.append(r.text)
-    r = await client.post("/api/harness/sessions", json={"workspace": ws, "label": "L"})
-    bodies.append(r.text)
-    r = await client.get("/api/harness/sessions", params={"workspace": ws})
-    bodies.append(r.text)
     assert all(KEY not in b for b in bodies)
     r = await client.delete("/api/harness/key")
     assert r.json() == {"key_set": False, "key_source": None}
     await mgr.stop_all()
-
-
-@pytest.mark.asyncio
-async def test_start_without_key_is_502_key_missing(setup):
-    client, _, ws = setup
-    r = await client.post("/api/harness/sessions", json={"workspace": ws})
-    assert r.status_code == 502
-    assert r.json()["error"] == "key_missing" and r.json()["message"]
-    assert FakeRuntime.instances == []
-
-
-@pytest.mark.asyncio
-async def test_relative_workspace_is_400(setup):
-    client, _, _ = setup
-    r = await client.get("/api/harness/sessions", params={"workspace": "rel/path"})
-    assert r.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_prompt_busy_409_and_flow(setup):
-    client, mgr, ws = setup
-    await client.put("/api/harness/key", json={"key": KEY})
-    r = await client.post("/api/harness/sessions", json={"workspace": ws})
-    sid = r.json()["session_id"]
-    assert r.json()["config_options"] == [{"id": "model"}]
-    FakeRuntime.instances[0].turn_gate.clear()
-    r = await client.post(f"/api/harness/sessions/{sid}/prompt", json={"text": "hi"})
-    assert r.status_code == 202 and r.json() == {"accepted": True}
-    r = await client.post(f"/api/harness/sessions/{sid}/prompt", json={"text": "hi"})
-    assert r.status_code == 409 and r.json() == {"error": "busy"}
-    FakeRuntime.instances[0].turn_gate.set()
-    for _ in range(300):
-        if sid not in mgr._busy:
-            break
-        await asyncio.sleep(0.01)
-    assert (await client.post(f"/api/harness/sessions/{sid}/cancel")).json() == {"ok": True}
-    r = await client.post(f"/api/harness/sessions/{sid}/config", json={"config_id": "model", "value": "m"})
-    assert r.status_code == 200
-    assert (await client.put(f"/api/harness/sessions/{sid}/label", json={"label": "Named"})).json() == {"ok": True}
-    rows = (await client.get("/api/harness/sessions", params={"workspace": ws})).json()["sessions"]
-    assert any(x["session_id"] == sid and x["label"] == "Named" for x in rows)
-    assert (await client.post(f"/api/harness/sessions/{sid}/close")).json() == {"ok": True}
-    r = await client.post(f"/api/harness/sessions/{sid}/resume", json={"workspace": ws})
-    assert r.json() == {"config_options": [{"id": "reasoning_effort"}]}
-    await mgr.stop_all()
-
-
-@pytest.mark.asyncio
-async def test_permission_unknown_404(setup):
-    client, _, _ = setup
-    r = await client.post("/api/harness/permissions/nope", json={"option_id": "allow-once"})
-    assert r.status_code == 404
-    r = await client.post("/api/harness/permissions/nope", json={"option_id": "allow-always"})
-    assert r.status_code == 400
 
 
 FIXTURE_CONFIG_OPTIONS = json.load(
@@ -133,8 +76,7 @@ async def test_models_session_source_no_key_leak(setup):
     client, mgr, ws = setup
     await client.put("/api/harness/key", json={"key": KEY})
     FakeRuntime.instances_pending_config = FIXTURE_CONFIG_OPTIONS
-    r = await client.post("/api/harness/sessions", json={"workspace": ws})
-    assert r.status_code == 200
+    # Empty cache + a key: the route runs ONE lazy probe, which is what fills it.
     r = await client.get("/api/harness/models")
     assert r.status_code == 200
     body = r.json()
@@ -155,83 +97,6 @@ async def test_models_none_source_when_nothing_ever_observed(setup):
 
 
 @pytest.mark.asyncio
-async def test_sessions_applies_model_and_effort_drops_unoffered(setup):
-    import logging
-
-    client, mgr, ws = setup
-    records: list[logging.LogRecord] = []
-
-    class _Collector(logging.Handler):
-        def emit(self, record):
-            records.append(record)
-
-    handler = _Collector()
-    server.logger.addHandler(handler)
-    try:
-        await client.put("/api/harness/key", json={"key": KEY})
-        FakeRuntime.instances_pending_config = FIXTURE_CONFIG_OPTIONS
-        r = await client.post("/api/harness/sessions",
-                               json={"workspace": ws, "model": "[\"plexar\",\"qwen3.8-27b\"]", "effort": "bogus"})
-    finally:
-        server.logger.removeHandler(handler)
-    assert r.status_code == 200
-    sid = r.json()["session_id"]
-    rt = FakeRuntime.instances[0]
-    assert rt.set_option_calls == [(sid, "model", "[\"plexar\",\"qwen3.8-27b\"]")]  # effort dropped, never sent
-    assert any("not offered" in rec.getMessage() for rec in records)
-    await mgr.stop_all()
-
-
-@pytest.mark.asyncio
-async def test_sessions_applies_model_then_effort_in_order(setup):
-    client, mgr, ws = setup
-    await client.put("/api/harness/key", json={"key": KEY})
-    FakeRuntime.instances_pending_config = FIXTURE_CONFIG_OPTIONS
-    r = await client.post("/api/harness/sessions",
-                           json={"workspace": ws, "model": "[\"plexar\",\"qwen3.8-27b\"]", "effort": "high"})
-    assert r.status_code == 200
-    rt = FakeRuntime.instances[0]
-    assert rt.set_option_calls == [
-        (r.json()["session_id"], "model", "[\"plexar\",\"qwen3.8-27b\"]"),
-        (r.json()["session_id"], "reasoning_effort", "high"),
-    ]
-    await mgr.stop_all()
-
-
-@pytest.mark.asyncio
-async def test_sessions_provider_default_effort_survives_as_real_value(setup):
-    """effort == "" ("Provider default") must survive end to end: request body
-    validation, _apply_initial_model_and_effort, and the set_config route --
-    never dropped as falsy."""
-    client, mgr, ws = setup
-    await client.put("/api/harness/key", json={"key": KEY})
-    FakeRuntime.instances_pending_config = FIXTURE_CONFIG_OPTIONS
-    r = await client.post("/api/harness/sessions",
-                           json={"workspace": ws, "model": "[\"plexar\",\"qwen3.8-27b\"]", "effort": ""})
-    assert r.status_code == 200
-    rt = FakeRuntime.instances[0]
-    assert rt.set_option_calls == [
-        (r.json()["session_id"], "model", "[\"plexar\",\"qwen3.8-27b\"]"),
-        (r.json()["session_id"], "reasoning_effort", ""),
-    ]
-    await mgr.stop_all()
-
-
-@pytest.mark.asyncio
-async def test_config_route_accepts_empty_string_value(setup):
-    client, mgr, ws = setup
-    await client.put("/api/harness/key", json={"key": KEY})
-    r = await client.post("/api/harness/sessions", json={"workspace": ws})
-    sid = r.json()["session_id"]
-    r = await client.post(f"/api/harness/sessions/{sid}/config",
-                           json={"config_id": "reasoning_effort", "value": ""})
-    assert r.status_code == 200
-    rt = FakeRuntime.instances[0]
-    assert rt.set_option_calls == [(sid, "reasoning_effort", "")]
-    await mgr.stop_all()
-
-
-@pytest.mark.asyncio
 async def test_status_rig_url_source_tiers(setup, monkeypatch):
     client, _, _ = setup
     r = await client.get("/api/harness/status")
@@ -244,13 +109,81 @@ async def test_status_rig_url_source_tiers(setup, monkeypatch):
     assert r.json()["rig_url_source"] == "harness"  # tier 1
 
 
-def test_ws_refuses_foreign_origin(setup):
-    from starlette.testclient import TestClient
-    from starlette.websockets import WebSocketDisconnect
+@pytest.mark.asyncio
+async def test_models_probe_is_lazy_once_and_cached(setup):
+    client, _, _ = setup
+    await client.put("/api/harness/key", json={"key": KEY})
+    FakeRuntime.instances_pending_config = FIXTURE_CONFIG_OPTIONS
+    assert FakeRuntime.instances == []  # nothing probes until the route is asked
+    await client.get("/api/harness/models")
+    assert len(FakeRuntime.instances) == 1
+    probe = FakeRuntime.instances[0]
+    assert probe.started and probe.stopped
+    assert probe.env["PLEXAR_HARNESS_KEY"] == KEY
+    assert not os.path.exists(str(probe.workspace))  # temp dir removed
+    # A fresh cache answers without a second probe.
+    r = await client.get("/api/harness/models")
+    assert r.json()["source"] == "session"
+    assert len(FakeRuntime.instances) == 1
 
-    _, _, ws = setup
-    client = TestClient(server.app, base_url="http://127.0.0.1:8420")
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(f"/ws/harness?workspace={ws}",
-                                      headers={"origin": "https://evil.example"}):
-            pass
+
+@pytest.mark.asyncio
+async def test_models_probe_reruns_only_when_older_than_24h(setup, monkeypatch):
+    client, _, _ = setup
+    await client.put("/api/harness/key", json={"key": KEY})
+    FakeRuntime.instances_pending_config = FIXTURE_CONFIG_OPTIONS
+    await client.get("/api/harness/models")
+    assert len(FakeRuntime.instances) == 1
+    monkeypatch.setattr(hm, "_last_config_at", hm._last_config_at - hm.PROBE_MAX_AGE_S + 60)
+    await client.get("/api/harness/models")
+    assert len(FakeRuntime.instances) == 1
+    monkeypatch.setattr(hm, "_last_config_at", hm._last_config_at - 120)
+    await client.get("/api/harness/models")
+    assert len(FakeRuntime.instances) == 2
+
+
+@pytest.mark.asyncio
+async def test_models_probe_skipped_without_key(setup):
+    client, _, _ = setup
+    r = await client.get("/api/harness/models")
+    assert r.json() == {"source": "none", "models": []}
+    assert FakeRuntime.instances == []
+
+
+def test_models_probe_never_runs_concurrently(setup):
+    import threading
+
+    hm.set_key(KEY)
+    FakeRuntime.instances_pending_config = FIXTURE_CONFIG_OPTIONS
+    gate, entered = threading.Event(), threading.Event()
+
+    class SlowRuntime(FakeRuntime):
+        def start(self):
+            entered.set()
+            gate.wait(5)
+            return super().start()
+
+    results = []
+    t = threading.Thread(target=lambda: results.append(hm.probe_models_if_stale(SlowRuntime)))
+    t.start()
+    assert entered.wait(5)
+    # A second caller while the first probe is in flight does not start another runtime.
+    assert hm.probe_models_if_stale(SlowRuntime) is False
+    assert len(FakeRuntime.instances) == 1
+    gate.set()
+    t.join(5)
+    assert results == [True]
+
+
+def test_models_probe_is_only_reached_from_the_models_route():
+    """Never at startup: the probe's one call site is the /api/harness/models handler."""
+    import ast
+
+    src = open(os.path.join(os.path.dirname(__file__), "..", "server.py"), encoding="utf-8").read()
+    owners = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Attribute) and sub.attr == "probe_models_if_stale":
+                    owners.append(node.name)
+    assert owners == ["harness_models"]

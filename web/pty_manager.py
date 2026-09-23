@@ -7,6 +7,7 @@ and bridges them to WebSocket connections.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -289,6 +290,32 @@ def resolve_codex_cli(search_path: str) -> tuple[str, str]:
         f"set the {_CODEX_CLI_PATH_ENV} environment variable to its full "
         "path. Searched PATH plus: " + ", ".join(searched),
         searched,
+    )
+
+
+class PlexarHarnessCliNotFound(FileNotFoundError):
+    """Raised when the `plexar-harness` launcher is not on PATH.
+
+    A FileNotFoundError for the same reason CodexCliNotFound is one: server.py's
+    existing fallback still catches it, and a harness-aware caller can name it.
+    """
+
+    def __init__(self, message: str, searched: list[str] | None = None):
+        super().__init__(message)
+        self.searched = searched or []
+
+
+def resolve_plexar_harness_cli(search_path: str) -> tuple[str, str]:
+    """Locate the `plexar-harness` launcher shim (`plexar-harness.cmd` on
+    Windows), which `profiles/install.ps1` in the plexar-harness checkout puts
+    on the user's PATH. Same return contract as resolve_codex_cli; no fallback
+    probe, because the shim lives in the checkout, not in an npm-global dir."""
+    found = shutil.which("plexar-harness", path=search_path)
+    if found:
+        return found, search_path
+    raise PlexarHarnessCliNotFound(
+        "Plexar Harness launcher not found - run packages/bundle/plexar/profiles/install.ps1 "
+        "in the plexar-harness checkout, then restart Plexar Studio so it picks up the new PATH.",
     )
 
 
@@ -658,7 +685,64 @@ _ALLOWED_PROVIDERS = {"anthropic", "openrouter", "local"}
 # instead. The harness is orthogonal to the provider: a codex session can still
 # be routed at OpenRouter, which is why this is a separate dimension rather
 # than another _ALLOWED_PROVIDERS value.
-_ALLOWED_HARNESSES = {"claude-code", "codex"}
+#
+# "plexar-harness" spawns the Plexar Harness CLI (`plexar-harness`), which runs
+# its own ACP runtime against the Plexar rig. It is provider-less from Studio's
+# side: the rig URL and key ride PLEXAR_RIG_URL / PLEXAR_HARNESS_KEY, so only
+# provider="anthropic" (the "no reroute" default) is accepted for it.
+_ALLOWED_HARNESSES = {"claude-code", "codex", "plexar-harness"}
+
+# The Plexar Harness CLI's own effort vocabulary (`-e off|high|default`,
+# plexar-harness.mjs EFFORTS). Studio's "" (provider default) maps to
+# "default"; any other Studio effort (Claude's low/medium/xhigh/max) is DROPPED,
+# never passed through -- the CLI would refuse it and exit.
+_PLEXAR_HARNESS_EFFORTS = {"": "default", "off": "off", "high": "high"}
+
+# Studio permission mode -> the Plexar Harness CLI's `-m <mode>` preset
+# (settings.mjs MODES: ask | auto-edit | full-access). Anything not listed maps
+# to "ask", the most restrictive preset.
+_PLEXAR_HARNESS_MODES = {
+    "bypassPermissions": "full-access",
+    "acceptEdits": "auto-edit",
+    "plan": "ask",
+    "default": "ask",
+}
+
+
+def plexar_harness_model_name(model: str) -> Optional[str]:
+    """Studio's Plexar Harness model value -> the PLEXAR_MODEL the CLI reads.
+
+    The TopBar pill stores the ACP configOption value verbatim, a JSON pair
+    '["plexar","qwen3.8-27b"]' (provider, served name). The harness profile
+    (cordis.patch.yml, profiles/plexar-acp.patch.yml) reads PLEXAR_MODEL as the
+    rig's served_model_name only, under its single `plexar` provider -- so the
+    pair's second element is what is exported. A bare served name is accepted
+    as-is. Empty -> None (no PLEXAR_MODEL; the profile's own default applies).
+    Anything else is REFUSED rather than silently substituted (R-169)."""
+    value = (model or "").strip()
+    if not value:
+        return None
+    if value.startswith("["):
+        try:
+            parsed = json.loads(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid Plexar Harness model: {model!r}") from exc
+        if not (isinstance(parsed, list) and len(parsed) == 2 and all(isinstance(p, str) for p in parsed)):
+            raise ValueError(f"Invalid Plexar Harness model: {model!r}")
+        if parsed[0] != "plexar":
+            raise ValueError(
+                f"Plexar Harness model {model!r} is not on the Plexar rig provider; "
+                "the harness can only select Plexar rig models."
+            )
+        value = parsed[1]
+    if _looks_anthropic(value):
+        raise ValueError(
+            f"{value!r} is a Claude model and the Plexar Harness cannot run it — "
+            "pick a Plexar Harness model, or switch the harness to Claude Code."
+        )
+    if not _LOCAL_MODEL_ID_RE.match(value):
+        raise ValueError(f"Invalid Plexar Harness model: {model!r}")
+    return value
 
 # Codex model-id validator. The Anthropic regex does not apply: Codex ids carry
 # no "[1m]" long-context suffix, and their catalog is static (Codex publishes no
@@ -1020,6 +1104,13 @@ class PtyManager:
         # which CLI gets resolved.
         if harness not in _ALLOWED_HARNESSES:
             raise ValueError(f"Invalid harness: {harness!r}")
+        if harness == "plexar-harness" and provider != "anthropic":
+            # The harness routes itself to the Plexar rig (PLEXAR_RIG_URL); an
+            # OpenRouter/local reroute has no meaning for it and would be a
+            # control that silently does nothing.
+            raise ValueError(
+                f"The Plexar Harness runs on the Plexar rig and cannot use provider {provider!r}."
+            )
         # A local engine under Codex is refused ONLY when the engine has been
         # MEASURED not to serve the Responses API.
         #
@@ -1055,6 +1146,7 @@ class PtyManager:
         openrouter_key: Optional[str] = None
         local_base_url: Optional[str] = None
         local_model_id: Optional[str] = None
+        plexar_harness_model: Optional[str] = None
         if provider == "openrouter":
             if not provider_model:
                 raise ValueError("provider_model is required when provider='openrouter'")
@@ -1104,6 +1196,10 @@ class PtyManager:
                 local_base_url = _server.resolve_local_base_url(local_provider_id, terminal_id)
             if not local_base_url:
                 raise ValueError(f"Unknown or non-local provider id: {local_provider_id!r}")
+        elif harness == "plexar-harness":
+            # PLEXAR_MODEL carries the served name; the value never reaches the
+            # command line. Validated/refused in plexar_harness_model_name.
+            plexar_harness_model = plexar_harness_model_name(model)
         elif harness == "codex":
             # Defense in depth, the twin of the provider="local" refusal above.
             # `claude-opus-5` satisfies _CODEX_MODEL_RE — it is alphanumeric,
@@ -1150,8 +1246,26 @@ class PtyManager:
             raise ValueError(f"Invalid permission_mode: {permission_mode!r}")
 
         # Validate effort against allowlist — value is interpolated into the cmd string.
-        if effort not in _ALLOWED_EFFORT_LEVELS:
+        if effort not in _ALLOWED_EFFORT_LEVELS and not (
+            harness == "plexar-harness" and effort in _PLEXAR_HARNESS_EFFORTS
+        ):
             raise ValueError(f"Invalid effort: {effort!r}")
+
+        # The Plexar Harness key is ALWAYS passed explicitly, and a spawn with no
+        # key is refused (DEC-229): an unset PLEXAR_HARNESS_KEY would let the
+        # harness fall back to its own credential files. Resolved before any
+        # env or process work so the refusal costs nothing.
+        plexar_harness_key: Optional[str] = None
+        plexar_rig_url: Optional[str] = None
+        if harness == "plexar-harness":
+            import harness_manager as _hm
+            plexar_harness_key = _hm.get_key()
+            if not plexar_harness_key:
+                raise ValueError(_hm.friendly("key_missing"))
+            try:
+                plexar_rig_url, _rig_source = _hm.resolve_rig_url(_hm._harness_settings())
+            except _hm.HarnessError as exc:
+                raise ValueError(_hm.friendly(getattr(exc, "reason", None))) from exc
 
         # Validate resume_session_id if provided (must be hex/UUID, no shell metacharacters)
         if resume_session_id and not _SESSION_ID_RE.match(resume_session_id):
@@ -1302,6 +1416,20 @@ class PtyManager:
                 current_path = os.pathsep.join(prepend) + os.pathsep + current_path
         env["PATH"] = current_path
 
+        if harness == "plexar-harness":
+            # Always overwritten / removed, never inherited: the pane must run on
+            # exactly the key, rig and model Studio resolved above.
+            env["PLEXAR_HARNESS_KEY"] = plexar_harness_key
+            env.pop("PLEXAR_RIG_URL", None)
+            env.pop("PLEXAR_MODEL", None)
+            if plexar_rig_url:
+                env["PLEXAR_RIG_URL"] = plexar_rig_url
+            if plexar_harness_model:
+                env["PLEXAR_MODEL"] = plexar_harness_model
+            # NEVER log the key itself — var names only.
+            logger.info("Plexar Harness: set env vars %s",
+                        [k for k in ("PLEXAR_HARNESS_KEY", "PLEXAR_RIG_URL", "PLEXAR_MODEL") if k in env])
+
         if provider == "openrouter" and harness == "codex":
             # Codex reads NONE of the ANTHROPIC_* plumbing below — it is routed
             # by the `-c model_providers.openrouter.*` config emitted in the
@@ -1410,7 +1538,11 @@ class PtyManager:
             if os.path.isdir(jsonl_dir):
                 pre_spawn_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
 
-        if harness == "codex":
+        if harness == "plexar-harness":
+            # Model rides PLEXAR_MODEL (env, above); only mode/effort/resume
+            # are flags, appended below. No Claude flag is ever added.
+            cmd = "plexar-harness"
+        elif harness == "codex":
             # `codex -m <model>`: unlike the claude CLI there is no env-var
             # route for model selection, so the id (or the OpenRouter slug)
             # always rides the command line. Both are regex-validated above.
@@ -1521,7 +1653,13 @@ class PtyManager:
         # both map to --dangerously-skip-permissions; bypass wins and we do NOT
         # also append --permission-mode to avoid duplicate/conflicting flags.
         effective_bypass = bypass_permissions or (permission_mode == "bypassPermissions")
-        if harness == "codex":
+        if harness == "plexar-harness":
+            # The harness CLI's own presets (`-m ask|auto-edit|full-access`).
+            # Bypass is full-access; --dangerously-skip-permissions is Claude's
+            # flag and must never reach this CLI.
+            mode = "full-access" if effective_bypass else _PLEXAR_HARNESS_MODES.get(permission_mode, "ask")
+            cmd += f" -m {mode}"
+        elif harness == "codex":
             # Codex expresses the same intent as a sandbox level plus an
             # approval policy, not as one --permission-mode flag. Mapped rather
             # than passed through so the pane's existing permission control
@@ -1556,7 +1694,15 @@ class PtyManager:
         # engine's own error naming the supported set, which is honest and
         # actionable; silently substituting a neighbour would be the R-169 shape.
         # OpenRouter stays skipped -- unmeasured, and not this defect.
-        if effort and harness == "codex":
+        if harness == "plexar-harness":
+            # `-e off|high|default` only. "" (provider default) is "default";
+            # Claude's low/medium/xhigh/max are dropped, never passed through.
+            harness_effort = _PLEXAR_HARNESS_EFFORTS.get(effort)
+            if harness_effort:
+                cmd += f" -e {harness_effort}"
+            else:
+                logger.info("Effort level %r requested but skipped — not offered by the Plexar Harness", effort)
+        elif effort and harness == "codex":
             # Codex takes reasoning effort as a config override, not a flag.
             # Values are allowlist-validated above and share the {low..max}
             # vocabulary, so the same string carries across.
@@ -1576,7 +1722,9 @@ class PtyManager:
         # silently no-ops on non-Opus models, so we skip the flag entirely for non-Opus.
         # Also skipped entirely for openrouter/local — foreign/local models don't support fast mode.
         _fast_settings_path: Optional[str] = None
-        if fast and harness == "codex":
+        if fast and harness == "plexar-harness":
+            logger.info("Fast mode requested but skipped — not supported by the Plexar Harness")
+        elif fast and harness == "codex":
             # Fast mode is a Claude Code settings key. Codex has no equivalent,
             # so the request is dropped loudly rather than silently — same
             # shape as the openrouter/local skips below.
@@ -1616,6 +1764,8 @@ class PtyManager:
         # reach the child, so re-stamp env["PATH"].
         if harness == "codex":
             cli_path, current_path = resolve_codex_cli(current_path)
+        elif harness == "plexar-harness":
+            cli_path, current_path = resolve_plexar_harness_cli(current_path)
         else:
             cli_path, current_path = resolve_claude_cli(current_path)
         env["PATH"] = current_path
@@ -1683,7 +1833,7 @@ class PtyManager:
             harness=harness,
             working_dir=workdir,
             # Each harness keeps its own native transcript identity.
-            claude_session_id=None if harness == "codex" else (resume_session_id or None),
+            claude_session_id=(resume_session_id or None) if harness == "claude-code" else None,
             codex_session_id=(resume_session_id or None) if harness == "codex" else None,
             bypass_permissions=effective_bypass,
             permission_mode=permission_mode,

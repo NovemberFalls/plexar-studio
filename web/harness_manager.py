@@ -1,6 +1,11 @@
-"""The `plexar-harness` session kind: one `HarnessRuntime` per workspace.
+"""Plexar Harness support: the key, the rig URL, the model catalog, and an ACP
+runtime registry (one `HarnessRuntime` per workspace).
 
-Not a PTY. The harness speaks ACP over the child's stdio; `plexar_harness_client`
+Studio's `plexar-harness` PANES are PTY terminals running the `plexar-harness`
+CLI (pty_manager.create_terminal, like codex); they read `get_key()` and
+`resolve_rig_url()` from here. The ACP side below is used only by the lazy
+`/api/harness/models` probe and by the registry's own tests. The harness speaks
+ACP over the child's stdio; `plexar_harness_client`
 (vendored byte-for-byte, contract v3) is the whole wire. This module owns the
 Studio side: the key, the per-workspace runtime registry, the update pump, the
 permission round-trip to the browser, per-session labels and idle stop.
@@ -29,7 +34,9 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -240,11 +247,12 @@ def record_config_options(config_options: list[dict] | None) -> None:
     still has a "cache"-sourced answer instead of "none". Does blocking disk
     I/O -- callers off the update-pump thread must wrap it in
     `asyncio.to_thread`."""
-    global _last_config_options
+    global _last_config_options, _last_config_at
     if not config_options:
         return
     with _config_cache_lock:
         _last_config_options = config_options
+        _last_config_at = time.time()
     _write_models_cache(config_options)
 
 
@@ -285,6 +293,95 @@ def parse_models_from_config_options(config_options: list[dict]) -> list[dict]:
     efforts = _flatten_effort_values(effort_entry) if effort_entry is not None else None
     return [{"id": m["id"], "label": m["label"], "efforts": list(efforts) if efforts is not None else None}
             for m in models]
+
+
+# ---------------------------------------------------------------------------
+# Lazy models probe. Nothing refreshes the cache now that sessions run in a PTY
+# (the `plexar-harness` CLI owns its own ACP), so GET /api/harness/models does
+# ONE short-lived probe: a runtime in a throwaway temp dir, new_session, read its
+# configOptions, stop. Only when the cache is empty or older than 24 h, never two
+# at once (a non-blocking lock: a second caller answers from the cache it has),
+# and never at startup -- only when the route is actually asked.
+# ---------------------------------------------------------------------------
+
+PROBE_MAX_AGE_S = 24 * 3600.0
+_probe_lock = threading.Lock()
+_last_config_at: float | None = None
+# Read at call time so tests can swap in a fake runtime.
+_probe_runtime_factory: Callable[..., Any] = HarnessRuntime
+
+
+def _cache_observed_at() -> float | None:
+    """When the newest cached configOptions were observed: this process's own
+    record if any, else the disk cache's mtime, else None (never observed)."""
+    with _config_cache_lock:
+        if _last_config_options and _last_config_at is not None:
+            return _last_config_at
+    try:
+        return os.path.getmtime(_models_cache_path())
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.warning("Could not stat the harness models cache", exc_info=True)
+        return None
+
+
+def models_cache_stale(now: float | None = None) -> bool:
+    observed = _cache_observed_at()
+    if observed is None:
+        return True
+    return ((now if now is not None else time.time()) - observed) >= PROBE_MAX_AGE_S
+
+
+def probe_models_if_stale(runtime_factory: Callable[..., Any] | None = None) -> bool:
+    """Blocking; call via `asyncio.to_thread`. Returns True when a probe ran and
+    recorded configOptions. A missing key, a bad rig URL or a runtime failure is
+    logged and skipped: the route then answers from whatever cache exists."""
+    if not models_cache_stale():
+        return False
+    if not _probe_lock.acquire(blocking=False):
+        logger.info("A harness models probe is already running; answering from the cache")
+        return False
+    try:
+        if not models_cache_stale():  # another probe finished while we queued
+            return False
+        api_key = get_key()
+        if not api_key:
+            logger.info("Harness models probe skipped: no Plexar Harness key")
+            return False
+        settings = _harness_settings()
+        try:
+            env, _source = _build_env(api_key, settings)
+        except HarnessError:
+            logger.warning("Harness models probe skipped: bad rig URL setting", exc_info=True)
+            return False
+        tmp = tempfile.mkdtemp(prefix="plexar_harness_probe_")
+        kwargs: dict[str, Any] = {"workspace": Path(tmp), "env": env,
+                                  "on_permission": lambda _params: "reject-once"}
+        root = str(settings.get("root") or "").strip()
+        if root:
+            kwargs["harness_root"] = Path(root)
+        runtime = None
+        try:
+            runtime = (runtime_factory or _probe_runtime_factory)(**kwargs)
+            runtime.start()
+            res = runtime.new_session() or {}
+            config_options = res.get("configOptions") or []
+            record_config_options(config_options)
+            logger.info("Harness models probe observed %d config option(s)", len(config_options))
+            return bool(config_options)
+        except Exception:  # noqa: BLE001 - a failed probe must never fail the route
+            logger.warning("Harness models probe failed", exc_info=True)
+            return False
+        finally:
+            if runtime is not None:
+                try:
+                    runtime.stop()
+                except Exception:  # noqa: BLE001
+                    logger.warning("Stopping the harness models probe runtime failed", exc_info=True)
+            shutil.rmtree(tmp, ignore_errors=True)
+    finally:
+        _probe_lock.release()
 
 
 def list_models() -> dict:

@@ -89,19 +89,21 @@ const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`
 const PERMISSION_OPTIONS = PERMISSION_MODES;
 
 /** Plexar Harness is in the shared HARNESSES list (it also drives the TopBar
- *  pill). Selecting it routes session creation through /api/harness/sessions
- *  instead of /api/terminals; see App.jsx's createSession. */
+ *  pill). It is a PTY harness like codex: creation goes through the same
+ *  /api/terminals POST with harness "plexar-harness"; see App.jsx's createSession. */
 const PLEXAR_HARNESS_ID = "plexar-harness";
 const HARNESS_OPTIONS = HARNESSES;
 
-/** Shown beside Model / Permission / Effort when Plexar Harness is selected —
- *  those three selects were built for the Claude Code / Codex launch path and
- *  do not apply here, so they are rendered visibly disabled with this reason
+/** Shown beside Model / Effort when Plexar Harness is selected — those two
+ *  selects carry the Claude Code / Codex vocabulary; the harness takes its model
+ *  and effort from the TopBar's harness pills, so they are rendered visibly
+ *  disabled with this reason. Permission stays live: the backend maps it onto
+ *  the harness's own --mode. Disabled with a reason
  *  rather than silently inert (the UNSERVED_MODEL_REASON /
  *  CODEX_LOCAL_UNSUPPORTED_NOTE pattern this file already follows elsewhere). */
 const PLEXAR_HARNESS_CONFIG_REASON =
-  "Plexar Harness sessions don't use a model, permission mode or effort level here — " +
-  "pick the model and reasoning effort from the session's own header once it opens.";
+  "Plexar Harness sessions don't use this model or effort list — " +
+  "they start on the model and reasoning effort chosen in the top bar's Plexar Harness pills.";
 
 /**
  * ConfigSelect — a listbox-ish dropdown that is reachable in every position.
@@ -752,8 +754,6 @@ export default function NewSessionDialog({
                 value={permissionSel}
                 options={PERMISSION_OPTIONS}
                 onChange={setPermissionSel}
-                disabled={isPlexarHarness}
-                disabledReason={PLEXAR_HARNESS_CONFIG_REASON}
               />
               <ConfigSelect
                 label="Effort"

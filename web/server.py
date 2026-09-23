@@ -46,7 +46,7 @@ logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
 import pty_manager as pty_manager_module  # noqa: E402 -- module handle for resolve_claude_cli(); see /api/cli
-from pty_manager import ClaudeCliNotFound, CodexCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
+from pty_manager import ClaudeCliNotFound, CodexCliNotFound, PlexarHarnessCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 import bridge_manager as bridge_manager_module  # noqa: E402 -- module handle for _RELAY_DIR; the startup temp sweep must exclude it by path identity
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
 from mailbox_bridge import mailbox_manager, cleanup_mailbox_root, read_mailbox  # noqa: E402 -- V4 bridge; imports bridge_manager, so it must follow that line
@@ -60,9 +60,8 @@ import mailbox_bridge  # noqa: E402 -- module handle for _MAILBOX_ROOT; same rea
 from bridge_manager import _wait_for_idle_simple, _paste_and_submit  # noqa: E402 -- _paste_and_submit, never _wrap: the submit CR must be a separate write or the TUI eats it as pasted content
 import anthropic_usage  # noqa: E402 -- grouped with the other local-module imports above
 import framework_client  # noqa: E402 -- grouped with the other local-module imports above
-from harness_manager import harness_manager  # noqa: E402 -- the plexar-harness session kind (not a PTY)
+from harness_manager import harness_manager  # noqa: E402 -- Plexar Harness key/status/model catalog
 import harness_manager as harness_manager_module  # noqa: E402
-from plexar_harness_client import HarnessError  # noqa: E402
 import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
 import voice_service  # noqa: E402 -- free to import: every ML dependency inside it is lazy
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
@@ -1197,7 +1196,8 @@ async def _create_terminal_from_body(body: dict) -> dict:
         if not session.pty.isalive():
             # Name the CLI the user actually asked for — telling a Codex user
             # to check their `claude` install sends them to fix the wrong thing.
-            _cli_name = "codex" if getattr(session, "harness", "") == "codex" else "claude"
+            _cli_name = {"codex": "codex", "plexar-harness": "plexar-harness"}.get(
+                getattr(session, "harness", ""), "claude")
             exit_code = getattr(session.pty, "exitstatus", "?")
             logger.error("Session %s died on spawn (exit: %s)", session.id, exit_code)
             pty_manager.kill_terminal(session.id)
@@ -1228,7 +1228,7 @@ async def _create_terminal_from_body(body: dict) -> dict:
     except _CreateTerminalRefused:
         # Already shaped; must not be flattened into the catch-all below.
         raise
-    except (ClaudeCliNotFound, CodexCliNotFound) as e:
+    except (ClaudeCliNotFound, CodexCliNotFound, PlexarHarnessCliNotFound) as e:
         # The resolver already probed every standard install location
         # and built an actionable message (install link + CLAUDE_CLI_PATH
         # escape hatch + what was searched) — surface it verbatim rather than
@@ -2018,19 +2018,11 @@ async def get_framework_events(since: str | None = None):
     return JSONResponse(await asyncio.to_thread(framework_client.fetch_events, base, since))
 
 
-# ── Plexar Harness: the `plexar-harness` session kind (NOT a PTY) ──────────
+# ── Plexar Harness: key, status and the model catalog ──────────────────────
 #
-# harness_manager owns the runtimes; these routes are a thin shell over it.
-# The key lives in config.json and is NEVER returned. Contract: harness
-# docs/plexar/07-studio-api-contract.md (v3).
-
-def _harness_error(exc: HarnessError, default: str = "start_failed") -> JSONResponse:
-    reason = getattr(exc, "reason", None)
-    return JSONResponse(
-        {"error": reason or default, "message": harness_manager_module.friendly(reason)},
-        status_code=502,
-    )
-
+# `plexar-harness` sessions are PTY terminals (POST /api/terminals, like codex);
+# these routes only carry the key, status and the model/effort catalog the
+# TopBar pills read. The key lives in config.json and is NEVER returned.
 
 async def _json_body(request: Request) -> dict | None:
     try:
@@ -2047,8 +2039,11 @@ async def harness_status():
 
 @app.get("/api/harness/models")
 async def harness_models():
-    # list_models() does its own blocking work (a disk read for the "cache"
-    # source) so it must not run on the event loop.
+    # Lazy, at most one at a time, only when the cache is empty or >24 h old:
+    # a short-lived ACP probe refreshes it (nothing else does now that sessions
+    # are PTYs). Never at startup -- only when this route is asked. Both calls
+    # block (process spawn, disk), so neither runs on the event loop.
+    await asyncio.to_thread(harness_manager_module.probe_models_if_stale)
     return JSONResponse(await asyncio.to_thread(harness_manager_module.list_models))
 
 
@@ -2070,219 +2065,6 @@ async def harness_clear_key():
     # Clearing the saved key can still leave one in the environment; report the truth.
     source = await asyncio.to_thread(harness_manager_module.key_source)
     return JSONResponse({"key_set": source is not None, "key_source": source})
-
-
-@app.get("/api/harness/sessions")
-async def harness_list_sessions(workspace: str | None = None):
-    try:
-        sessions = await harness_manager.list_sessions(workspace or "")
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except HarnessError as exc:
-        return _harness_error(exc)
-    return JSONResponse({"sessions": sessions})
-
-
-async def _apply_initial_model_and_effort(session_id: str, model: str | None, effort: str | None) -> list[dict]:
-    """Applies model then effort (in that order) via set_config, after a
-    session has just started. Effort is read from THAT set_config("model", ...)
-    reply's configOptions -- never from separately cached data -- because
-    effort is per-model (contract docs/plexar/07-studio-api-contract.md,
-    "Effort is per model"). If the requested effort is not offered for the
-    chosen model, it is dropped rather than sent. `effort == ""` ("Provider
-    default") is a real, requestable value -- checked with `is not None`,
-    never truthiness. Returns the latest known config_options."""
-    config_options: list[dict] = []
-    if model:
-        try:
-            result = await harness_manager.set_config(session_id, "model", model)
-            if isinstance(result, dict):
-                config_options = result.get("configOptions") or config_options
-        except (harness_manager_module.UnknownSession, HarnessError):
-            logger.warning("Could not apply initial harness model %r for session %s", model, session_id,
-                           exc_info=True)
-    if effort is not None:
-        offered = harness_manager_module.parse_models_from_config_options(config_options) if config_options else []
-        model_row = next((m for m in offered if m["id"] == model), None) if model else None
-        effort_ok = True
-        if model_row is not None and model_row.get("efforts") is not None and effort not in model_row["efforts"]:
-            effort_ok = False
-        if not effort_ok:
-            logger.warning("Requested harness effort %r is not offered for model %r on session %s; dropping it",
-                           effort, model, session_id)
-        else:
-            try:
-                result = await harness_manager.set_config(session_id, "reasoning_effort", effort)
-                if isinstance(result, dict):
-                    config_options = result.get("configOptions") or config_options
-            except (harness_manager_module.UnknownSession, HarnessError):
-                logger.warning("Could not apply initial harness effort %r for session %s", effort, session_id,
-                               exc_info=True)
-    return config_options
-
-
-@app.post("/api/harness/sessions")
-async def harness_new_session(request: Request):
-    body = await _json_body(request)
-    if body is None:
-        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
-    label = body.get("label")
-    if label is not None and not isinstance(label, str):
-        return JSONResponse({"error": "label must be a string"}, status_code=400)
-    model = body.get("model")
-    effort = body.get("effort")
-    if model is not None and not isinstance(model, str):
-        return JSONResponse({"error": "model must be a string"}, status_code=400)
-    if effort is not None and not isinstance(effort, str):
-        return JSONResponse({"error": "effort must be a string"}, status_code=400)
-    try:
-        result = await harness_manager.new_session(body.get("workspace") or "", label)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except HarnessError as exc:
-        return _harness_error(exc)
-    if result.get("session_id") and (model or effort is not None):
-        config_options = await _apply_initial_model_and_effort(result["session_id"], model, effort)
-        if config_options:
-            result["config_options"] = config_options
-    return JSONResponse(result)
-
-
-@app.post("/api/harness/sessions/{sid}/resume")
-async def harness_resume_session(sid: str, request: Request):
-    body = await _json_body(request)
-    if body is None:
-        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
-    try:
-        return JSONResponse(await harness_manager.resume_session(sid, body.get("workspace") or ""))
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except HarnessError as exc:
-        return _harness_error(exc)
-
-
-@app.post("/api/harness/sessions/{sid}/prompt")
-async def harness_prompt(sid: str, request: Request):
-    body = await _json_body(request)
-    text = (body or {}).get("text")
-    if not isinstance(text, str) or not text:
-        return JSONResponse({"error": "text must be a non-empty string"}, status_code=400)
-    try:
-        await harness_manager.prompt(sid, text)
-    except harness_manager_module.UnknownSession:
-        return JSONResponse({"error": "unknown session"}, status_code=404)
-    except harness_manager_module.SessionBusy:
-        return JSONResponse({"error": "busy"}, status_code=409)
-    return JSONResponse({"accepted": True}, status_code=202)
-
-
-@app.post("/api/harness/sessions/{sid}/cancel")
-async def harness_cancel(sid: str):
-    try:
-        await harness_manager.cancel(sid)
-    except harness_manager_module.UnknownSession:
-        return JSONResponse({"error": "unknown session"}, status_code=404)
-    except HarnessError as exc:
-        return _harness_error(exc, "harness_error")
-    return JSONResponse({"ok": True})
-
-
-@app.post("/api/harness/sessions/{sid}/close")
-async def harness_close(sid: str):
-    try:
-        await harness_manager.close(sid)
-    except harness_manager_module.UnknownSession:
-        return JSONResponse({"error": "unknown session"}, status_code=404)
-    except HarnessError as exc:
-        return _harness_error(exc, "harness_error")
-    return JSONResponse({"ok": True})
-
-
-@app.put("/api/harness/sessions/{sid}/label")
-async def harness_label(sid: str, request: Request):
-    body = await _json_body(request)
-    label = (body or {}).get("label")
-    if label is not None and not isinstance(label, str):
-        return JSONResponse({"error": "label must be a string"}, status_code=400)
-    try:
-        await asyncio.to_thread(harness_manager_module.write_label, sid, (label or "").strip() or None)
-    except OSError:
-        logger.error("Could not write harness label", exc_info=True)
-        return JSONResponse({"error": "could not save label"}, status_code=500)
-    return JSONResponse({"ok": True})
-
-
-@app.post("/api/harness/sessions/{sid}/config")
-async def harness_config(sid: str, request: Request):
-    body = await _json_body(request) or {}
-    config_id, value = body.get("config_id"), body.get("value")
-    # value == "" is a real, requestable value ("Provider default" for
-    # reasoning_effort) and must not be rejected as empty -- checked with
-    # `is None`, never truthiness.
-    if config_id not in ("model", "reasoning_effort") or not isinstance(value, str) or value is None:
-        return JSONResponse({"error": "config_id must be model|reasoning_effort and value a string"}, status_code=400)
-    try:
-        result = await harness_manager.set_config(sid, config_id, value)
-    except harness_manager_module.UnknownSession:
-        return JSONResponse({"error": "unknown session"}, status_code=404)
-    except HarnessError as exc:
-        return _harness_error(exc, "harness_error")
-    return JSONResponse(result)
-
-
-@app.post("/api/harness/permissions/{request_id}")
-async def harness_permission(request_id: str, request: Request):
-    body = await _json_body(request) or {}
-    option_id = body.get("option_id")
-    if option_id not in harness_manager_module.ALLOWED_OPTIONS:
-        return JSONResponse({"error": "option_id must be allow-once or reject-once"}, status_code=400)
-    if not harness_manager.answer_permission(request_id, option_id):
-        return JSONResponse({"error": "unknown or expired request"}, status_code=404)
-    return JSONResponse({"ok": True})
-
-
-@app.websocket("/ws/harness")
-async def websocket_harness(websocket: WebSocket):
-    """Server -> browser stream of harness frames for ONE workspace."""
-    # Same rule and placement as /ws/terminal: BEFORE accept().
-    reason = origin_guard.check_websocket(
-        websocket.headers.get("host", ""),
-        websocket.headers.get("origin"),
-    )
-    if reason:
-        logger.warning("Refused WS /ws/harness — %s", reason)
-        await websocket.close(code=4403, reason="Origin not allowed — reload the app")
-        return
-    try:
-        key, q = harness_manager.subscribe(websocket.query_params.get("workspace") or "")
-    except ValueError:
-        await websocket.close(code=4400, reason="workspace must be an absolute directory")
-        return
-    await websocket.accept()
-
-    async def sender():
-        while True:
-            frame = await q.get()
-            await websocket.send_text(json.dumps(frame))
-
-    send_task = asyncio.create_task(sender())
-    try:
-        while True:
-            receive = asyncio.create_task(websocket.receive())
-            done, _ = await asyncio.wait({receive, send_task}, return_when=asyncio.FIRST_COMPLETED)
-            if send_task in done:
-                receive.cancel()
-                break
-            msg = receive.result()
-            if msg.get("type") == "websocket.disconnect":
-                break
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        logger.warning("Harness WS ended with an error", exc_info=True)
-    finally:
-        send_task.cancel()
-        harness_manager.unsubscribe(key, q)
 
 
 @app.post("/api/bridge/manual")

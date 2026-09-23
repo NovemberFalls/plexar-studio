@@ -14,7 +14,6 @@ import {
 } from "./modelCatalog";
 import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
-import HarnessView from "./components/HarnessView";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
@@ -732,91 +731,20 @@ export default function App() {
     const useHarness = options.harness ?? harness;
     const useFast = options.fast ?? fast;
 
-    // Plexar Harness sessions are not a Claude/Codex PTY — no /api/terminals
-    // call, no model/permission/effort/fast. Branch early and return; the
-    // pane is a HarnessView, not a TerminalPane (see the pane-render switch
-    // below). Kept inline (rather than a separate function) so it shares
-    // localId/sessionName/dir and the same "add to sessions + activeIds"
-    // shape every other creation path uses.
+    // Plexar Harness is a PTY harness like codex: the same /api/terminals POST,
+    // with the model and effort taken from the TopBar's harness pills (they
+    // persist to these keys) rather than the Claude/Codex model pill.
+    let harnessModel = "";
+    let harnessEffort = "";
     if (useHarness === "plexar-harness") {
-      addLocations([dir]);
-      setRecentLocations((prev) => {
-        const next = [dir, ...prev.filter((l) => l !== dir)].slice(0, 5);
-        lsSave(RECENTS_KEY, next);
-        return next;
-      });
-      const newHarnessSession = {
-        id: localId,
-        name: sessionName,
-        terminalId: null,
-        model: null,
-        harness: "plexar-harness",
-        harnessSessionId: null,
-        harnessConfigOptions: [],
-        status: "starting",
-        workdir: dir,
-        bypassPermissions: false,
-      };
-      setSessions((prev) => [...prev, newHarnessSession]);
-      setActiveIds((prev) => {
-        const slot = findEmptySlot(prev, slotCapacity);
-        if (slot === -1) return prev;
-        const next = [...prev];
-        while (next.length <= slot) next.push(null);
-        next[slot] = localId;
-        return next;
-      });
       try {
-        // The TopBar model/effort pills persist to these same keys; read
-        // them here rather than threading two more props through, matching
-        // how `harness` itself round-trips via HARNESS_KEY above.
-        let harnessModel = "";
-        let harnessEffort = "";
-        try {
-          harnessModel = localStorage.getItem("cockpit-harness-model") || "";
-          harnessEffort = localStorage.getItem("cockpit-harness-effort") || "";
-        } catch { /* per-viewer convenience only */ }
-        const res = await fetch("/api/harness/sessions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            workspace: dir, ...(name ? { label: name } : {}),
-            ...(harnessModel ? { model: harnessModel } : {}),
-            ...(harnessEffort ? { effort: harnessEffort } : {}),
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.error) {
-          // The backend sends {error: <reason code>, message: <sentence>}. Show the
-          // sentence, never the bare code, and keep the reason on the session so the
-          // pane itself explains what is wrong instead of sitting blank.
-          const startError = {
-            reason: data.error || "start_failed",
-            message: data.message || data.detail || "Couldn't start Plexar Harness.",
-          };
-          toast(startError.message, "error");
-          setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error", startError } : s)));
-          return;
-        }
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === localId
-              ? {
-                  ...s,
-                  harnessSessionId: data.session_id,
-                  harnessConfigOptions: data.config_options || [],
-                  status: "running",
-                }
-              : s
-          )
-        );
-      } catch (_err) {
-        const startError = { reason: "start_failed", message: "Couldn't reach Studio's server to start Plexar Harness." };
-        toast(startError.message, "error");
-        setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error", startError } : s)));
-      }
-      return;
+        harnessModel = localStorage.getItem("cockpit-harness-model") || "";
+        harnessEffort = localStorage.getItem("cockpit-harness-effort") || "";
+      } catch { /* per-viewer convenience only */ }
     }
+    const isPlexarHarness = useHarness === "plexar-harness";
+    const spawnModel = isPlexarHarness ? harnessModel : useModel;
+    const spawnEffort = isPlexarHarness ? harnessEffort : useEffort;
 
     addLocations([dir]);
 
@@ -830,10 +758,10 @@ export default function App() {
       id: localId,
       name: sessionName,
       terminalId: null,
-      model: useModel,
+      model: spawnModel,
       harness: useHarness,
       permissionMode: usePermissionMode,
-      effort: useEffort,
+      effort: spawnEffort,
       fast: useFast,
       codex_session_id: useHarness === "codex" ? options.resumeSessionId || null : null,
       status: "starting",
@@ -861,7 +789,7 @@ export default function App() {
       );
       const body = {
         name: sessionName,
-        model: useModel,
+        model: spawnModel,
         workdir: dir,
         // No mounted pane to measure yet at this point (see DEFAULT_SPAWN_COLS
         // doc comment in terminalFit.js) — TerminalPane's first safeFit()
@@ -869,14 +797,14 @@ export default function App() {
         cols: DEFAULT_SPAWN_COLS,
         rows: DEFAULT_SPAWN_ROWS,
         permissionMode: usePermissionMode,
-        effort: useEffort,
-        // Which CLI to spawn ("claude-code" | "codex"); the backend validates it.
+        effort: spawnEffort,
+        // Which CLI to spawn ("claude-code" | "codex" | "plexar-harness"); the backend validates it.
         harness: useHarness,
-        fast: isOpus && useFast,
-        ...(getModelProvider(useModel) === "openrouter"
+        fast: !isPlexarHarness && isOpus && useFast,
+        ...(!isPlexarHarness && getModelProvider(useModel) === "openrouter"
           ? { provider: "openrouter", providerModel: useModel }
           : {}),
-        ...(getModelProvider(useModel) === "local"
+        ...(!isPlexarHarness && getModelProvider(useModel) === "local"
           ? (() => {
               const parsed = parseLocalModelId(useModel);
               return parsed
@@ -929,9 +857,6 @@ export default function App() {
     if (session.terminalId) {
       fetch(`/api/terminals/${session.terminalId}`, { method: "DELETE" })
         .catch(() => toast("Failed to kill session on server", "error"));
-    } else if (session.harness === "plexar-harness" && session.harnessSessionId) {
-      fetch(`/api/harness/sessions/${session.harnessSessionId}/close`, { method: "POST" })
-        .catch(() => toast("Failed to close Plexar Harness session on server", "error"));
     }
 
     // Remove from local state
@@ -987,70 +912,6 @@ export default function App() {
       return next;
     });
   }, [slotCapacity]);
-
-  /**
-   * Sidebar's "Plexar Harness" group opens a pane for an existing session_id
-   * rather than creating a new one. Additive, mirrors createSession's pane
-   * bookkeeping without any /api/terminals involvement.
-   *   - already open locally (matched by harnessSessionId) → just selectSession.
-   *   - `open: true` from the backend → place a pane straight away.
-   *   - `open: false` (stored/closed) → POST resume first, then place a pane.
-   */
-  const openHarnessSessionPane = useCallback(async (sid, workspace, label, isOpen) => {
-    const existing = sessions.find((s) => s.harness === "plexar-harness" && s.harnessSessionId === sid);
-    if (existing) {
-      selectSession(existing.id);
-      return;
-    }
-    const localId = nextLocalId++;
-    const sessionName = label || `Session ${sid.slice(0, 8)}`;
-    const newHarnessSession = {
-      id: localId,
-      name: sessionName,
-      terminalId: null,
-      model: null,
-      harness: "plexar-harness",
-      harnessSessionId: sid,
-      harnessConfigOptions: [],
-      status: "starting",
-      workdir: workspace,
-      bypassPermissions: false,
-    };
-    setSessions((prev) => [...prev, newHarnessSession]);
-    setActiveIds((prev) => {
-      const slot = findEmptySlot(prev, slotCapacity);
-      if (slot === -1) return prev;
-      const next = [...prev];
-      while (next.length <= slot) next.push(null);
-      next[slot] = localId;
-      return next;
-    });
-    try {
-      let configOptions = [];
-      if (!isOpen) {
-        const res = await fetch(`/api/harness/sessions/${sid}/resume`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspace }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.error) {
-          toast(data.error || "Failed to resume Plexar Harness session", "error");
-          setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error" } : s)));
-          return;
-        }
-        configOptions = data.config_options || [];
-      }
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === localId ? { ...s, harnessConfigOptions: configOptions, status: "running" } : s
-        )
-      );
-    } catch (_err) {
-      toast("Failed to open Plexar Harness session", "error");
-      setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error" } : s)));
-    }
-  }, [sessions, selectSession, slotCapacity, toast]);
 
   /**
    * Bring a folder's panes into view. Scroll mode only — in the grid there is
@@ -2881,13 +2742,6 @@ export default function App() {
                           Reclaim
                         </button>
                       </div>
-                    ) : session.harness === "plexar-harness" ? (
-                      <HarnessView
-                        session={session}
-                        onClose={() => removeSession(session.id)}
-                        toast={toast}
-                        onOpenSettings={() => setActiveSection("settings")}
-                      />
                     ) : (
                       <TerminalPane
                         ref={(el) => { paneRefs.current[idx] = el; }}
@@ -3107,7 +2961,6 @@ export default function App() {
                   onSaveWorkspace={saveWorkspace}
                   onLoadWorkspace={loadWorkspace}
                   onDeleteWorkspace={deleteWorkspace}
-                  onOpenHarnessSession={openHarnessSessionPane}
                 />
                 <div
                   onMouseDown={startSidebarResize}

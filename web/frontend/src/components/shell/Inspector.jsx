@@ -341,6 +341,7 @@ export default function Inspector({
   onCollapse,
 }) {
   const wf = Array.isArray(workflows) ? workflows : [];
+  const isPlexarHarness = session?.harness === "plexar-harness";
   const safeOverrides = overrides || {};
   const safeModelOptions = Array.isArray(modelOptions) && modelOptions.length > 0
     ? modelOptions
@@ -436,19 +437,17 @@ export default function Inspector({
             <BridgeCard bridge={bridge} onEndBridge={onEndBridge} onOpenTranscript={onOpenTranscript} />
           )}
 
-          {/* Plexar Harness sessions are not a Claude/Codex PTY: the model/permission/
-              effort/fast overrides, the CLI usage figures and Interrupt/Fork/Bridge/Pop out
-              all act on a terminal this session does not have. Say so rather than render
-              controls that silently do nothing. */}
-          {session.harness === "plexar-harness" ? (
-            <div className="text-[11px]" style={{ color: "var(--cc-muted)", lineHeight: 1.5 }}>
-              Plexar Harness session. Model and effort are chosen in the pane header;
-              stop a running answer with the pane&apos;s Stop button.
+          {/* This session overrides. The model/permission/effort/fast selects are
+              Claude's vocabulary; a Plexar Harness pane takes its model and effort
+              from the TopBar's harness pills at spawn, so the selects would be
+              controls that silently do nothing. Say so instead (NOTE-170). */}
+          <SectionLabel>This session</SectionLabel>
+          {isPlexarHarness ? (
+            <div role="note" data-testid="inspector-harness-overrides-note" className="text-[11px]"
+              style={{ color: "var(--cc-muted)", lineHeight: 1.5, marginBottom: 16 }}>
+              Model and effort for Plexar Harness are set from the top bar when the session starts.
             </div>
           ) : (
-          <>
-          {/* This session overrides */}
-          <SectionLabel>This session</SectionLabel>
           <div className="grid grid-cols-2 gap-1.5" style={{ marginBottom: 16 }}>
             <OverrideSelect
               label="Model"
@@ -475,6 +474,7 @@ export default function Inspector({
               onChange={(v) => onOverrideChange?.("fast", v === "on")}
             />
           </div>
+          )}
 
           {/* Usage */}
           <SectionLabel>Usage</SectionLabel>
@@ -531,12 +531,10 @@ export default function Inspector({
           {/* Actions */}
           <div className="grid grid-cols-2 gap-1.5">
             <ActionButton icon={OctagonX} label="Interrupt" onClick={onInterrupt} danger />
-            <ActionButton icon={GitFork} label="Fork" onClick={onFork} />
+            {!isPlexarHarness && <ActionButton icon={GitFork} label="Fork" onClick={onFork} />}
             <ActionButton icon={Merge} label="Bridge…" onClick={onBridge} />
             <ActionButton icon={ExternalLink} label="Pop out" onClick={onPopOut} />
           </div>
-          </>
-          )}
         </div>
       )}
     </div>

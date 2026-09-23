@@ -472,7 +472,7 @@ export function ModelCatalogProvider({ children }) {
 export const HARNESSES = [
   { id: "claude-code", label: "Claude Code" },
   { id: "codex", label: "Codex" },
-  // Not a PTY: routed through /api/harness by App.jsx's createSession.
+  // A PTY harness like codex: POST /api/terminals with harness "plexar-harness".
   { id: "plexar-harness", label: "Plexar Harness" },
 ];
 
