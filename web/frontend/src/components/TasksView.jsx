@@ -221,6 +221,14 @@ export default function TasksView({ activeLocationFolder = null, forcedBucket = 
                   ? "Start it with `plexar up`."
                   : "Checking Plexar-Framework…"}
           </div>
+          <div
+            data-testid="tasks-framework-callout"
+            style={{ fontSize: 11, lineHeight: 1.6, maxWidth: 460, marginTop: 6, padding: "8px 12px",
+                     border: "1px solid var(--cc-border)", borderRadius: 8 }}
+          >
+            Tasks is a window onto Plexar Framework, our task framework. It is still being
+            built and isn't public yet. We'll open-source it when it's ready.
+          </div>
           {notRunning && probe?.base && (
             <a
               href={`${probe.base}/app`}

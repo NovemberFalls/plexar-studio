@@ -139,6 +139,14 @@ describe("TasksView", () => {
     expect(screen.getByText(/opens in the desktop app/i)).toBeInTheDocument();
   });
 
+  it("says Plexar Framework is ours, unreleased, and will be open-sourced", async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ up: false, base: null, reason: "unreachable" }) });
+    render(<TasksView />);
+    const callout = await screen.findByTestId("tasks-framework-callout");
+    expect(callout).toHaveTextContent(/isn't public yet/);
+    expect(callout).toHaveTextContent(/open-source it when it's ready/);
+  });
+
   it("calls onError only via the webview error path, never for a mere down probe", async () => {
     fetchMock.mockResolvedValue({
       ok: true,
