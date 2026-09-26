@@ -58,7 +58,7 @@ def _call_create(mgr, **kwargs):
 def harness_env(monkeypatch):
     monkeypatch.setenv("PLEXAR_RIG_URL", "https://inherited.example")
     monkeypatch.setenv("PLEXAR_MODEL", "inherited-model")
-    monkeypatch.setattr(hm, "get_key", lambda: KEY)
+    monkeypatch.setattr(hm, "get_saved_key", lambda: KEY)
     monkeypatch.setattr(hm, "_harness_settings", lambda: {})
     monkeypatch.setattr(hm, "resolve_rig_url", lambda settings: (RIG, "plexar_provider"))
 
@@ -157,16 +157,14 @@ def test_bad_or_foreign_model_is_refused(mgr, harness_env, bad):
         _create(mgr, model=bad)
 
 
-def test_key_missing_refuses_the_spawn(mgr, harness_env, monkeypatch):
-    monkeypatch.setattr(hm, "get_key", lambda: None)
-    backend = MagicMock()
-    with patch("pty_backend.get_backend", return_value=backend), \
-         patch.object(pty_manager, "resolve_plexar_harness_cli", side_effect=lambda p: ("x", p)):
-        with pytest.raises(ValueError) as exc:
-            mgr.create_terminal(name="t", workdir="C:\\Code", harness="plexar-harness", model=MODEL_VALUE)
-    assert str(exc.value) == hm.friendly("key_missing")
-    backend.spawn.assert_not_called()
-    assert mgr.sessions == {}
+def test_no_saved_key_uses_the_harness_sign_in(mgr, harness_env, monkeypatch):
+    """No key saved in Studio: spawn anyway and strip the INHERITED key, so the
+    harness uses the person's own sign-in (the env key was a revoked shared key)."""
+    monkeypatch.setattr(hm, "get_saved_key", lambda: None)
+    monkeypatch.setenv("PLEXAR_HARNESS_KEY", "inherited-revoked-key")
+    _, _, env = _create(mgr)
+    assert "PLEXAR_HARNESS_KEY" not in env
+    assert env["PLEXAR_RIG_URL"] == RIG
 
 
 def test_bad_rig_url_refuses_the_spawn(mgr, harness_env, monkeypatch):

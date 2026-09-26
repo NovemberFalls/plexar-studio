@@ -1253,17 +1253,16 @@ class PtyManager:
         ):
             raise ValueError(f"Invalid effort: {effort!r}")
 
-        # The Plexar Harness key is ALWAYS passed explicitly, and a spawn with no
-        # key is refused (DEC-229): an unset PLEXAR_HARNESS_KEY would let the
-        # harness fall back to its own credential files. Resolved before any
-        # env or process work so the refusal costs nothing.
+        # A key SAVED in Studio is passed explicitly; otherwise none is, and the
+        # harness uses the person's own sign-in. Supersedes DEC-229's no-key
+        # refusal: the "credential files" it feared are now the harness's real
+        # Google sign-in, and the inherited env key was a revoked shared key
+        # (2.1.46 QA; harness 9330b256d4 makes the saved sign-in win).
         plexar_harness_key: Optional[str] = None
         plexar_rig_url: Optional[str] = None
         if harness == "plexar-harness":
             import harness_manager as _hm
-            plexar_harness_key = _hm.get_key()
-            if not plexar_harness_key:
-                raise ValueError(_hm.friendly("key_missing"))
+            plexar_harness_key = _hm.get_saved_key()
             try:
                 plexar_rig_url, _rig_source = _hm.resolve_rig_url(_hm._harness_settings())
             except _hm.HarnessError as exc:
@@ -1421,7 +1420,9 @@ class PtyManager:
         if harness == "plexar-harness":
             # Always overwritten / removed, never inherited: the pane must run on
             # exactly the key, rig and model Studio resolved above.
-            env["PLEXAR_HARNESS_KEY"] = plexar_harness_key
+            env.pop("PLEXAR_HARNESS_KEY", None)
+            if plexar_harness_key:
+                env["PLEXAR_HARNESS_KEY"] = plexar_harness_key
             env.pop("PLEXAR_RIG_URL", None)
             env.pop("PLEXAR_MODEL", None)
             if plexar_rig_url:

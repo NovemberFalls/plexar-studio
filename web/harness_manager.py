@@ -97,6 +97,15 @@ def get_key() -> str | None:
     return os.environ.get("PLEXAR_HARNESS_KEY") or None
 
 
+def get_saved_key() -> str | None:
+    """Only a key the user saved in Studio (config.json), never the inherited
+    PLEXAR_HARNESS_KEY. A PTY pane uses this: the person's own saved sign-in in
+    the harness is the right credential, and the env key on this machine is the
+    revoked shared key (QA §A, harness 9330b256d4)."""
+    value = settings_store._read_config().get(KEY_FIELD)
+    return value if isinstance(value, str) and value else None
+
+
 def set_key(key: str) -> None:
     data = settings_store._read_config()
     data[KEY_FIELD] = key
