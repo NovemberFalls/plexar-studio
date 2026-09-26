@@ -146,4 +146,12 @@ describe("TopBar — Plexar Harness model pill", () => {
     renderTopBar();
     await waitFor(() => expect(screen.getByTestId("harness-effort-pill")).toHaveTextContent("off"));
   });
+
+  it("a stored model the live list no longer offers shows its served name, marked, not JSON and not a neighbour", async () => {
+    localStorage.setItem("cockpit-harness-model", '["plexar","qwen3.8-27b"]');
+    renderTopBar();
+    const pill = screen.getByTestId("harness-model-pill");
+    await waitFor(() => expect(pill).toHaveTextContent("qwen3.8-27b · not offered"));
+    expect(pill.textContent).not.toContain("[");
+  });
 });

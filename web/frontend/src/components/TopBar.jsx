@@ -20,6 +20,7 @@ import {
   DEFAULT_HARNESS,
   groupsForHarness,
   resolveModelSelection,
+  harnessModelServedName,
 } from "../modelCatalog";
 // Lane math lives in utils/laneMath.js so the Workspace lane meter, this
 // quick-glance pill and Engine > Live all read the same arithmetic (see the
@@ -182,6 +183,15 @@ export default function TopBar({
 
   const harnessModelsSourceNone = harnessModelsSource === "none";
   const selectedHarnessModelRow = harnessModels.find((m) => m.id === harnessModel) || null;
+  // A stored model the live list no longer offers (qwen3.8-27b after the rig
+  // moved to Qwen3.6, 2.1.45 QA) is named, marked, and NOT substituted (R-169):
+  // spawning on it fails inside the harness, so the pill must say so.
+  const harnessModelStale = Boolean(
+    harnessModel && !selectedHarnessModelRow && harnessModels.length > 0
+    && !harnessModelsLoading && !harnessModelsError
+  );
+  const harnessModelText = selectedHarnessModelRow?.label
+    || (harnessModel ? `${harnessModelServedName(harnessModel)}${harnessModelStale ? " · not offered" : ""}` : "");
   // `efforts` distinguishes null (genuinely unknown/unobserved for this
   // model) from [] (observed — this model has no effort control at all).
   // Never collapse the two: they render distinctly below.
@@ -709,7 +719,7 @@ export default function TopBar({
               onClick={() => { closeAll(); setHarnessModelOpen((v) => !v); if (!harnessModelOpen) fetchHarnessModels(); }}
               className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
               style={{
-                color: harnessModelsError ? "var(--cc-error, var(--text-secondary))" : "var(--text-secondary)",
+                color: harnessModelsError || harnessModelStale ? "var(--cc-error, var(--text-secondary))" : "var(--text-secondary)",
                 border: "1px solid var(--border-color)",
                 backgroundColor: "var(--bg-surface)",
               }}
@@ -718,7 +728,7 @@ export default function TopBar({
                   ? "Plexar Harness model: loading"
                   : harnessModelsError
                     ? `Plexar Harness model: ${harnessModelsError}`
-                    : `Plexar Harness model: ${selectedHarnessModelRow?.label || harnessModel || "none selected"}`
+                    : `Plexar Harness model: ${harnessModelText || "none selected"}`
               }
               aria-expanded={harnessModelOpen}
               aria-haspopup="listbox"
@@ -728,7 +738,7 @@ export default function TopBar({
                 ? "Loading…"
                 : harnessModelsError
                   ? "Model: unavailable"
-                  : selectedHarnessModelRow?.label || harnessModel || "Select model"}
+                  : harnessModelText || "Select model"}
               <ChevronDown size={10} />
             </button>
             {harnessModelOpen && (

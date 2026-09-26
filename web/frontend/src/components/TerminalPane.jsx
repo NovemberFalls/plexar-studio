@@ -12,7 +12,7 @@ import CodexUsageBadge from "./CodexUsageBadge";
 import CodexTranscript from "./CodexTranscript";
 import { createTerminalClipboard } from "../utils/terminalClipboard";
 import PaneActionsMenu from "./PaneActionsMenu";
-import { useModelCatalog, getModelHarness } from "../modelCatalog";
+import { useModelCatalog, getModelHarness, harnessModelServedName } from "../modelCatalog";
 import { createReplayCursor, replayQuery, consumeReplayFrame, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
 import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
@@ -87,7 +87,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   // pill in the header — display the friendly label when the id is known,
   // falling back to the raw string (covers unrecognized/future model ids).
   const { models: modelList } = useModelCatalog();
-  const modelLabel = modelList.find((m) => m.id === session.model)?.label || session.model;
+  const modelLabel = modelList.find((m) => m.id === session.model)?.label || harnessModelServedName(session.model);
 
   // Compact number formatter for header usage stats: 1.2M / 45.3k / 812
   const fmtTokens = useCallback((n) => {

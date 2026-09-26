@@ -582,6 +582,20 @@ export function getModelHarness(modelId) {
  *
  *  Returns the SAME object shape whether or not it changed anything, so a
  *  caller cannot accidentally treat "no change" as "no answer". */
+/** Plexar Harness model values are the ACP configOption value verbatim, a
+ *  JSON pair '["plexar","<served name>"]'. Rendering that raw put JSON on the
+ *  pill and the pane header (2.1.45 QA). This returns the served name only --
+ *  the same name the server exports as PLEXAR_MODEL -- and never another
+ *  model; anything that is not such a pair comes back unchanged. */
+export function harnessModelServedName(value) {
+  if (typeof value !== "string" || !value.startsWith("[")) return value;
+  try {
+    const pair = JSON.parse(value);
+    if (Array.isArray(pair) && pair.length === 2 && pair.every((p) => typeof p === "string")) return pair[1];
+  } catch { /* not a pair: render verbatim */ }
+  return value;
+}
+
 export function reconcileModelForHarness(model, harness) {
   // The harness picks its own model per session; keep the stored Claude/Codex
   // model as-is so switching back does not find it silently replaced.
