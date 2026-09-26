@@ -150,6 +150,12 @@ Studio can optionally own a local vLLM container's lifecycle (off by default), o
 
 Drag files onto any pane to upload (up to 50 MB each: code, images, PDFs, JSON, CSV, …) — the path is pasted into the prompt. `Ctrl+V` pastes text, or uploads a clipboard image and pastes its path. `Ctrl+Shift+V` and `Alt+V` also request clipboard paste, with a native Windows image fallback when browser clipboard access is unavailable. Paste failures are shown in a notification; reconnect or session changes require pasting again in the intended pane. Pasting an image does not submit the prompt. `Ctrl+Shift+F` searches terminal scrollback.
 
+### Tasks (Plexar Framework preview)
+
+The **Tasks** view is a window onto Plexar Framework, our task framework for queuing and
+running agent work across repos. The framework is still being built and isn't public yet, so
+for most people Tasks will say it isn't running. We'll open-source it when it's ready.
+
 ### Keyboard shortcuts
 
 The full, verified list is in **Settings ▸ Keybindings** — it is generated from the code that actually handles the keys, so it does not drift. Highlights:
@@ -206,6 +212,35 @@ Provider and local-engine variables (`COCKPIT_PLEXAR_*`, `COCKPIT_VLLM_*`, `COCK
 The server has **no authentication**. It binds loopback only, and every route plus the terminal WebSocket is protected by a browser-origin guard — an origin allowlist *and* a loopback `Host` check, because loopback alone is not a trust boundary against a browser you happen to be using.
 
 Setting `HOST=0.0.0.0` exposes it to your network and stands the `Host` check down deliberately (a loud warning is logged at startup). Do that only on a network you control.
+
+---
+
+## HTTP API (FastAPI)
+
+The desktop app is a window over a local [FastAPI](https://fastapi.tiangolo.com/) server, so
+everything the UI does can also be scripted. While Studio is running, open
+**<http://127.0.0.1:8420/docs>** for interactive docs of every route, grouped by area
+(Terminals, History, Bridges, Settings, Usage and cost, and so on). The raw schema is at
+`/openapi.json`, which you can feed to any OpenAPI client generator.
+
+```bash
+# List sessions
+curl http://127.0.0.1:8420/api/terminals
+
+# Start a Claude Code session in a folder
+curl -X POST http://127.0.0.1:8420/api/terminals   -H "Content-Type: application/json"   -d '{"name": "api-demo", "workdir": "C:/Code/my-project", "harness": "claude-code"}'
+
+# Run a slash command in a session
+curl -X POST http://127.0.0.1:8420/api/terminals/<id>/command   -H "Content-Type: application/json" -d '{"command": "/status"}'
+```
+
+Terminal I/O streams over `WS /ws/terminal/{id}`: raw keystrokes in, terminal output out.
+
+The same security rules apply as for the app: the API has **no authentication**, it answers
+only on loopback, and a browser-origin guard refuses cross-origin and DNS-rebinding requests
+(a WebSocket handshake must carry this server's `Origin`). Scripts on the same machine are
+trusted. Do not expose the port to a network. Plexar Mobile uses a separate, token-protected
+surface under `/remote/v1`, which is off unless you enable Remote in Settings.
 
 ---
 

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.47] - 2026-09-26
+
+### Added
+- **HTTP API docs.** The built-in FastAPI docs at `http://127.0.0.1:8420/docs` now group every route by area and carry the app's real version and a security note. See "HTTP API" in the README.
+- The **Tasks** view says what it is: a window onto Plexar Framework, our task framework, which isn't public yet and will be open-sourced when it's ready.
+
+### Changed
+- Plexar models are reached at `https://llm.plexar.tech`. The model list shows only chat models: the `plexar-signal` classifier is no longer offered.
+- Plexar Harness panes use your own saved sign-in (`plexar-harness login`). Studio no longer requires or passes a shared key unless you save one in Settings.
+- The default Chat address is `https://chat.plexar.tech`.
+
+### Fixed
+- Plexar Harness panes started with no effort chosen no longer fail every prompt with "unknown reasoning effort".
+- The harness model pill and pane headers show the model's name instead of `["plexar","…"]`, and a saved model the rig no longer serves is marked "not offered" instead of silently used.
+
 ## [2.1.29] - 2026-09-13
 
 ### Changed
