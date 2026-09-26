@@ -293,7 +293,7 @@ DEFAULT_SETTINGS = {
     # The address is a SETTING, not a constant in the frontend: DEC-175 makes
     # Chat's address "known and shown, editable only behind 'Use a different
     # address' for self-hosters". Empty means "use the built-in default".
-    "chat": {"url": "https://plexar-chat.boord-its.com"},
+    "chat": {"url": "https://chat.plexar.tech"},
     # Plexar-Framework (`plexar up`), embedded in the TASKS view's own Tauri
     # webview the same way Chat is. Loopback by default -- the framework has
     # no auth of its own, so this must never be widened to a public address.

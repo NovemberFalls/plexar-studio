@@ -129,7 +129,7 @@ function normalizeWorkdir(dir) {
  *  second spelling of a default is the drift this repo keeps paying for
  *  (DEFAULT_MODEL_ID exists for exactly this reason), so a test pins them
  *  equal rather than trusting the two files to stay in step. */
-const CHAT_URL_FALLBACK = "https://plexar-chat.boord-its.com";
+const CHAT_URL_FALLBACK = "https://chat.plexar.tech";
 
 /** Command-bar title per rail destination. "projects" is absent by design — it
  *  opens the drawer over Workspace rather than replacing the content area. */

@@ -31,7 +31,7 @@ import "@testing-library/jest-dom";
 import Rail from "../components/shell/Rail.jsx";
 import ChatView from "../components/ChatView.jsx";
 
-const CHAT_URL_FALLBACK = "https://plexar-chat.boord-its.com";
+const CHAT_URL_FALLBACK = "https://chat.plexar.tech";
 
 afterEach(() => {
   vi.unstubAllGlobals();
