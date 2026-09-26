@@ -5588,6 +5588,20 @@ def _normalize_vllm_raw_model(m: dict) -> dict:
     return out
 
 
+def _is_plexar_non_llm(m) -> bool:
+    """True for a catalog entry the rig marks as something other than an LLM.
+
+    Plexar's envelope carries ``plexar.kind`` (``llm`` | ``classifier``).
+    Measured 2026-09-25 on llm.plexar.tech: only the classifier
+    (``plexar-signal``) carries the field; LLM entries omit it. So an ABSENT
+    kind is an LLM, and only an explicit non-``llm`` kind is dropped -- a
+    classifier offered as a chat model would spawn a session that cannot talk.
+    """
+    envelope = m.get("plexar") if isinstance(m, dict) else None
+    kind = envelope.get("kind") if isinstance(envelope, dict) else None
+    return kind is not None and kind != "llm"
+
+
 def _normalize_plexar_raw_model(m: dict) -> dict:
     """Map Plexar's /v1/models shape onto the common model-fields shape.
 
@@ -6276,6 +6290,7 @@ async def get_provider_models(provider_id: str):
         raw_models = [
             _normalize_plexar_raw_model(m) if isinstance(m, dict) else m
             for m in raw_models
+            if not _is_plexar_non_llm(m)
         ]
     models = [
         {

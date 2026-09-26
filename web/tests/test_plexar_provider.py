@@ -213,3 +213,24 @@ async def test_unreachable_plexar_reports_not_ok(monkeypatch):
 
     assert body["provider"]["reachable"] is False
     assert body["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_plexar_classifier_is_not_offered_as_a_model(monkeypatch):
+    """The rig marks its classifier with ``plexar.kind: classifier``; LLM
+    entries omit ``kind`` (measured on llm.plexar.tech, 2026-09-25). Only the
+    explicit non-llm kind is dropped, so an absent kind stays listed."""
+    monkeypatch.setattr(
+        server, "_mgmt_get",
+        lambda provider, path: {"data": [
+            {"id": "Qwen/Qwen3.6-35B-A3B", "plexar": {"state": "serving"}},
+            {"id": "plexar-signal", "plexar": {"state": "serving", "kind": "classifier"}},
+            {"id": "tagged", "plexar": {"state": "serving", "kind": "llm"}},
+        ]},
+    )
+    resp = await server.get_provider_models("plexar-vllm")
+    import json as _json
+    ids = [m["id"] for m in _json.loads(resp.body)["models"]]
+
+    assert "plexar-signal" not in ids
+    assert "Qwen/Qwen3.6-35B-A3B" in ids and "tagged" in ids
