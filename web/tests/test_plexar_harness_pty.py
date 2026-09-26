@@ -90,7 +90,7 @@ def test_legacy_bypass_boolean_is_full_access(mgr, harness_env):
 
 
 @pytest.mark.parametrize("effort,expected", [
-    ("", " -e default"), ("off", " -e off"), ("high", " -e high"),
+    ("", None), ("off", " -e off"), ("high", " -e high"),
     ("low", None), ("medium", None), ("xhigh", None), ("max", None),
 ])
 def test_effort_values(mgr, harness_env, effort, expected):

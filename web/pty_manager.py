@@ -693,10 +693,12 @@ _ALLOWED_PROVIDERS = {"anthropic", "openrouter", "local"}
 _ALLOWED_HARNESSES = {"claude-code", "codex", "plexar-harness"}
 
 # The Plexar Harness CLI's own effort vocabulary (`-e off|high|default`,
-# plexar-harness.mjs EFFORTS). Studio's "" (provider default) maps to
-# "default"; any other Studio effort (Claude's low/medium/xhigh/max) is DROPPED,
-# never passed through -- the CLI would refuse it and exit.
-_PLEXAR_HARNESS_EFFORTS = {"": "default", "off": "off", "high": "high"}
+# plexar-harness.mjs EFFORTS). Studio's "" (provider default) passes NO flag:
+# harness 0.3.1 turns `-e default` into reasoning_effort="" and the ACP backend
+# refuses that for every model ("unknown reasoning effort ... : ", 2.1.45 QA),
+# so the session could never start. Any other Studio effort (Claude's
+# low/medium/xhigh/max) is DROPPED, never passed through.
+_PLEXAR_HARNESS_EFFORTS = {"off": "off", "high": "high"}
 
 # Studio permission mode -> the Plexar Harness CLI's `-m <mode>` preset
 # (settings.mjs MODES: ask | auto-edit | full-access). Anything not listed maps
@@ -1695,12 +1697,12 @@ class PtyManager:
         # actionable; silently substituting a neighbour would be the R-169 shape.
         # OpenRouter stays skipped -- unmeasured, and not this defect.
         if harness == "plexar-harness":
-            # `-e off|high|default` only. "" (provider default) is "default";
-            # Claude's low/medium/xhigh/max are dropped, never passed through.
+            # `-e off|high` only. "" (provider default) passes no flag -- see
+            # _PLEXAR_HARNESS_EFFORTS; Claude's other efforts are dropped.
             harness_effort = _PLEXAR_HARNESS_EFFORTS.get(effort)
             if harness_effort:
                 cmd += f" -e {harness_effort}"
-            else:
+            elif effort:
                 logger.info("Effort level %r requested but skipped — not offered by the Plexar Harness", effort)
         elif effort and harness == "codex":
             # Codex takes reasoning effort as a config override, not a flag.
