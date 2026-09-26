@@ -293,11 +293,47 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
+_API_DESCRIPTION = """The HTTP API behind Plexar Studio, a multi-session manager for Claude Code, Codex and
+Plexar Harness terminals. The desktop app is a thin window over this same server, so
+anything the UI does can be scripted here.
+
+**Security.** The server listens on `127.0.0.1` and has **no authentication**: the
+browser-origin guard refuses cross-origin and DNS-rebinding requests, nothing more.
+Do not expose it to a network. Phones use `/remote/v1/*`, which requires a paired
+device's bearer token and is off unless `remote.enabled` is set.
+
+Try it: `GET /api/terminals` lists sessions, `POST /api/terminals` starts one, and
+`WS /ws/terminal/{id}` streams a terminal (its handshake needs this server's Origin).
+"""
+
+# Tag every route by its path so /docs groups 120+ routes into sections,
+# without repeating a tags= argument on each decorator.
+_API_TAGS = [
+    ("/api/terminals", "Terminals", "Create, list, drive and close sessions."),
+    ("/api/history", "History", "Past conversations on disk."),
+    ("/api/bridge", "Bridges", "Sessions that talk to each other (mailbox and manual relay)."),
+    ("/api/harness", "Plexar Harness", "Models and sign-in state for Plexar Harness panes."),
+    ("/api/framework", "Plexar Framework (preview)", "Read-only view of the Plexar Framework task queue. The framework is not public yet."),
+    ("/api/local", "Local providers", "LM Studio, vLLM and Plexar model endpoints."),
+    ("/api/usage", "Usage and cost", "Token, tool-call and cost reports."),
+    ("/api/pricing", "Usage and cost", ""),
+    ("/api/settings", "Settings", "settings.json and secret keys (keys are never returned)."),
+    ("/api/remote", "Remote (desktop admin)", "Pairing, devices and the tunnel, from the desktop."),
+    ("/remote/v1", "Remote (phone)", "The Plexar Mobile surface. Bearer-token only."),
+    ("/shim", "Provider shims", "Wire translation used by spawned CLIs; not for direct use."),
+]
+_API_TAG_META = {}
+for _prefix, _name, _desc in _API_TAGS:
+    if _desc:
+        _API_TAG_META.setdefault(_name, _desc)
+
 app = FastAPI(
     title="Plexar Studio API",
-    description="Multi-session Claude CLI terminal manager",
-    version="1.0.0",
+    description=_API_DESCRIPTION,
+    version="dev",  # replaced with the real app version in _tag_api_routes()
     lifespan=lifespan,
+    openapi_tags=[{"name": n, "description": d} for n, d in _API_TAG_META.items()]
+    + [{"name": "System", "description": "Version, health, platform and everything else."}],
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -7722,6 +7758,30 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # ws_ping_timeout is widened to 120s (matching the Tauri watchdog's
 # HEALTH_FAILURES_BEFORE_KILL tolerance of 24 x 5s) so a stall shorter than
 # that self-heals via reconnect-and-replay instead of a hard close.
+def _tag_api_routes() -> None:
+    """Assign each route its /docs section by path prefix (see _API_TAGS), and
+    stamp the real app version (defined after `app`, so not in the constructor)."""
+    app.version = _app_version() or "dev"
+
+    def _routes(routes, prefix=""):
+        for route in routes:
+            # Included routers stay wrapped; their routes carry paths relative
+            # to the router's own prefix.
+            inner = getattr(route, "original_router", None)
+            if inner is not None:
+                yield from _routes(inner.routes, prefix)
+            else:
+                yield prefix, route
+
+    for prefix, route in _routes(app.routes):
+        path = prefix + getattr(route, "path", "")
+        if not hasattr(route, "tags") or route.tags:
+            continue
+        route.tags = [next((name for p, name, _ in _API_TAGS if path.startswith(p)), "System")]
+
+
+_tag_api_routes()
+
 _WS_PING_INTERVAL_S = 20.0
 _WS_PING_TIMEOUT_S = 120.0
 
