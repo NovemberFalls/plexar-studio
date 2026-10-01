@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.52] - 2026-10-01
+
+### Added
+- **See Claude's own agents.** When a Claude session runs agents with its built-in Agent tool (for example `/orch-code-anth`), they now appear in the sidebar under that session: what each is doing, its model, and a running/done dot. Click one to read its latest output. These are read-only; they have no terminal of their own.
+
+### Changed
+- Shell worker panes show a plain SHELL badge instead of WORKING, and no BYPASS tag.
+
 ## [2.1.51] - 2026-10-01
 
 ### Fixed
