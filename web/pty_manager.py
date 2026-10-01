@@ -696,7 +696,18 @@ _ALLOWED_PROVIDERS = {"anthropic", "openrouter", "local"}
 # its own ACP runtime against the Plexar rig. It is provider-less from Studio's
 # side: the rig URL and key ride PLEXAR_RIG_URL / PLEXAR_HARNESS_KEY, so only
 # provider="anthropic" (the "no reroute" default) is accepted for it.
-_ALLOWED_HARNESSES = {"claude-code", "codex", "plexar-harness"}
+_ALLOWED_HARNESSES = {"claude-code", "codex", "plexar-harness", "shell"}
+
+
+def _shell_command() -> str:
+    """The interactive shell a `shell` harness pane runs (agent workers' `run`).
+
+    No model, no flags from the session's model/permission/effort: a shell has
+    none of those. pwsh when installed, else Windows PowerShell; $SHELL on POSIX."""
+    import shutil as _shutil
+    if os.name == "nt":
+        return "pwsh -NoLogo" if _shutil.which("pwsh") else "powershell.exe -NoLogo"
+    return os.environ.get("SHELL") or "/bin/bash"
 
 # The Plexar Harness CLI's own effort vocabulary (`-e off|high|default`,
 # plexar-harness.mjs EFFORTS). Studio's "" (provider default) passes NO flag:
@@ -1113,6 +1124,8 @@ class PtyManager:
         # which CLI gets resolved.
         if harness not in _ALLOWED_HARNESSES:
             raise ValueError(f"Invalid harness: {harness!r}")
+        if harness == "shell" and provider != "anthropic":
+            raise ValueError("A shell pane has no model provider.")
         if harness == "plexar-harness" and provider != "anthropic":
             # The harness routes itself to the Plexar rig (PLEXAR_RIG_URL); an
             # OpenRouter/local reroute has no meaning for it and would be a
@@ -1205,6 +1218,8 @@ class PtyManager:
                 local_base_url = _server.resolve_local_base_url(local_provider_id, terminal_id)
             if not local_base_url:
                 raise ValueError(f"Unknown or non-local provider id: {local_provider_id!r}")
+        elif harness == "shell":
+            pass  # no model: a shell pane runs no model CLI
         elif harness == "plexar-harness":
             # PLEXAR_MODEL carries the served name; the value never reaches the
             # command line. Validated/refused in plexar_harness_model_name.
@@ -1379,6 +1394,9 @@ class PtyManager:
         spawn_token = secrets.token_urlsafe(24)
         env["PLEXAR_STUDIO_TOKEN"] = spawn_token
         env["PLEXAR_STUDIO_URL"] = f"http://127.0.0.1:{os.getenv('PORT', '8420')}"
+        env["PLEXAR_STUDIO_CLI"] = os.path.join(
+            getattr(__import__("sys"), "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__)),
+            "studio_cli.py")
 
         import sys as _sys
         meipass = getattr(_sys, "_MEIPASS", None)
@@ -1553,7 +1571,9 @@ class PtyManager:
             if os.path.isdir(jsonl_dir):
                 pre_spawn_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
 
-        if harness == "plexar-harness":
+        if harness == "shell":
+            cmd = _shell_command()
+        elif harness == "plexar-harness":
             # Model rides PLEXAR_MODEL (env, above); only mode/effort/resume
             # are flags, appended below. No Claude flag is ever added.
             cmd = "plexar-harness"
@@ -1668,7 +1688,9 @@ class PtyManager:
         # both map to --dangerously-skip-permissions; bypass wins and we do NOT
         # also append --permission-mode to avoid duplicate/conflicting flags.
         effective_bypass = bypass_permissions or (permission_mode == "bypassPermissions")
-        if harness == "plexar-harness":
+        if harness == "shell":
+            pass  # no permission flags: a shell's commands are the agent's own
+        elif harness == "plexar-harness":
             # The harness CLI's own presets (`-m ask|auto-edit|full-access`).
             # Bypass is full-access; --dangerously-skip-permissions is Claude's
             # flag and must never reach this CLI.
@@ -1709,7 +1731,9 @@ class PtyManager:
         # engine's own error naming the supported set, which is honest and
         # actionable; silently substituting a neighbour would be the R-169 shape.
         # OpenRouter stays skipped -- unmeasured, and not this defect.
-        if harness == "plexar-harness":
+        if harness == "shell":
+            pass
+        elif harness == "plexar-harness":
             # `-e off|high` only. "" (provider default) passes no flag -- see
             # _PLEXAR_HARNESS_EFFORTS; Claude's other efforts are dropped.
             harness_effort = _PLEXAR_HARNESS_EFFORTS.get(effort)
@@ -1737,7 +1761,9 @@ class PtyManager:
         # silently no-ops on non-Opus models, so we skip the flag entirely for non-Opus.
         # Also skipped entirely for openrouter/local — foreign/local models don't support fast mode.
         _fast_settings_path: Optional[str] = None
-        if fast and harness == "plexar-harness":
+        if harness == "shell":
+            pass
+        elif fast and harness == "plexar-harness":
             logger.info("Fast mode requested but skipped — not supported by the Plexar Harness")
         elif fast and harness == "codex":
             # Fast mode is a Claude Code settings key. Codex has no equivalent,
@@ -1777,7 +1803,9 @@ class PtyManager:
         # deep inside the PTY backend. resolve_claude_cli may extend PATH when
         # it locates the CLI outside the inherited one — that extension has to
         # reach the child, so re-stamp env["PATH"].
-        if harness == "codex":
+        if harness == "shell":
+            cli_path = cmd.split()[0]
+        elif harness == "codex":
             cli_path, current_path = resolve_codex_cli(current_path)
         elif harness == "plexar-harness":
             cli_path, current_path = resolve_plexar_harness_cli(current_path)
@@ -1831,7 +1859,9 @@ class PtyManager:
         # (never allowlist-validated, never passed as --model) — the
         # session's effective/displayed model is the OpenRouter slug or the
         # parsed local model id instead.
-        if provider == "openrouter":
+        if harness == "shell":
+            display_model = "shell"
+        elif provider == "openrouter":
             display_model = provider_model
         elif provider == "local":
             display_model = local_model_id
