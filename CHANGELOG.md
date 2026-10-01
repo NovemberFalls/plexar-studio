@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.49] - 2026-09-30
+
+### Added
+- **More kinds of worker.** An agent can now start Plexar Harness workers (`--harness plexar`), Codex workers, and plain **shell** workers alongside Claude Code ones. Shell workers run commands, and the agent can wait for a line of output (text or a regex) before carrying on.
+- **Workers on their own branch.** A worker can be started in a fresh git worktree (`--worktree <branch>`), next to the repo in `<repo>-worktrees/`.
+- **Agents can press keys** in their workers (Esc, Ctrl+C, Enter, arrows, y/n), read output with colours kept, see your other sessions (read-only), and are told when a prompt they sent never started a turn.
+- **A small CLI for agents** (`python "$PLEXAR_STUDIO_CLI" ...`), so they no longer hand-write HTTP calls. The agent guide is `skills/plexar-studio-workers/SKILL.md`.
+- Shell workers are marked `sh` in the sidebar.
+
 ## [2.1.48] - 2026-09-30
 
 ### Added
