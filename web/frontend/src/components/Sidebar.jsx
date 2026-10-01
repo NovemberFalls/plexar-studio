@@ -1,5 +1,6 @@
 import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback } from "react";
+import { groupWorkers } from "../subsessions.js";
 
 /** Open a URL in the system's default browser (Tauri-safe), falling back to a new tab. */
 function openExternal(url) {
@@ -239,7 +240,56 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
   );
 }
 
-function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu, onFocusFolder, visibleFolder }) {
+/** A session row plus the workers its agent spawned (agent_api.py), nested one
+ *  level under it. Module-scope like SessionItem (see CLAUDE.md conventions). The
+ *  collapsed row still says how many workers exist and whether one needs attention,
+ *  so folding the list never hides a blocked worker. */
+function SessionWithWorkers({ session, workers, activeIds, onSelect, onDelete }) {
+  const [open, setOpen] = useState(true);
+  if (!workers || workers.length === 0) {
+    return <SessionItem session={session} isActive={activeIds.includes(session.id)} onSelect={onSelect} onDelete={onDelete} />;
+  }
+  const waiting = workers.filter((w) => (w.activityState || w.status) === "waiting").length;
+  const busy = workers.filter((w) => (w.activityState || w.status) === "busy").length;
+  return (
+    <div data-testid="session-with-workers">
+      <div className="flex items-center">
+        <button
+          onClick={() => setOpen(!open)}
+          className="p-0.5 flex-shrink-0"
+          style={{ color: "var(--cc-muted)", marginLeft: "-14px" }}
+          aria-label={open ? "Collapse workers" : "Expand workers"}
+          aria-expanded={open}
+        >
+          {open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        </button>
+        <div className="flex-1 min-w-0">
+          <SessionItem session={session} isActive={activeIds.includes(session.id)} onSelect={onSelect} onDelete={onDelete} />
+        </div>
+        <span
+          className="text-[9px] flex-shrink-0 mr-1"
+          style={{ color: waiting ? "var(--cc-waiting)" : "var(--cc-muted)" }}
+          title={`${workers.length} worker${workers.length === 1 ? "" : "s"}: ${busy} working, ${waiting} waiting on you`}
+        >
+          {waiting ? `${waiting}!` : ""}{workers.length}w
+        </span>
+      </div>
+      {open && (
+        <div
+          data-testid="worker-list"
+          style={{ marginLeft: "8px", paddingLeft: "6px", borderLeft: "1px solid var(--cc-border)",
+                   display: "flex", flexDirection: "column", gap: "1px" }}
+        >
+          {workers.map((w) => (
+            <SessionItem key={w.id} session={w} isActive={activeIds.includes(w.id)} onSelect={onSelect} onDelete={onDelete} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LocationNode({ node, depth = 0, sessionsByDir, workersOf = {}, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu, onFocusFolder, visibleFolder }) {
   const sessionsHere = sessionsByDir[norm(node.path)] || [];
   const hasChildren = node.children.length > 0 || sessionsHere.length > 0;
   const [expanded, setExpanded] = useState(true);
@@ -339,12 +389,12 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
           {sessionsHere.length > 0 && (
             <div style={{ paddingLeft: `${depth * 12 + 20}px`, display: "flex", flexDirection: "column", gap: "1px" }}>
               {sessionsHere.map((s) => (
-                <SessionItem key={s.id} session={s} isActive={activeIds.includes(s.id)} onSelect={onSelect} onDelete={onDelete} />
+                <SessionWithWorkers key={s.id} session={s} workers={workersOf[s.terminalId]} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} />
               ))}
             </div>
           )}
           {node.children.map((child) => (
-            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
+            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} workersOf={workersOf} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
           ))}
         </>
       )}
@@ -399,15 +449,17 @@ export default function Sidebar({
   }, [sessions, sessionFilter]);
 
   // Pre-compute workdir → sessions[] map (O(n) once, not per LocationNode)
+  // Workers nest under their parent row, so only top-level rows go in the folder map.
+  const { top: topSessions, workersOf } = useMemo(() => groupWorkers(filteredSessions), [filteredSessions]);
   const sessionsByDir = useMemo(() => {
     const map = {};
-    for (const s of filteredSessions) {
+    for (const s of topSessions) {
       const key = norm(s.workdir);
       if (!map[key]) map[key] = [];
       map[key].push(s);
     }
     return map;
-  }, [filteredSessions]);
+  }, [topSessions]);
 
   // Expand 1 layer: fetch subdirs from backend and add them
   const handleExpand = useCallback(async (path) => {
@@ -606,7 +658,7 @@ export default function Sidebar({
             </div>
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {locationTree.map((node) => (
-                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
+                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} workersOf={workersOf} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
               ))}
             </div>
           </>

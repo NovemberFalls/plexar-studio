@@ -37,7 +37,8 @@ import Inspector from "./components/shell/Inspector";
 import StatusStrip from "./components/shell/StatusStrip";
 import SettingsView from "./components/settings/SettingsView";
 import ChatView from "./components/ChatView.jsx";
-import TasksView from "./components/TasksView.jsx";
+import TasksView, { prefetchFrameworkProbe } from "./components/TasksView.jsx";
+import { reconcileWorkers } from "./subsessions.js";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneStripFrom } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
@@ -221,9 +222,9 @@ function saveSessions(sessions) {
   const toSave = sessions
     .filter((s) => s.status !== "history")
     .map(({ name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName }) => ({
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId }) => ({
       name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName,
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId,
     }));
   lsSave(SESSIONS_KEY, toSave);
 }
@@ -1203,6 +1204,10 @@ export default function App() {
     })();
   }, [backendReady, layout, addLocations, createSession, toast]);
 
+  // Warm the TASKS probe as soon as the backend answers, so opening TASKS
+  // never waits on it (see the load-time note in TasksView.jsx).
+  useEffect(() => { if (backendReady) prefetchFrameworkProbe(); }, [backendReady]);
+
   // Request notification permission
   const notifRequested = useRef(false);
   useEffect(() => {
@@ -1260,7 +1265,8 @@ export default function App() {
               return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId, codex_session_id: newCodexSessionId, name: newName, backendName: newBackendName };
             });
 
-            const result = changed ? updated : prev;
+            // Adopt agent-spawned workers (and drop ones whose terminal is gone).
+            const result = reconcileWorkers(changed ? updated : prev, data.terminals, () => nextLocalId++);
 
             for (const s of result) {
               if (!s.terminalId) continue;
