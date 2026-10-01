@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.51] - 2026-10-01
+
+### Fixed
+- A Claude pane no longer shows WORKING for several seconds every time it is opened, resized or clicked while it is actually idle.
+
 ## [2.1.50] - 2026-10-01
 
 ### Added
