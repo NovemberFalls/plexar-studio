@@ -1173,7 +1173,7 @@ class _CreateTerminalRefused(Exception):
         self.payload = payload
 
 
-async def _create_terminal_from_body(body: dict) -> dict:
+async def _create_terminal_from_body(body: dict, parent_id: str | None = None) -> dict:
     """Spawn a session from a POST /api/terminals body. THE single spawn path.
 
     Raises ValueError for input pty_manager rejects (bad harness/provider combo)
@@ -1224,6 +1224,9 @@ async def _create_terminal_from_body(body: dict) -> dict:
             fast=fast,
             cols=cols,
             rows=rows,
+            # NEVER read from the body: only agent_api, which has authenticated the
+            # parent by its spawn token, may set lineage.
+            parent_id=parent_id,
         )
         # Post-spawn health check: give Claude CLI time to initialize Node.js.
         # The 1.5s wait also ensures the fast-mode --settings file has been read
@@ -7422,6 +7425,10 @@ async def get_local_metrics(window: str = "lifetime"):
 
 # ── Studio Remote (protocol v1) ──────────────────────────
 
+import agent_api  # noqa: E402 -- agent sub-sessions; token-scoped, see its docstring
+agent_api.configure(pty_manager=pty_manager, create_from_body=_create_terminal_from_body,
+                    paste_and_submit=_paste_and_submit, wait_for_idle=_wait_for_idle_simple)
+app.include_router(agent_api.router)
 import remote_gateway  # noqa: E402 -- grouped with the other post-app-creation router wiring
 from remote_devices import DeviceStore  # noqa: E402
 

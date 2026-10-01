@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import re
 import shutil
 import sys
@@ -581,6 +582,11 @@ class TerminalSession:
     # "cli" (a /rename inside Claude Code, or a terminal title from Codex).
     # The most recent act wins on either side; this records which that was.
     name_source: str = "studio"
+    # Agent-spawned sub-sessions: the terminal id of the session that asked for this one
+    # (None for a pane the user opened). spawn_token is the secret this session presents
+    # to /api/agent/* to act as a parent; it is put in the child env and never serialized.
+    parent_id: Optional[str] = None
+    spawn_token: str = ""
     cli_title: Optional[str] = None  # last CLI-side title observed, from either channel
     _cli_title_checked: float = 0.0  # monotonic throttle stamp for _refresh_cli_title
 
@@ -1071,6 +1077,7 @@ class PtyManager:
         fast: bool = False,
         cols: int = 120,
         rows: int = 30,
+        parent_id: Optional[str] = None,
     ) -> TerminalSession:
         """Spawn a new interactive Claude CLI session in a PTY.
 
@@ -1367,6 +1374,11 @@ class PtyManager:
         # it back so the "task done" toast can mark that pane. Always overwritten:
         # a Studio launched from inside another session inherits that session's id.
         env["PLEXAR_SESSION_ID"] = terminal_id
+        # Agent sub-session API (agent_api.py): the token proves "I am this pane" to
+        # /api/agent/*. Always overwritten, for the same inherited-env reason as above.
+        spawn_token = secrets.token_urlsafe(24)
+        env["PLEXAR_STUDIO_TOKEN"] = spawn_token
+        env["PLEXAR_STUDIO_URL"] = f"http://127.0.0.1:{os.getenv('PORT', '8420')}"
 
         import sys as _sys
         meipass = getattr(_sys, "_MEIPASS", None)
@@ -1844,6 +1856,8 @@ class PtyManager:
             fast=fast,
             cols=cols,
             rows=rows,
+            parent_id=parent_id,
+            spawn_token=spawn_token,
         )
         # Store pre-spawn file snapshot for JSONL discovery
         session._pre_spawn_files = pre_spawn_files
@@ -2086,6 +2100,7 @@ class PtyManager:
             "harness": session.harness,
             "created_at": session.created_at,
             "working_dir": session.working_dir,
+            "parent_id": session.parent_id,
             "claude_session_id": session.claude_session_id,
             "codex_session_id": session.codex_session_id,
             "jsonl_path": self._get_jsonl_path(session),
