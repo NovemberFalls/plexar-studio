@@ -524,6 +524,15 @@ class SessionStateTracker:
         if busy_at != -1 and busy_at > max(low.rfind("shift+tab to cycle", busy_at), low.rfind("for shortcuts", busy_at)):
             self.state = "busy"
             return self.state
+        # ...and a footer WITHOUT that cue is idle. The prompt glyph is not a usable
+        # idle cue on its own: measured 2026-10-01 the tail of an idle Claude Code
+        # 2.1.283 pane is a 120-char divider plus the footer, with no glyph in it, so every
+        # redraw (opening, resizing or clicking a pane) read as WORKING until the 10 s
+        # fallback below.
+        footer_at = max(low.rfind("shift+tab to cycle"), low.rfind("for shortcuts"))
+        if footer_at != -1 and low.find("esc to interrupt", footer_at) == -1:
+            self.state = "idle"
+            return self.state
 
         # Check idle patterns
         for pattern in _IDLE_PATTERNS:

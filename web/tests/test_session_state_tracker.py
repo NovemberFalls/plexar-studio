@@ -102,3 +102,16 @@ def test_working_footer_beats_the_idle_glyph():
     tracker.feed("❯ \n  bypass permissions on (shift+tab to cycle) · ? for shortcuts\n")
     tracker.last_output_time = time.time() - 2
     assert tracker.tick() == "idle"
+
+
+def test_idle_footer_without_glyph_is_idle_immediately():
+    """Measured 2026-10-01 (Claude Code 2.1.283): the idle tail is a divider plus the
+    footer, no prompt glyph. A redraw must not read as WORKING for 10 s."""
+    tracker = SessionStateTracker()
+    tracker.feed("─" * 120 + "\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n\n\n")
+    tracker.last_output_time = time.time() - 1.5
+    assert tracker.tick() == "idle"
+    busy = SessionStateTracker()
+    busy.feed("─" * 120 + "\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt\n")
+    busy.last_output_time = time.time() - 1.5
+    assert busy.tick() == "busy"
