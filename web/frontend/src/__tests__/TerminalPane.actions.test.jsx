@@ -573,3 +573,35 @@ describe("TerminalPane — inline rename", () => {
     unmount();
   });
 });
+
+// ===========================================================================
+// Hide vs close (owner 2026-10-01: "the X closed the full thing")
+// ===========================================================================
+
+describe("TerminalPane — Hide keeps the session, X ends it", () => {
+  it("Hide calls onHide only, never onClose", async () => {
+    const onHide = vi.fn();
+    const onClose = vi.fn();
+    const { unmount } = await renderPane({ onHide, onClose });
+    fireEvent.click(screen.getByLabelText("Hide pane, keep session running"));
+    expect(onHide).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("X still ends the session, and is labelled so", async () => {
+    const onClose = vi.fn();
+    const { unmount } = await renderPane({ onHide: vi.fn(), onClose });
+    const x = screen.getByLabelText("Close session");
+    expect(x).toHaveAttribute("data-tooltip", "End session");
+    fireEvent.click(x);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
+  it("no Hide button when the host passes no onHide (popouts)", async () => {
+    const { unmount } = await renderPane({});
+    expect(screen.queryByLabelText("Hide pane, keep session running")).toBeNull();
+    unmount();
+  });
+});

@@ -895,6 +895,15 @@ export default function App() {
     );
   }, [sessions, toast, createSession]);
 
+  // Hide: take a pane off the grid WITHOUT ending it. The session stays in the
+  // sidebar (still running, still polled) and a click there puts it back. Only the
+  // slot is nulled -- never compacted, same as removeSession, so slot indices stay
+  // stable. X (removeSession) still ends the session; owner 2026-10-01: "the X
+  // closed the full thing" when he only wanted the pane gone.
+  const hideSession = useCallback((localId) => {
+    setActiveIds((prev) => prev.map((id) => (id === localId ? null : id)));
+  }, []);
+
   // Select a session: fill an empty pane slot if available, never auto-rearrange
   const selectSession = useCallback((id) => {
     setActiveIds((prev) => {
@@ -2753,6 +2762,7 @@ export default function App() {
                         ref={(el) => { paneRefs.current[idx] = el; }}
                         session={session}
                         onClose={() => removeSession(session.id)}
+                        onHide={() => hideSession(session.id)}
                         paneIndex={idx}
                         onSwap={layout > 1 ? swapPanes : undefined}
                         onMakeFeatured={

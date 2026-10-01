@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { SearchAddon } from "@xterm/addon-search";
-import { X, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow, OctagonX, EllipsisVertical } from "lucide-react";
+import { X, Minus, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow, OctagonX, EllipsisVertical } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import WorkflowsPanel from "./WorkflowsPanel";
@@ -22,7 +22,8 @@ import "@xterm/xterm/css/xterm.css";
 
 const TerminalPane = forwardRef(function TerminalPane({
   session,       // { id, name, terminalId, model, status, activityState }
-  onClose,       // () => void
+  onClose,       // () => void -- ENDS the session (kills the terminal; Undo toast follows)
+  onHide,        // () => void | undefined -- takes the pane off the grid, session keeps running
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
   onDragSourceChange, // (paneIndex | null) => void — notify parent of drag start/end
@@ -1031,12 +1032,24 @@ const TerminalPane = forwardRef(function TerminalPane({
               />
             )}
           </div>
+          {onHide && (
+            <button
+              type="button"
+              onClick={onHide}
+              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated"
+              style={{ color: "var(--text-muted)" }}
+              data-tooltip="Hide (keeps running)"
+              aria-label="Hide pane, keep session running"
+            >
+              <Minus size={13} />
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
             className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-red"
             style={{ color: "var(--text-muted)" }}
-            data-tooltip="Close"
+            data-tooltip="End session"
             aria-label="Close session"
           >
             <X size={13} />
