@@ -688,13 +688,17 @@ const TerminalPane = forwardRef(function TerminalPane({
   // Map the app's fine-grained activity states onto the shared glow-state
   // vocabulary (working|thinking|waiting|idle|error) consumed by the
   // [data-glowable][data-state] CSS contract (SPEC-FACELIFT §A/§D).
-  const dataState =
+  // A shell pane (agent shell worker) has no agent state Studio can read: the tracker
+  // only knows Claude/Codex/Harness TUI cues, so its "busy" would be a guess. It shows
+  // a neutral SHELL badge and no glow instead of a WORKING it cannot back up.
+  const isShell = session.harness === "shell";
+  const dataState = isShell ? "idle" :
     activityState === "busy" ? "working"
     : activityState === "thinking" ? "thinking"
     : activityState === "waiting" ? "waiting"
     : activityState === "error" ? "error"
     : "idle"; // idle, running, starting, history
-  const stateWord = dataState.toUpperCase();
+  const stateWord = isShell ? "SHELL" : dataState.toUpperCase();
 
   // Bridge overlays keep their own dedicated color (salmon/red) per spec,
   // overriding the generic state glow via inline style precedence.
@@ -833,7 +837,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           {(usage?.effort || session.effort) && <span className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0" title="Thinking effort" style={{ color: "var(--cc-muted, var(--text-muted))", backgroundColor: "var(--bg-surface)" }}>
             {(usage?.effort || session.effort) === "xhigh" ? "xHigh" : (usage?.effort || session.effort)}
           </span>}
-          {session.bypassPermissions && (
+          {session.bypassPermissions && !isShell && (
             <span
               className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
               style={{

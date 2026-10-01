@@ -605,3 +605,21 @@ describe("TerminalPane — Hide keeps the session, X ends it", () => {
     unmount();
   });
 });
+
+describe("TerminalPane — shell panes", () => {
+  it("show SHELL, never WORKING, and no BYPASS tag", async () => {
+    const { unmount } = await renderPane({
+      session: { ...BASE_SESSION, harness: "shell", activityState: "busy", bypassPermissions: true },
+    });
+    expect(screen.getByText("SHELL")).toBeInTheDocument();
+    expect(screen.queryByText("WORKING")).toBeNull();
+    expect(screen.queryByText("BYPASS")).toBeNull();
+    unmount();
+  });
+
+  it("an agent pane still shows WORKING when busy", async () => {
+    const { unmount } = await renderPane({ session: { ...BASE_SESSION, activityState: "busy" } });
+    expect(screen.getByText("WORKING")).toBeInTheDocument();
+    unmount();
+  });
+});
