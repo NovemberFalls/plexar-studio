@@ -512,6 +512,19 @@ class SessionStateTracker:
                 self.state = "waiting"
                 return self.state
 
+        # The CLI's own "working" footer beats the idle glyph. Claude Code keeps its
+        # prompt box (and its ❯) on screen WHILE it works, so the idle check alone
+        # called a mid-turn pause idle -- measured 2026-10-01: an agent worker read as
+        # settled during a 9 s Stop hook and the parent read an empty answer.
+        # The buffer is cumulative, so a stale busy footer can linger in the tail after
+        # the turn ends: it counts only when no LATER footer start ("shift+tab to
+        # cycle" / "for shortcuts", which open every redrawn footer) follows it.
+        low = tail.lower()
+        busy_at = low.rfind("esc to interrupt")
+        if busy_at != -1 and busy_at > max(low.rfind("shift+tab to cycle", busy_at), low.rfind("for shortcuts", busy_at)):
+            self.state = "busy"
+            return self.state
+
         # Check idle patterns
         for pattern in _IDLE_PATTERNS:
             if pattern in tail:

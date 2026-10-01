@@ -89,3 +89,16 @@ def test_folder_trust_dialog_is_waiting_not_idle():
     )
     tracker.last_output_time = time.time() - 5
     assert tracker.tick() == "waiting"
+
+
+def test_working_footer_beats_the_idle_glyph():
+    """Claude Code keeps its prompt glyph on screen while it works; its footer says
+    "esc to interrupt" until the turn ends. Measured 2026-10-01: without this check a
+    worker read as idle mid-turn and its parent collected an empty answer."""
+    tracker = SessionStateTracker()
+    tracker.feed("❯ \n  bypass permissions on (shift+tab to cycle) · esc to interrupt\n")
+    tracker.last_output_time = time.time() - 12
+    assert tracker.tick() == "busy"
+    tracker.feed("❯ \n  bypass permissions on (shift+tab to cycle) · ? for shortcuts\n")
+    tracker.last_output_time = time.time() - 2
+    assert tracker.tick() == "idle"
