@@ -220,7 +220,7 @@ Setting `HOST=0.0.0.0` exposes it to your network and stands the `Host` check do
 The desktop app is a window over a local [FastAPI](https://fastapi.tiangolo.com/) server, so
 everything the UI does can also be scripted. While Studio is running, open
 **<http://127.0.0.1:8420/docs>** for interactive docs of every route, grouped by area
-(Terminals, History, Bridges, Settings, Usage and cost, and so on). The raw schema is at
+(Terminals, Agent workers, History, Bridges, Settings, Usage and cost, and so on). The raw schema is at
 `/openapi.json`, which you can feed to any OpenAPI client generator.
 
 ```bash
@@ -235,6 +235,44 @@ curl -X POST http://127.0.0.1:8420/api/terminals/<id>/command   -H "Content-Type
 ```
 
 Terminal I/O streams over `WS /ws/terminal/{id}`: raw keystrokes in, terminal output out.
+
+### Agent workers (`/api/agent/*`)
+
+An agent running inside a Studio pane can start **visible worker panes** of its own: Claude
+Code, Codex, Plexar Harness or a plain shell, optionally each on its own git worktree. Workers
+appear in the sidebar nested under the pane that started them, and you can open any of them
+and type into it. Every pane gets `PLEXAR_STUDIO_URL`, `PLEXAR_STUDIO_TOKEN` and
+`PLEXAR_STUDIO_CLI` in its environment; the bundled CLI is the easy way in:
+
+```bash
+ps() { python "$PLEXAR_STUDIO_CLI" "$@"; }
+ps spawn --name reviewer --prompt "Review the diff on this branch"   # Claude Code worker
+ps spawn --harness shell --name tests                                # a shell for commands
+ps run tests "npm test"                                              # -> {"after": <mark>}
+ps wait-output tests --regex "passed|failed" --after <mark>
+ps wait reviewer && ps read reviewer                                 # its latest answer
+ps keys reviewer esc                                                 # esc, ctrl+c, enter, ...
+ps close reviewer
+```
+
+The rules are enforced by the server, not by the agent's good manners:
+
+- **The token is the boundary.** Each route acts only on the calling pane's own workers;
+  anything else answers 404. A browser cannot learn the token, and the origin guard applies.
+- **Depth 1, at most 8 workers per pane**, and a worker never gets more permission than its parent.
+- **A worker waiting on a question or approval is yours.** Prompting it is refused (409); the
+  agent is expected to tell you which worker needs you.
+
+The full agent guide is [`skills/plexar-studio-workers/SKILL.md`](skills/plexar-studio-workers/SKILL.md),
+and every route is in `/docs` under **Agent workers**.
+
+### Claude's own agents (`GET /api/subagents`)
+
+When a Claude Code session runs agents with its built-in Agent tool, Studio reads them from
+Claude Code's transcripts and lists them per session (type, model, description,
+running/done). The sidebar shows them under their session. They are read-only: they run
+inside that session's process and have no terminal of their own.
+`GET /api/terminals/{id}/subagents/{agent_id}` returns one agent's latest text.
 
 The same security rules apply as for the app: the API has **no authentication**, it answers
 only on loopback, and a browser-origin guard refuses cross-origin and DNS-rebinding requests

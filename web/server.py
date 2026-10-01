@@ -297,10 +297,17 @@ _API_DESCRIPTION = """The HTTP API behind Plexar Studio, a multi-session manager
 Plexar Harness terminals. The desktop app is a thin window over this same server, so
 anything the UI does can be scripted here.
 
-**Security.** The server listens on `127.0.0.1` and has **no authentication**: the
-browser-origin guard refuses cross-origin and DNS-rebinding requests, nothing more.
-Do not expose it to a network. Phones use `/remote/v1/*`, which requires a paired
+**Security.** The server listens on `127.0.0.1` and most routes have **no authentication**:
+the browser-origin guard refuses cross-origin and DNS-rebinding requests, nothing more.
+Do not expose it to a network. Two surfaces do authenticate: `/api/agent/*` requires the
+calling pane's own `X-Plexar-Session-Token` (set in every pane as `PLEXAR_STUDIO_TOKEN`) and
+only ever acts on that pane's own workers; phones use `/remote/v1/*`, which requires a paired
 device's bearer token and is off unless `remote.enabled` is set.
+
+**Agent workers.** An agent running in a Studio pane can spawn, prompt, watch and close
+visible worker panes (Claude Code, Codex, Plexar Harness or a shell) through `/api/agent/*`,
+or with the bundled CLI: `python "$PLEXAR_STUDIO_CLI" --help`. Claude Code's own in-process
+agents (its Agent tool) are listed read-only at `GET /api/subagents`.
 
 Try it: `GET /api/terminals` lists sessions, `POST /api/terminals` starts one, and
 `WS /ws/terminal/{id}` streams a terminal (its handshake needs this server's Origin).
@@ -313,7 +320,15 @@ _API_TAGS = [
     ("/api/history", "History", "Past conversations on disk."),
     ("/api/bridge", "Bridges", "Sessions that talk to each other (mailbox and manual relay)."),
     ("/api/harness", "Plexar Harness", "Models and sign-in state for Plexar Harness panes."),
-    ("/api/framework", "Plexar Framework (preview)", "Read-only view of the Plexar Framework task queue. The framework is not public yet."),
+    ("/api/framework", "Plexar Framework (preview)",
+     "Read-only view of the Plexar Framework task queue. The framework is not public yet."),
+    ("/api/agent", "Agent workers",
+     "For agents inside a pane: spawn, prompt, wait on, read, send keys to and close the "
+     "pane's OWN worker panes. Requires X-Plexar-Session-Token (the pane's PLEXAR_STUDIO_TOKEN); "
+     "another session's workers answer 404. Depth 1, at most 8 workers per pane."),
+    ("/api/subagents", "Claude agents (read-only)",
+     "Claude Code's in-process Agent-tool subagents per session, read from its transcripts. "
+     "Observe only. One agent's latest text: GET /api/terminals/{id}/subagents/{agent_id}."),
     ("/api/local", "Local providers", "LM Studio, vLLM and Plexar model endpoints."),
     ("/api/usage", "Usage and cost", "Token, tool-call and cost reports."),
     ("/api/pricing", "Usage and cost", ""),
