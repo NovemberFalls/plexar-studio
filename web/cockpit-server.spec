@@ -87,6 +87,9 @@ a = Analysis(
         # endpoint reports app: null in the DESKTOP build while being correct in
         # dev, which is the worst way for a version to be wrong.
         (os.path.join(os.path.dirname(frontend_dist), 'package.json'), '.'),
+        # Agent workers CLI: panes get PLEXAR_STUDIO_CLI pointing at this file in
+        # _MEIPASS, which exists exactly as long as the sidecar (and so its panes) runs.
+        (os.path.join(root, 'studio_cli.py'), '.'),
     ],
     hiddenimports=[
         'uvicorn',
