@@ -324,7 +324,11 @@ def resolve_plexar_harness_cli(search_path: str) -> tuple[str, str]:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
 # Patterns for state detection
 _IDLE_PATTERNS = ["❯", "$ "]
-_WAITING_PATTERNS = ["Allow", "Yes/No", "y/n", "Do you want", "(y)es", "(n)o"]
+# The last three are Claude Code's selection dialogs (folder trust, and any picker
+# that ends in a confirm/cancel footer). Measured 2026-09-30: a fresh folder's trust
+# dialog read as IDLE, so an agent worker was prompted -- and Esc on it EXITS the CLI.
+_WAITING_PATTERNS = ["Allow", "Yes/No", "y/n", "Do you want", "(y)es", "(n)o",
+                     "trust this folder", "Enter to confirm", "Esc to cancel"]
 # Patterns for token/cost parsing
 _TOKEN_RE = re.compile(r"(\d[\d,]*)\s*tokens?")
 _COST_RE = re.compile(r"\$(\d+\.?\d*)")
@@ -587,6 +591,12 @@ class TerminalSession:
     # to /api/agent/* to act as a parent; it is put in the child env and never serialized.
     parent_id: Optional[str] = None
     spawn_token: str = ""
+    # True when spawned with --resume/--continue. Gates JSONL Strategy 3, which exists
+    # for a resumed conversation whose file predates spawn (see _get_jsonl_path).
+    resumed_at_spawn: bool = False
+    # True when Studio passed --session-id: claude_session_id is then KNOWN, not inferred,
+    # and a missing file means "nothing written yet", never "go and find one".
+    session_id_assigned: bool = False
     cli_title: Optional[str] = None  # last CLI-side title observed, from either channel
     _cli_title_checked: float = 0.0  # monotonic throttle stamp for _refresh_cli_title
 
@@ -1302,7 +1312,16 @@ class PtyManager:
         # Build a clean environment for child processes:
         # 1. Remove Claude Code markers (avoids "inside another session" error)
         # 2. Remove PyInstaller artifacts (avoids DLL conflicts)
-        blocked_keys = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+        blocked_keys = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                        # The PARENT Claude Code session's identity, present whenever Studio
+                        # (or a dev server) was launched from a Claude Code terminal. Measured
+                        # 2026-09-30: an inherited CLAUDE_CODE_CHILD_SESSION makes every pane's
+                        # CLI print "Transcript saving is off" and write NO JSONL -- no usage,
+                        # no cost, no latest-assistant. The messaging token is that session's
+                        # secret and must not reach a child at all.
+                        "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID",
+                        "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+                        "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_EXECPATH", "CLAUDE_EFFORT"}
 
         # 3. STRIP INHERITED COLOUR SUPPRESSION. `NO_COLOR` is a real standard
         #    and a legitimate preference for a CONSOLE program. This is not one:
@@ -1675,6 +1694,7 @@ class PtyManager:
                             terminal_id)
             else:
                 cmd += f' --name "{name}"'
+        assigned_session_id: Optional[str] = None
         if harness == "codex" and (resume_session_id or continue_last):
             target = resume_session_id if resume_session_id else "--last"
             cmd = cmd.replace("codex ", f"codex resume {target} ", 1)
@@ -1682,6 +1702,14 @@ class PtyManager:
             cmd += f" --resume {resume_session_id}"
         elif continue_last:
             cmd += " --continue"
+        elif harness == "claude-code":
+            # A fresh Claude Code pane is TOLD its conversation id, so its transcript is
+            # known exactly from the first byte (JSONL Strategy 1) instead of being
+            # inferred from "a file that appeared after spawn". Measured 2026-09-30: with
+            # two panes in one repo, the older never-prompted pane claimed the newer
+            # pane's file through that inference, and both counted the same tokens.
+            assigned_session_id = str(uuid.uuid4())
+            cmd += f" --session-id {assigned_session_id}"
 
         # Permission mode logic:
         # bypass_permissions (legacy boolean) or permission_mode == "bypassPermissions"
@@ -1878,7 +1906,7 @@ class PtyManager:
             harness=harness,
             working_dir=workdir,
             # Each harness keeps its own native transcript identity.
-            claude_session_id=(resume_session_id or None) if harness == "claude-code" else None,
+            claude_session_id=(resume_session_id or assigned_session_id or None) if harness == "claude-code" else None,
             codex_session_id=(resume_session_id or None) if harness == "codex" else None,
             bypass_permissions=effective_bypass,
             permission_mode=permission_mode,
@@ -1888,6 +1916,8 @@ class PtyManager:
             rows=rows,
             parent_id=parent_id,
             spawn_token=spawn_token,
+            resumed_at_spawn=bool(resume_session_id or continue_last),
+            session_id_assigned=bool(assigned_session_id),
         )
         # Store pre-spawn file snapshot for JSONL discovery
         session._pre_spawn_files = pre_spawn_files
@@ -2018,6 +2048,12 @@ class PtyManager:
                 if fresher:
                     return fresher
                 return path  # stale but nothing better — keep it
+            elif getattr(session, "session_id_assigned", False) and \
+                    getattr(session, "last_user_input_time", 0.0) <= 0:
+                # Nothing written yet under the id we assigned. Only a user who has
+                # typed (an in-terminal /resume before chatting) is a reason to look
+                # for some other file; output alone never is.
+                return None
 
         if not os.path.isdir(jsonl_dir):
             return None
@@ -2026,7 +2062,9 @@ class PtyManager:
         pre = getattr(session, '_pre_spawn_files', None)
         if pre is not None:
             current_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
-            new_files = current_files - pre
+            owned = {f"{s.claude_session_id}.jsonl" for s in self.sessions.values()
+                     if s.id != session.id and s.claude_session_id}
+            new_files = current_files - pre - owned
             if new_files:
                 newest = max(new_files, key=lambda f: os.path.getmtime(os.path.join(jsonl_dir, f)))
                 discovered_id = newest.replace(".jsonl", "")
@@ -2041,7 +2079,14 @@ class PtyManager:
         # the most recently *written* unclaimed JSONL instead — but only when
         # this session has actually produced output (an idle pane must never
         # grab another session's file: bug #15 mis-attribution family).
-        if session.last_output_time > 0:
+        # ...and only when there is a reason to believe the conversation PREDATES this
+        # pane: spawned with --resume/--continue, or the user has typed into it (an
+        # in-terminal /resume). Output alone is not enough -- every fresh pane prints a
+        # banner, and measured 2026-09-30 a fresh, never-prompted pane claimed the
+        # transcript of a Claude Code session running OUTSIDE Studio in the same repo.
+        resumed = getattr(session, "resumed_at_spawn", False) or \
+            getattr(session, "last_user_input_time", 0.0) > 0
+        if session.last_output_time > 0 and resumed:
             found = self._rediscover_jsonl(session, jsonl_dir)
             if found:
                 logger.info(
@@ -2120,6 +2165,7 @@ class PtyManager:
             session.alive = False
         else:
             session.tracker.tick()
+        jsonl_path = self._get_jsonl_path(session)
         return {
             "id": session.id,
             "name": session.name,
@@ -2131,9 +2177,12 @@ class PtyManager:
             "created_at": session.created_at,
             "working_dir": session.working_dir,
             "parent_id": session.parent_id,
-            "claude_session_id": session.claude_session_id,
             "codex_session_id": session.codex_session_id,
-            "jsonl_path": self._get_jsonl_path(session),
+            "jsonl_path": jsonl_path,
+            # Reported only once its transcript exists: a pane is now launched with an
+            # assigned --session-id, and "undo close" resumes by this id -- resuming an id
+            # with no conversation behind it fails in the CLI.
+            "claude_session_id": session.claude_session_id if jsonl_path else None,
             "bypass_permissions": session.bypass_permissions,
             "cols": session.cols,
             "rows": session.rows,

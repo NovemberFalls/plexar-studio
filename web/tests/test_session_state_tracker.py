@@ -74,3 +74,18 @@ def test_busy_stays_during_active_output():
     # Recent output — should stay busy
     state = tracker.tick()
     assert state == "busy"
+
+
+def test_folder_trust_dialog_is_waiting_not_idle():
+    """Measured 2026-09-30: Claude Code's trust dialog in a fresh folder (every new
+    worktree worker) read as idle, so the agent API prompted it -- and Esc on it exits
+    the CLI. The screen text below is the captured dialog, ANSI already stripped."""
+    tracker = SessionStateTracker()
+    tracker.feed(
+        " Quick safety check: Is this a project you created or one you trust?\n"
+        " Claude Code'll be able to read, edit, and execute files here.\n"
+        " ❯ 1. Yes, I trust this folder\n   2. No, exit\n"
+        " Enter to confirm · Esc to cancel\n"
+    )
+    tracker.last_output_time = time.time() - 5
+    assert tracker.tick() == "waiting"
