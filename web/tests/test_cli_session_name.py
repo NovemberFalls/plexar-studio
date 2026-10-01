@@ -11,6 +11,18 @@ from pty_manager import PtyManager
 from tests.test_codex_harness import _call_create
 
 
+def _without_session_id(args):
+    """A fresh pane also carries `--session-id <uuid>` (exact transcript identity,
+    2.1.49). It is a uuid4 Studio generated, never user text, so it is checked once
+    for shape and then removed before the name assertions."""
+    if "--session-id" not in args:
+        return args
+    i = args.index("--session-id")
+    import uuid
+    uuid.UUID(args[i + 1])
+    return args[:i] + args[i + 2:]
+
+
 @pytest.mark.parametrize("name", [
     "My research session", "Léna's review & follow-up", "--dangerously-skip-permissions",
     'x" --dangerously-skip-permissions "', "x\\\" & echo injected",
@@ -25,6 +37,7 @@ def test_name_is_single_safe_argument(name):
             args = shlex.split(cmd, posix=posix)
             if not posix:
                 args = [arg.strip('"') for arg in args]
+            args = _without_session_id(args)
             if name.startswith("-") or any(ord(char) < 32 or ord(char) == 127 or char in '\"\\%!$`&|<>^()' for char in name):
                 assert args == ["claude", "--model", "sonnet"]
             else:
@@ -54,7 +67,7 @@ async def test_cmd_install_cannot_execute_session_label(tmp_path, name):
             if (tmp_path / "argv.json").exists() and not child.isalive():
                 break
             await asyncio.sleep(0.05)
-        args = json.loads((tmp_path / "argv.json").read_text())
+        args = _without_session_id(json.loads((tmp_path / "argv.json").read_text()))
         assert args == (["--model", "sonnet", "--name", name] if name == "Safe project" else ["--model", "sonnet"])
         assert not (tmp_path / "PWN").exists()
         if name != "Safe project":

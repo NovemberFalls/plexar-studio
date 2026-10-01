@@ -319,3 +319,36 @@ class TestLocalProviderValidation:
             backend.spawn.assert_not_called()
         finally:
             del _server._PROVIDERS["remote-test-provider"]
+
+
+# ---------------------------------------------------------------------------
+# Pane env when Studio is launched from inside a Claude Code session, and the
+# model-less shell harness (agent workers, 2.1.49)
+# ---------------------------------------------------------------------------
+
+
+class TestPaneEnvAndShellHarness:
+    def setup_method(self):
+        self.mgr = PtyManager()
+
+    def test_parent_claude_session_markers_never_reach_a_pane(self, monkeypatch):
+        """Measured 2026-09-30: an inherited CLAUDE_CODE_CHILD_SESSION turned transcript
+        saving OFF in every pane (no JSONL -> no usage, cost or latest-assistant)."""
+        for k in ("CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID",
+                  "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_EFFORT"):
+            monkeypatch.setenv(k, "inherited")
+        backend, _ = _make_mock_backend()
+        _, _, env = _call_create(self.mgr, backend, name="t", workdir=r"C:\Code", model="sonnet")
+        leaked = [k for k in env if k.startswith("CLAUDE_CODE_CHILD") or k in (
+            "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_EFFORT")]
+        assert leaked == []
+        assert env["PLEXAR_STUDIO_TOKEN"] and env["PLEXAR_STUDIO_CLI"].endswith("studio_cli.py")
+
+    def test_shell_harness_runs_a_shell_with_no_model_or_permission_flags(self):
+        backend, _ = _make_mock_backend()
+        _, cmd, _ = _call_create(self.mgr, backend, name="t", workdir=r"C:\Code", model="",
+                                 harness="shell", bypass_permissions=True, effort="high")
+        assert cmd.split()[0] in ("pwsh", "powershell.exe", "/bin/bash") or cmd.startswith("/")
+        for flag in ("--model", "--dangerously", "--effort", "--permission-mode", "-m ", "codex", "claude"):
+            assert flag not in cmd

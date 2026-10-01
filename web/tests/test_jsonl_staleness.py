@@ -91,6 +91,7 @@ def _resume_session(sid, working_dir, pre_spawn_files):
     s = _fake_session(sid, None)
     s.working_dir = working_dir
     s._pre_spawn_files = pre_spawn_files
+    s.resumed_at_spawn = True
     return s
 
 
@@ -137,3 +138,57 @@ def test_resume_fallback_skips_files_claimed_by_other_sessions(tmp_path, monkeyp
     mgr = _manager_with_sessions({"t1": s, "t2": other})
     assert mgr._get_jsonl_path(s) is None
     assert s.claude_session_id is None
+
+
+def test_fresh_pane_with_banner_output_never_claims_a_foreign_file(tmp_path, monkeypatch):
+    """Measured 2026-09-30: a fresh, never-prompted pane printed its banner (output > 0)
+    and claimed the transcript of a Claude Code session running outside Studio in the same
+    repo. Without --resume/--continue or user input there is no conversation to find."""
+    wd = "C:/proj/fresh"
+    d = _project_dir(tmp_path, monkeypatch, wd)
+    _touch(d / "external-session.jsonl", age_seconds=2)
+    s = _resume_session("t1", wd, pre_spawn_files={"external-session.jsonl"})
+    s.resumed_at_spawn = False
+    s.last_user_input_time = 0.0
+    mgr = _manager_with_sessions({"t1": s})
+    assert mgr._get_jsonl_path(s) is None
+    assert s.claude_session_id is None
+
+
+def test_in_terminal_resume_after_typing_still_claims(tmp_path, monkeypatch):
+    wd = "C:/proj/typed"
+    d = _project_dir(tmp_path, monkeypatch, wd)
+    _touch(d / "resumed.jsonl", age_seconds=2)
+    s = _resume_session("t1", wd, pre_spawn_files={"resumed.jsonl"})
+    s.resumed_at_spawn = False
+    s.last_user_input_time = time.monotonic()
+    mgr = _manager_with_sessions({"t1": s})
+    assert mgr._get_jsonl_path(s) == str(d / "resumed.jsonl")
+
+
+def test_assigned_session_id_with_no_file_yet_never_infers(tmp_path, monkeypatch):
+    """A pane Studio launched with --session-id knows its transcript. Before it writes
+    one, a NEW file in the folder (another pane's) must not be taken -- measured
+    2026-09-30, the older never-prompted pane claimed the newer pane's file."""
+    wd = "C:/proj/assigned"
+    d = _project_dir(tmp_path, monkeypatch, wd)
+    _touch(d / "other-pane.jsonl", age_seconds=1)
+    s = _resume_session("t1", wd, pre_spawn_files=set())
+    s.claude_session_id = "my-assigned-id"
+    s.session_id_assigned = True
+    s.resumed_at_spawn = False
+    s.last_user_input_time = 0.0
+    mgr = _manager_with_sessions({"t1": s})
+    assert mgr._get_jsonl_path(s) is None
+    assert s.claude_session_id == "my-assigned-id"
+
+
+def test_new_file_owned_by_another_live_session_is_not_taken(tmp_path, monkeypatch):
+    wd = "C:/proj/owned"
+    d = _project_dir(tmp_path, monkeypatch, wd)
+    _touch(d / "theirs.jsonl", age_seconds=1)
+    s = _resume_session("t1", wd, pre_spawn_files=set())
+    s.resumed_at_spawn = False
+    other = _fake_session("t2", "theirs")
+    mgr = _manager_with_sessions({"t1": s, "t2": other})
+    assert mgr._get_jsonl_path(s) is None

@@ -406,6 +406,7 @@ class TestCodexNeverClaimsAClaudeTranscript:
             "t-x", harness="claude-code", workdir=self.WORKDIR,
             pre_spawn_files=None, last_output_time=time.monotonic(),
         )
+        s.resumed_at_spawn = True  # Strategy 3 is the resume fallback (2.1.49 gate)
         mgr.sessions = {"t-x": s}
         assert mgr._get_jsonl_path(s) == live
 
