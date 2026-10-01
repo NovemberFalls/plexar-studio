@@ -215,6 +215,9 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
         >
           {session.name}
         </span>
+        {session.harness === "shell" && (
+          <span className="text-[9px] flex-shrink-0" style={{ color: "var(--cc-muted)" }} title="Shell worker">sh</span>
+        )}
         {session.bypassPermissions && (
           <ShieldOff
             size={10}
