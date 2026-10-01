@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.48] - 2026-09-30
+
+### Added
+- **Agent workers.** An agent running in a Studio session can start, prompt, watch and close its own worker sessions through `/api/agent/*`. Workers show up in the sidebar nested under the session that started them ("Session 3.1", "3.2", ...), with a count and a flag when one is waiting on you; click one to open it in a pane. Each pane gets its own key, so a session can only control its own workers. Workers cannot start workers, a session can have at most 8, and a worker never gets more permissions than its parent. Agent guide: `skills/plexar-studio-workers/SKILL.md`.
+
+### Changed
+- **Tasks opens faster.** Studio checks Plexar Framework at startup instead of on every visit, and leaving Tasks hides its window instead of closing it, so coming back no longer reloads the page.
+
 ## [2.1.47] - 2026-09-26
 
 ### Added
