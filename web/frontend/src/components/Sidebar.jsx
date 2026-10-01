@@ -247,13 +247,64 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
  *  level under it. Module-scope like SessionItem (see CLAUDE.md conventions). The
  *  collapsed row still says how many workers exist and whether one needs attention,
  *  so folding the list never hides a blocked worker. */
-function SessionWithWorkers({ session, workers, activeIds, onSelect, onDelete }) {
+/** One of Claude Code's IN-PROCESS subagents (Agent tool), read-only. It has no
+ *  terminal, so it is never a pane: the row shows what it is doing and a click shows its
+ *  latest text (its report once done). Data: GET /api/subagents (subagent_watch.py). */
+function AgentRow({ agent, terminalId }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(null);
+  const color = agent.status === "running" ? "var(--cc-accent)"
+    : agent.status === "done" ? "var(--cc-success, #3fb950)" : "var(--cc-muted)";
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next) {
+      try {
+        const r = await fetch(`/api/terminals/${terminalId}/subagents/${agent.id}`);
+        const d = r.ok ? await r.json() : null;
+        setText(d?.text || "(no text yet)");
+      } catch {
+        setText("(could not read this agent)");
+      }
+    }
+  };
+  return (
+    <div data-testid="agent-row">
+      <button
+        onClick={toggle}
+        className="flex items-center gap-1.5 w-full text-left hover-bg-surface"
+        style={{ height: "22px", paddingLeft: "6px", borderRadius: "6px" }}
+        title={`${agent.description}\n${agent.agent_type}${agent.model ? ` · ${agent.model}` : ""} · ${agent.status} (Claude Code agent, read-only)`}
+        aria-expanded={open}
+      >
+        <span
+          style={{ width: "6px", height: "6px", borderRadius: "999px", backgroundColor: color, flexShrink: 0,
+                   animation: agent.status === "running" ? "cc-pulse 1.5s infinite" : "none" }}
+        />
+        <span className="text-[11px] truncate flex-1" style={{ color: "var(--cc-dim)" }}>{agent.description || agent.agent_type}</span>
+        {agent.model && <span className="text-[9px] flex-shrink-0 mr-1" style={{ color: "var(--cc-muted)" }}>{agent.model}</span>}
+      </button>
+      {open && (
+        <div
+          className="text-[10px]"
+          style={{ margin: "2px 4px 4px 14px", padding: "4px 6px", whiteSpace: "pre-wrap", maxHeight: "160px",
+                   overflowY: "auto", color: "var(--cc-dim)", border: "1px solid var(--cc-border)", borderRadius: "6px" }}
+        >
+          {text ?? "Loading…"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionWithWorkers({ session, workers = [], agents = [], activeIds, onSelect, onDelete }) {
   const [open, setOpen] = useState(true);
-  if (!workers || workers.length === 0) {
+  if (workers.length === 0 && agents.length === 0) {
     return <SessionItem session={session} isActive={activeIds.includes(session.id)} onSelect={onSelect} onDelete={onDelete} />;
   }
   const waiting = workers.filter((w) => (w.activityState || w.status) === "waiting").length;
   const busy = workers.filter((w) => (w.activityState || w.status) === "busy").length;
+  const agentsRunning = agents.filter((a) => a.status === "running").length;
   return (
     <div data-testid="session-with-workers">
       <div className="flex items-center">
@@ -272,9 +323,11 @@ function SessionWithWorkers({ session, workers, activeIds, onSelect, onDelete })
         <span
           className="text-[9px] flex-shrink-0 mr-1"
           style={{ color: waiting ? "var(--cc-waiting)" : "var(--cc-muted)" }}
-          title={`${workers.length} worker${workers.length === 1 ? "" : "s"}: ${busy} working, ${waiting} waiting on you`}
+          title={`${workers.length} worker${workers.length === 1 ? "" : "s"}: ${busy} working, ${waiting} waiting on you`
+            + (agents.length ? ` · ${agents.length} Claude agent${agents.length === 1 ? "" : "s"}, ${agentsRunning} running` : "")}
         >
-          {waiting ? `${waiting}!` : ""}{workers.length}w
+          {waiting ? `${waiting}!` : ""}{workers.length ? `${workers.length}w` : ""}
+          {agents.length ? `${workers.length ? " " : ""}${agentsRunning}/${agents.length}a` : ""}
         </span>
       </div>
       {open && (
@@ -286,13 +339,16 @@ function SessionWithWorkers({ session, workers, activeIds, onSelect, onDelete })
           {workers.map((w) => (
             <SessionItem key={w.id} session={w} isActive={activeIds.includes(w.id)} onSelect={onSelect} onDelete={onDelete} />
           ))}
+          {agents.map((a) => (
+            <AgentRow key={a.id} agent={a} terminalId={session.terminalId} />
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function LocationNode({ node, depth = 0, sessionsByDir, workersOf = {}, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu, onFocusFolder, visibleFolder }) {
+function LocationNode({ node, depth = 0, sessionsByDir, workersOf = {}, agentsOf = {}, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu, onFocusFolder, visibleFolder }) {
   const sessionsHere = sessionsByDir[norm(node.path)] || [];
   const hasChildren = node.children.length > 0 || sessionsHere.length > 0;
   const [expanded, setExpanded] = useState(true);
@@ -392,12 +448,12 @@ function LocationNode({ node, depth = 0, sessionsByDir, workersOf = {}, activeId
           {sessionsHere.length > 0 && (
             <div style={{ paddingLeft: `${depth * 12 + 20}px`, display: "flex", flexDirection: "column", gap: "1px" }}>
               {sessionsHere.map((s) => (
-                <SessionWithWorkers key={s.id} session={s} workers={workersOf[s.terminalId]} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} />
+                <SessionWithWorkers key={s.id} session={s} workers={workersOf[s.terminalId]} agents={agentsOf[s.terminalId]} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} />
               ))}
             </div>
           )}
           {node.children.map((child) => (
-            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} workersOf={workersOf} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
+            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} workersOf={workersOf} agentsOf={agentsOf} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
           ))}
         </>
       )}
@@ -427,6 +483,8 @@ export default function Sidebar({
   onRemoveLocation,
   onToggleLocationBypass,
   gitStatuses = {},
+  // { [terminalId]: [subagent rows] } -- Claude Code's in-process agents (read-only)
+  subagentsByTerminal = {},
   workspacePresets = [],
   onSaveWorkspace,
   onLoadWorkspace,
@@ -441,6 +499,7 @@ export default function Sidebar({
   const [workspaceName, setWorkspaceName] = useState("");
 
   const locationTree = useMemo(() => buildLocationTree(savedLocations), [savedLocations]);
+  const agentsOf = subagentsByTerminal;
 
   // Filter sessions by search term
   const filteredSessions = useMemo(() => {
@@ -661,7 +720,7 @@ export default function Sidebar({
             </div>
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {locationTree.map((node) => (
-                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} workersOf={workersOf} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
+                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} workersOf={workersOf} agentsOf={agentsOf} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
               ))}
             </div>
           </>

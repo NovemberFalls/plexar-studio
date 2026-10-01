@@ -414,6 +414,7 @@ export default function App() {
   // .has(session.id) — always false, since session.id is a local number. Every
   // read must use session.terminalId.
   const [poppedOutIds, setPoppedOutIds] = useState(new Set());
+  const [subagentsByTerminal, setSubagentsByTerminal] = useState({}); // Claude Agent-tool subagents, read-only
   const [workflowsByTerminal, setWorkflowsByTerminal] = useState({}); // { [terminalId]: { count, inProgressCount, items } }
   const [usageByTerminal, setUsageByTerminal] = useState({}); // { [terminalId]: { ...session_summary, effort, tokensPerSec } }
   const [dailyUsage, setDailyUsage] = useState(null); // usage_tracker.daily_summary() shape
@@ -1299,6 +1300,24 @@ export default function App() {
     const id = setInterval(poll, 3000);
     poll();
     return () => clearInterval(id);
+  }, [backendReady]);
+
+  // Claude Code's in-process subagents (Agent tool), one request for all sessions.
+  // Read-only; best-effort like the workflows poll -- a failure keeps the last answer.
+  useEffect(() => {
+    if (!backendReady) return undefined;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/subagents");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setSubagentsByTerminal(data.subagents || {});
+      } catch { /* best-effort */ }
+    };
+    load();
+    const id = setInterval(load, 4000);
+    return () => { cancelled = true; clearInterval(id); };
   }, [backendReady]);
 
   // Poll git status (local mode only)
@@ -2959,6 +2978,7 @@ export default function App() {
               >
                 <Sidebar
                   sessions={sessions}
+                  subagentsByTerminal={subagentsByTerminal}
                   activeIds={(scrollMode ? activeIds : activeIds.slice(0, layout)).filter((id) => id != null)}
                   onSelect={selectSession}
                   onFocusFolder={scrollToFolder}

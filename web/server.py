@@ -1835,6 +1835,37 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
 # ── Bridge / Peer Coordination ────────────────────────────
 
 
+def _subagents_snapshot() -> dict:
+    """{terminal_id: [rows]} for every live Claude Code session. Runs in a thread: it
+    lists dirs and reads transcript tails (see subagent_watch)."""
+    out = {}
+    for tid, session in list(pty_manager.sessions.items()):
+        if not session.alive or session.harness != "claude-code":
+            continue
+        rows = subagent_watch.list_subagents(pty_manager._get_jsonl_path(session))
+        if rows:
+            out[tid] = rows
+    return out
+
+
+@app.get("/api/subagents")
+async def list_subagents_route():
+    """Claude Code's in-process Agent-tool subagents per session, READ-ONLY (the sidebar
+    nests them under their session). Always 200; an unreadable dir is simply absent."""
+    return JSONResponse({"subagents": await asyncio.to_thread(_subagents_snapshot)})
+
+
+@app.get("/api/terminals/{terminal_id}/subagents/{agent_id}")
+async def subagent_report(terminal_id: str, agent_id: str):
+    """One subagent's latest text (its report once done). Read-only."""
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+    path = await asyncio.to_thread(pty_manager._get_jsonl_path, session)
+    text = await asyncio.to_thread(subagent_watch.latest_text, path, agent_id)
+    return JSONResponse({"id": agent_id, "text": text})
+
+
 @app.get("/api/terminals/{terminal_id}/latest-assistant")
 async def get_latest_assistant(terminal_id: str):
     """Return the text content of the most recent assistant turn from this session's JSONL."""
@@ -7425,6 +7456,7 @@ async def get_local_metrics(window: str = "lifetime"):
 
 # ── Studio Remote (protocol v1) ──────────────────────────
 
+import subagent_watch  # noqa: E402 -- read-only view of Claude Agent-tool subagents
 import agent_api  # noqa: E402 -- agent sub-sessions; token-scoped, see its docstring
 agent_api.configure(pty_manager=pty_manager, create_from_body=_create_terminal_from_body,
                     paste_and_submit=_paste_and_submit, wait_for_idle=_wait_for_idle_simple)
