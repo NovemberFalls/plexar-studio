@@ -28,6 +28,67 @@ import { ListChecks, ExternalLink } from "lucide-react";
 
 export const TASKS_WEBVIEW_LABEL = "plexar-tasks-embedded";
 
+/* ── Load-time (2.1.48) ─────────────────────────────────────────────────────
+ * Opening TASKS used to cost: one probe round trip, THEN a brand-new WebView2
+ * (a fresh renderer process), THEN the framework page's own cold load including
+ * a render-blocking Google Fonts stylesheet -- on EVERY visit, because leaving
+ * the view closed the webview. Measured 2026-09-30: Studio's probe answers in
+ * ~10-45 ms and every framework API in <7 ms, so the wait was all webview.
+ *
+ *   1. The probe is cached module-wide and PREFETCHED at app start
+ *      (prefetchFrameworkProbe, called from App), so the first visit does not
+ *      wait for it and later visits never do. A stale answer (>30 s) is
+ *      refreshed in the background, never blocking the render.
+ *   2. The webview is KEPT ALIVE across view switches: leaving TASKS hides it,
+ *      coming back re-shows the same renderer with its page already loaded.
+ *      This deliberately replaces B6's "close, never hide" -- the cost is one
+ *      idle renderer while Studio runs; it is still closed when the URL changes
+ *      (bucket switch) and when the window unloads, so it is never orphaned.
+ */
+const PROBE_FRESH_MS = 30_000;
+let probeCache = { value: null, at: 0, inflight: null };
+let live = { view: null, url: null };
+
+async function runProbe() {
+  try {
+    const res = await fetch("/api/framework/summary");
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.up !== true) {
+      return { up: false, base: data?.base || null, reason: data?.reason || "unreachable" };
+    }
+    return { up: true, base: data.base, buckets: data.buckets || {} };
+  } catch {
+    return { up: false, base: null, reason: "unreachable" };
+  }
+}
+
+/** Start (or join) a probe; resolves to the fresh answer and updates the cache. */
+export function prefetchFrameworkProbe() {
+  if (!probeCache.inflight) {
+    probeCache.inflight = runProbe().then((value) => {
+      probeCache = { value, at: Date.now(), inflight: null };
+      return value;
+    });
+  }
+  return probeCache.inflight;
+}
+
+/** Test seam: forget the cached probe and any live webview handle. */
+export function _resetTasksCache() {
+  probeCache = { value: null, at: 0, inflight: null };
+  live = { view: null, url: null };
+}
+
+function closeLive() {
+  const v = live.view;
+  live = { view: null, url: null };
+  if (v) { try { v.close(); } catch { /* window already tearing down */ } }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", closeLive);
+}
+
 /** `.fixed.inset-0` is this codebase's overlay idiom — see ChatView.jsx. */
 function anyOverlayOpen() {
   return document.querySelector(".fixed.inset-0") !== null;
@@ -70,27 +131,17 @@ export default function TasksView({ activeLocationFolder = null, forcedBucket = 
   );
   const [failed, setFailed] = useState(null);
   // null while in flight, then {up:true, base, buckets} or {up:false, base, reason}.
-  const [probe, setProbe] = useState(null);
+  const [probe, setProbe] = useState(() => probeCache.value);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
 
   // B7: probe THROUGH Studio's own backend before ever creating a webview.
+  // A cached answer renders immediately; a stale or missing one is refreshed.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/framework/summary");
-        const data = await res.json().catch(() => null);
-        if (cancelled) return;
-        if (!res.ok || !data || data.up !== true) {
-          setProbe({ up: false, base: data?.base || null, reason: data?.reason || "unreachable" });
-          return;
-        }
-        setProbe({ up: true, base: data.base, buckets: data.buckets || {} });
-      } catch {
-        if (!cancelled) setProbe({ up: false, base: null, reason: "unreachable" });
-      }
-    })();
+    if (!probeCache.value || Date.now() - probeCache.at > PROBE_FRESH_MS) {
+      prefetchFrameworkProbe().then((value) => { if (!cancelled) setProbe(value); });
+    }
     return () => { cancelled = true; };
   }, []);
 
@@ -131,6 +182,19 @@ export default function TasksView({ activeLocationFolder = null, forcedBucket = 
     let cancelled = false;
     let view = null;
 
+    // Same page already loaded in a hidden renderer: re-show it, no reload.
+    if (live.view && live.url === url) {
+      viewRef.current = live.view;
+      sync();
+      return () => {
+        cancelled = true;
+        const v = viewRef.current;
+        viewRef.current = null;
+        if (v) { try { v.hide(); } catch { /* window tearing down */ } }
+      };
+    }
+    closeLive();
+
     (async () => {
       try {
         const [{ Webview }, { getCurrentWindow }] = await Promise.all([
@@ -154,6 +218,7 @@ export default function TasksView({ activeLocationFolder = null, forcedBucket = 
         });
         if (cancelled) { try { view.close(); } catch { /* already gone */ } return; }
         viewRef.current = view;
+        live = { view, url };
         sync();
       } catch (err) {
         if (!cancelled) { setFailed(err.message); onErrorRef.current?.(err.message); }
@@ -164,8 +229,10 @@ export default function TasksView({ activeLocationFolder = null, forcedBucket = 
       cancelled = true;
       const v = viewRef.current || view;
       viewRef.current = null;
-      // CLOSE, never merely hide: B6 — no orphan renderer left behind.
-      if (v) { try { v.close(); } catch { /* window already tearing down */ } }
+      // HIDE, keeping the loaded page for the next visit (see the load-time note
+      // at the top). A view whose creation never finished is not kept.
+      if (v && live.view === v) { try { v.hide(); } catch { /* window tearing down */ } }
+      else if (v) { try { v.close(); } catch { /* window already tearing down */ } }
     };
   }, [isTauri, url, sync]);
 

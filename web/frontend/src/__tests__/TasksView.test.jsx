@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import TasksView, { resolveBucket, normalizeBucketPath } from "../components/TasksView";
+import TasksView, { resolveBucket, normalizeBucketPath, prefetchFrameworkProbe, _resetTasksCache } from "../components/TasksView";
 
 describe("normalizeBucketPath", () => {
   it("lowercases, flips separators, and strips a trailing slash", () => {
@@ -73,6 +73,7 @@ describe("TasksView", () => {
   beforeEach(() => {
     fetchMock = vi.fn();
     globalThis.fetch = fetchMock;
+    _resetTasksCache();
   });
 
   afterEach(() => {
@@ -156,5 +157,28 @@ describe("TasksView", () => {
     render(<TasksView onError={onError} />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(onError).not.toHaveBeenCalled();
+  });
+});
+
+describe("TasksView load time (2.1.48)", () => {
+  beforeEach(() => _resetTasksCache());
+
+  it("reuses a prefetched probe: a fresh answer renders with NO second fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ up: false, base: "http://127.0.0.1:8430", reason: "unreachable" }),
+    });
+    globalThis.fetch = fetchMock;
+    await prefetchFrameworkProbe();
+    render(<TasksView />);
+    // Synchronous: the cached "down" answer is on screen on the first render.
+    expect(screen.getByText(/Open in browser/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("concurrent prefetches share one request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ up: false }) });
+    globalThis.fetch = fetchMock;
+    await Promise.all([prefetchFrameworkProbe(), prefetchFrameworkProbe()]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
