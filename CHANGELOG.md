@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.50] - 2026-10-01
+
+### Added
+- **Hide a pane without ending it.** A new `–` button beside the X takes the pane off the grid and leaves the session running in the sidebar; click it there to bring it back. The X is now labelled "End session".
+
+### Fixed
+- Usage and cost now land on the right pane: new Claude panes start with their own session id, so a fresh pane can no longer pick up a sibling's or an outside session's transcript.
+- Panes started from Studio when it was itself launched from a Claude Code terminal no longer have transcript saving turned off.
+- Claude Code's "trust this folder?" prompt shows as waiting (it used to look idle).
+- A Claude session pausing mid-turn no longer reads as idle.
+
 ## [2.1.49] - 2026-09-30
 
 ### Added
