@@ -19,6 +19,8 @@ Plexar Studio keeps multiple CLI sessions organized while preserving the tools a
 - **Grid and scrolling layouts.** Choose 1–8 grid panes, or scroll through sessions grouped by folder. The concurrent-session limit defaults to 8 and can be configured separately; settings support up to 64, subject to your machine's resources.
 - **Live per-pane state** — idle / busy / waiting-on-you, parsed off the terminal stream. The point is knowing at a glance which pane needs you.
 - **Sessions grouped by project folder**, with live git branch and dirty status.
+- **Agents that spawn visible workers.** An agent in a pane can start its own worker panes (Claude Code, Codex, Plexar Harness or a plain shell, optionally each on its own git worktree), prompt them, wait on them and read their answers. Workers appear nested under the session that started them, and you can open, watch or type into any of them.
+- **See Claude's own agents.** When a session dispatches agents with Claude Code's Agent tool, the sidebar lists them under that session with their task, model and a running/done dot.
 - **Session-to-session relay** — hand one session's reply to another, run an autonomous loop between two, or open a channel with one lead and N workers.
 - **Codex conversation history through normal scrolling**, backed by saved native messages rather than terminal redraws.
 - **Usage and context at a glance**, including Codex's context ring, observed effort, token totals, focused-session quota and API-equivalent estimates. Unknown data stays labelled as unknown.
@@ -97,7 +99,24 @@ Click **+** (or `Ctrl+Shift+N`), choose Claude Code or Codex, pick a working dir
 
 The model picker follows the selected CLI. Existing sessions retain their CLI and native conversation identity when restored, including native Codex resumes. The active-session view distinguishes unavailable or last-known conversation data instead of assigning another session's messages or usage to it.
 
-Closing a pane kills the terminal but shows a 12-second **Undo** that resumes the same conversation.
+Each pane header has two ways out:
+
+- **`–` Hide** takes the pane off the grid and leaves the session running. It stays in the sidebar; click it there to bring it back with its output intact.
+- **`×` End session** kills the terminal, then shows a 12-second **Undo** that resumes the same conversation.
+
+Sessions never time out on their own. A session whose program has exited is cleared after about 30 seconds.
+
+### Agent workers and Claude's agents
+
+Two kinds of agent show up nested under a session in the sidebar:
+
+**Workers** are real panes an agent started for itself, through Studio. Ask an agent in a pane to "use Studio workers" (the [`plexar-studio-workers`](skills/plexar-studio-workers/SKILL.md) skill), or run `/coordinator` for a small standing team. The parent row shows a count such as `2w`, and a `!` when a worker is waiting on you (a question, an approval, or Claude's *trust this folder?* prompt in a fresh worktree). Click a worker to open it in a pane and type into it like any other session. A worker running a plain shell is tagged `sh` and its pane shows **SHELL** rather than a working/idle state. Workers stay until the agent closes them or you do; **Hide** works on them too.
+
+Limits are enforced by Studio, not left to the agent: one level deep, at most 8 workers per session, never more permission than the parent, and an agent cannot answer a question a worker is asking you.
+
+**Claude's own agents** are the agents a Claude Code session runs inside itself with its Agent tool (for example during an orchestrated run). They have no terminal, so they are rows rather than panes: the task description, the model, and a dot (pulsing while running, green when done, grey if stopped without finishing). The parent row shows `running/total`, such as `1/3a`. Click one to read its latest output, which is its report once done. They clear themselves 30 minutes after finishing; running ones always stay listed.
+
+How agents drive workers, and the HTTP routes behind both views, are under [HTTP API](#http-api-fastapi).
 
 ### Codex history
 
