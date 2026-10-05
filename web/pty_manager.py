@@ -619,6 +619,9 @@ class TerminalSession:
     # True when Studio passed --session-id: claude_session_id is then KNOWN, not inferred,
     # and a missing file means "nothing written yet", never "go and find one".
     session_id_assigned: bool = False
+    # Every transcript id this pane has held. Other panes may not re-lock onto one
+    # (see _rediscover_jsonl).
+    jsonl_ids_held: set = field(default_factory=set)
     cli_title: Optional[str] = None  # last CLI-side title observed, from either channel
     _cli_title_checked: float = 0.0  # monotonic throttle stamp for _refresh_cli_title
 
@@ -2062,6 +2065,7 @@ class PtyManager:
         # that: session produced PTY output recently, yet the locked file
         # hasn't been written in a long stretch → unlock and re-discover.
         if session.claude_session_id:
+            self._note_jsonl_held(session)
             path = os.path.join(jsonl_dir, f"{session.claude_session_id}.jsonl")
             if os.path.isfile(path):
                 if not self._jsonl_is_stale(session, path):
@@ -2131,7 +2135,16 @@ class PtyManager:
         except OSError:
             return True
         output_age = time.monotonic() - session.last_output_time
-        return output_age < self._JSONL_STALE_SECONDS and file_age > self._JSONL_STALE_SECONDS
+        if not (output_age < self._JSONL_STALE_SECONDS and file_age > self._JSONL_STALE_SECONDS):
+            return False
+        # Output without a transcript write is NOT evidence of an in-terminal /resume
+        # on its own: a pane spawned with --resume prints its banner over a file last
+        # written days ago, and a long tool call animates a spinner for minutes.
+        # Measured 2026-10-04: both shapes re-locked, and two panes in one repo ended
+        # up holding each other's transcript (names, tokens and cost swapped). A
+        # /resume is typed, so require input NEWER than the file's last write.
+        typed = getattr(session, "last_user_input_time", 0.0)
+        return typed > 0 and (time.monotonic() - typed) < file_age
 
     def _rediscover_jsonl(self, session, jsonl_dir: str) -> str | None:
         """Find the JSONL the session is actually writing to after a /resume.
@@ -2144,6 +2157,13 @@ class PtyManager:
             for s in self.sessions.values()
             if s.id != session.id and s.claude_session_id
         }
+        # A transcript another live pane has EVER held stays off limits, not only the
+        # one it holds now: a pane that drifted off its own file leaves that file
+        # "unclaimed", and the next pane to look would take it (the swap). Its own
+        # history stays eligible, so a pane that drifted can find its way back.
+        for s in self.sessions.values():
+            if s.id != session.id:
+                claimed |= getattr(s, "jsonl_ids_held", set())
         best, best_mtime = None, 0.0
         try:
             names = os.listdir(jsonl_dir)
@@ -2171,7 +2191,16 @@ class PtyManager:
                 session.id, session.claude_session_id, new_id,
             )
             session.claude_session_id = new_id
+            self._note_jsonl_held(session)
         return best
+
+    @staticmethod
+    def _note_jsonl_held(session) -> None:
+        if session.claude_session_id:
+            held = getattr(session, "jsonl_ids_held", None)
+            if held is None:
+                held = session.jsonl_ids_held = set()
+            held.add(session.claude_session_id)
 
     def _session_to_dict(self, session: TerminalSession) -> dict:
         """Build the REST-facing dict for a single session.

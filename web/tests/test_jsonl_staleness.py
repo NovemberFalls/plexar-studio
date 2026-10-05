@@ -43,9 +43,39 @@ def test_fresh_file_not_stale(tmp_path):
 def test_stale_file_with_recent_output_detected(tmp_path):
     mgr = _manager_with_sessions({})
     s = _fake_session("t1", "aaa", last_output_offset=2.0)
+    s.last_user_input_time = time.monotonic() - 30.0  # typed after the last write
     f = tmp_path / "aaa.jsonl"
     _touch(f, age_seconds=600)
     assert mgr._jsonl_is_stale(s, str(f)) is True
+
+
+def test_output_without_typing_is_never_stale(tmp_path):
+    """Measured 2026-10-04: a pane spawned with --resume printed its banner over a
+    transcript last written long ago, was judged stale, and took another pane's file."""
+    mgr = _manager_with_sessions({})
+    f = tmp_path / "aaa.jsonl"
+    _touch(f, age_seconds=600)
+    never_typed = _fake_session("t1", "aaa", last_output_offset=2.0)
+    never_typed.last_user_input_time = 0.0
+    assert mgr._jsonl_is_stale(never_typed, str(f)) is False
+    # Typed, but BEFORE the file's last write: a long tool call, not a /resume.
+    typed_earlier = _fake_session("t1", "aaa", last_output_offset=2.0)
+    typed_earlier.last_user_input_time = time.monotonic() - 900.0
+    assert mgr._jsonl_is_stale(typed_earlier, str(f)) is False
+
+
+def test_rediscover_never_takes_a_file_another_pane_once_held(tmp_path):
+    """The swap: pane B drifted off 'bbb', leaving it unclaimed, and pane A took it."""
+    a = _fake_session("t1", "aaa")
+    b = _fake_session("t2", "zzz")
+    b.jsonl_ids_held = {"bbb", "zzz"}
+    mgr = _manager_with_sessions({"t1": a, "t2": b})
+    _touch(tmp_path / "aaa.jsonl", age_seconds=600)
+    _touch(tmp_path / "bbb.jsonl", age_seconds=3)
+    assert mgr._rediscover_jsonl(a, str(tmp_path)) is None
+    assert a.claude_session_id == "aaa"
+    # ...while B itself can still return to it.
+    assert mgr._rediscover_jsonl(b, str(tmp_path)) == str(tmp_path / "bbb.jsonl")
 
 
 def test_no_output_activity_never_stale(tmp_path):
