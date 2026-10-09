@@ -235,11 +235,12 @@ describe("terminals do not remount when the featured pane changes", () => {
     // `layout` slots, which is the part that must not drift.
     expect(APP_SRC).toMatch(/const renderSlot = \(idx\) => \{/);
     expect(APP_SRC).toMatch(
-      /items: Array\.from\(\{ length: layout \}, \(_, idx\) => \(\{ type: "slot", idx \}\)\),/,
+      /items: Array\.from\(\{ length: layout \}, \(_, i\) => \(\{ type: "slot", idx: pageStart \+ i \}\)\),/,
     );
     expect(APP_SRC).toMatch(/key=\{session\.id\}/);
-    // paneOrder is consumed exactly once in the slot renderer, for the cell index.
-    expect(APP_SRC).toMatch(/const cellIndex = paneOrder\.indexOf\(idx\);/);
+    // paneOrder is consumed exactly once in the slot renderer, for the cell index
+    // (page-relative: `idx` is the global slot, the featured/cell maths are not).
+    expect(APP_SRC).toMatch(/const cellIndex = paneOrder\.indexOf\(idx - pageStart\);/);
     const renderBody = APP_SRC.slice(APP_SRC.indexOf("const renderSlot = (idx) =>"))
       .split("\n")
       .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))

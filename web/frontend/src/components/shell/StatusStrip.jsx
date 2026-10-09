@@ -1,4 +1,4 @@
-import { Minus, Plus, FlipHorizontal2 } from "lucide-react";
+import { Minus, Plus, FlipHorizontal2, ChevronLeft, ChevronRight } from "lucide-react";
 
 function fmt(value, suffix = "") {
   return value === null || value === undefined ? "—" : `${value}${suffix}`;
@@ -46,6 +46,9 @@ export default function StatusStrip({
   onZoomOut,
   layout,
   onLayoutChange,
+  page = 0,
+  pageCount = 1,
+  onPageChange,
   onFlip,
 }) {
   const cpu = systemStats?.cpu ?? null;
@@ -126,6 +129,33 @@ export default function StatusStrip({
             <Plus size={11} />
           </button>
         </div>
+
+        {/* Grid pager: only when the placed sessions overflow one page. */}
+        {pageCount > 1 && (
+          <div className="flex items-center" style={{ gap: 2 }}>
+            <button
+              onClick={() => onPageChange?.(page - 1)}
+              disabled={page <= 0}
+              title="Previous page"
+              aria-label="Previous page"
+              className="flex hover-bg-elevated"
+              style={{ padding: 2, color: "var(--cc-muted)", border: "none", background: "transparent", opacity: page <= 0 ? 0.35 : 1 }}
+            >
+              <ChevronLeft size={11} />
+            </button>
+            <span style={{ minWidth: 28, textAlign: "center" }}>{page + 1} / {pageCount}</span>
+            <button
+              onClick={() => onPageChange?.(page + 1)}
+              disabled={page >= pageCount - 1}
+              title="Next page"
+              aria-label="Next page"
+              className="flex hover-bg-elevated"
+              style={{ padding: 2, color: "var(--cc-muted)", border: "none", background: "transparent", opacity: page >= pageCount - 1 ? 0.35 : 1 }}
+            >
+              <ChevronRight size={11} />
+            </button>
+          </div>
+        )}
 
         {/* Layout switcher */}
         <div className="flex items-center" style={{ gap: 2 }}>

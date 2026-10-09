@@ -42,7 +42,11 @@ import { reconcileWorkers } from "./subsessions.js";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneStripFrom } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
-import { FEATURED_LAYOUTS, clampFeatured, computePaneOrder, swapSlots } from "./utils/paneLayout";
+import {
+  FEATURED_LAYOUTS, clampFeatured, computePaneOrder, swapSlots,
+  pageCount, pageOfSlot, firstEmptySlot, pullFamily, spliceFamilyAfter,
+} from "./utils/paneLayout";
+import FamilyPullDialog from "./components/FamilyPullDialog";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -246,12 +250,16 @@ function notifyActivityChange(name, terminalId, prevState, currState) {
 
 let nextLocalId = 1;
 
-// Find the first empty (null/undefined) slot within the visible layout range
-function findEmptySlot(ids, maxSlots) {
-  for (let i = 0; i < maxSlots; i++) {
-    if (i >= ids.length || ids[i] == null) return i;
-  }
-  return -1;
+// New session / sidebar select: the first empty slot on the CURRENT page (from =
+// its page start), else the first empty one after it, which may start a new page.
+// "First empty at or after the page start" is both rules at once.
+function placeInView(ids, id, from) {
+  if (ids.includes(id)) return ids;
+  const slot = firstEmptySlot(ids, from);
+  const next = [...ids];
+  while (next.length <= slot) next.push(null);
+  next[slot] = id;
+  return next;
 }
 
 export default function App() {
@@ -479,11 +487,51 @@ export default function App() {
   /** The pane container, so a folder click can scroll it. */
   const stageRef = useRef(null);
   const [visibleFolder, setVisibleFolder] = useState(null);
-  /** Slot ceiling when looking for somewhere to put a session. The grid can
-   *  only show `layout` of them; scroll mode has no ceiling, which is the
-   *  whole point — a session that exists but has no slot is invisible, and
-   *  that is the state the tab strip was papering over. */
-  const slotCapacity = scrollMode ? Number.MAX_SAFE_INTEGER : layout;
+  // Grid paging. There is NO slot ceiling anywhere: the grid shows `layout`
+  // panes per page and the rest live on later pages. `page` is deliberately not
+  // persisted (a restart opens on page 0). `idx` everywhere else stays the
+  // GLOBAL slot; only the rendered window moves with `pageStart`.
+  const [page, setPage] = useState(0);
+  const pageStart = scrollMode ? 0 : page * layout;
+  const gridPageCount = pageCount(activeIds, layout);
+  // Latest paging facts for callbacks that must not re-create on every change.
+  const pagingRef = useRef({ ids: [], pageStart: 0, layout, scrollMode });
+  pagingRef.current = { ids: activeIds, pageStart, layout, scrollMode };
+  // A session just placed by createSession/selectSession: once its slot exists,
+  // the view jumps to that slot's page.
+  const jumpToRef = useRef(null);
+  // Resizing the grid keeps the first visible slot visible. Must run BEFORE the
+  // clamp below: both queue updaters on `page`, applied in order.
+  const prevLayoutRef = useRef(layout);
+  useEffect(() => {
+    const prev = prevLayoutRef.current;
+    if (prev === layout) return;
+    prevLayoutRef.current = layout;
+    setPage((p) => Math.floor((p * prev) / layout));
+  }, [layout]);
+  // Closing panes can leave `page` past the last occupied one.
+  useEffect(() => {
+    setPage((p) => Math.min(p, gridPageCount - 1));
+  }, [gridPageCount]);
+  useEffect(() => {
+    const id = jumpToRef.current;
+    if (id == null) return;
+    jumpToRef.current = null;
+    const slot = activeIds.indexOf(id);
+    if (slot !== -1 && !scrollMode) setPage(pageOfSlot(slot, layout));
+  }, [activeIds, layout, scrollMode]);
+  /** Pending "open this parent's workers too?" prompt, or null. */
+  const [familyPull, setFamilyPull] = useState(null);
+  const confirmFamilyPull = () => {
+    const fp = familyPull;
+    setFamilyPull(null);
+    if (!fp) return;
+    setActiveIds((prev) => (
+      scrollMode
+        ? spliceFamilyAfter(prev, fp.workerIds, fp.parentId)
+        : pullFamily(prev, fp.workerIds, fp.anchor, layout)
+    ));
+  };
   // Engine's selected tab (Live|Models|Requests|API|Logs). Held here so it
   // survives leaving and re-entering the section.
   const [engineTab, setEngineTab] = useState("live");
@@ -771,14 +819,8 @@ export default function App() {
       bypassPermissions: !!options.bypassPermissions,
     };
     setSessions((prev) => [...prev, newSession]);
-    setActiveIds((prev) => {
-      const slot = findEmptySlot(prev, slotCapacity);
-      if (slot === -1) return prev; // all panes full — user drags from sidebar to place
-      const next = [...prev];
-      while (next.length <= slot) next.push(null);
-      next[slot] = localId;
-      return next;
-    });
+    jumpToRef.current = localId;
+    setActiveIds((prev) => placeInView(prev, localId, pagingRef.current.pageStart));
 
     try {
       const isOpus = (
@@ -846,7 +888,7 @@ export default function App() {
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, harness, permissionMode, effort, fast, slotCapacity, addLocations, toast]);
+  }, [model, harness, permissionMode, effort, fast, addLocations, toast]);
 
   // Remove a session (kills terminal on server) with 12s undo window.
   // Codex undo requires its exact chat identity; Claude retains its established
@@ -907,22 +949,15 @@ export default function App() {
 
   // Select a session: fill an empty pane slot if available, never auto-rearrange
   const selectSession = useCallback((id) => {
-    setActiveIds((prev) => {
-      // Check if already in a visible slot. In scroll mode EVERY filled slot is
-      // visible, so the scan must not stop at `layout` -- doing so would hand a
-      // second slot to a session that is already on screen.
-      const visible = Math.min(prev.length, slotCapacity);
-      for (let i = 0; i < visible; i++) {
-        if (prev[i] === id) return prev;
-      }
-      const slot = findEmptySlot(prev, slotCapacity);
-      if (slot === -1) return prev; // all panes full — user drags to place
-      const next = [...prev];
-      while (next.length <= slot) next.push(null);
-      next[slot] = id;
-      return next;
-    });
-  }, [slotCapacity]);
+    // Already placed (on ANY page): just jump to its page, never a second slot.
+    const at = pagingRef.current.ids.indexOf(id);
+    if (at !== -1) {
+      if (!pagingRef.current.scrollMode) setPage(pageOfSlot(at, pagingRef.current.layout));
+      return;
+    }
+    jumpToRef.current = id;
+    setActiveIds((prev) => placeInView(prev, id, pagingRef.current.pageStart));
+  }, []);
 
   /**
    * Bring a folder's panes into view. Scroll mode only — in the grid there is
@@ -958,7 +993,7 @@ export default function App() {
   const renderItems = useMemo(() => {
     if (!scrollMode) {
       return {
-        items: Array.from({ length: layout }, (_, idx) => ({ type: "slot", idx })),
+        items: Array.from({ length: layout }, (_, i) => ({ type: "slot", idx: pageStart + i })),
         tracks: layout,
         spans: new Map(),
       };
@@ -1007,7 +1042,7 @@ export default function App() {
       }
     }
     return { items, tracks, spans };
-  }, [scrollMode, layout, activeIds, sessions, gitStatuses, fillWidth, groupOrder]);
+  }, [scrollMode, layout, pageStart, activeIds, sessions, gitStatuses, fillWidth, groupOrder]);
 
   const { items: renderRows, tracks: gridTracks, spans: spanBySlot } = renderItems;
 
@@ -1193,7 +1228,8 @@ export default function App() {
         if (reattached.length > 0) {
           console.log(`[cockpit] Reattached ${reattached.length} session(s) to surviving backend terminals`);
           setSessions(reattached);
-          setActiveIds(reattached.map((s) => s.id).slice(0, layout));
+          // No slot ceiling: panes beyond `layout` simply land on later pages.
+          setActiveIds(reattached.map((s) => s.id));
           addLocations(reattached.map((s) => s.workdir).filter(Boolean));
         } else {
           setSessions([]);
@@ -1212,7 +1248,7 @@ export default function App() {
         return;
       }
     })();
-  }, [backendReady, layout, addLocations, createSession, toast]);
+  }, [backendReady, addLocations, createSession, toast]);
 
   // Warm the TASKS probe as soon as the backend answers, so opening TASKS
   // never waits on it (see the load-time note in TasksView.jsx).
@@ -2062,9 +2098,9 @@ export default function App() {
       }
       if (e.ctrlKey && !e.shiftKey && e.key >= "1" && e.key <= "8") {
         const i = parseInt(e.key) - 1;
-        if (i < layout && activeIds[i] != null) {
+        if (i < layout && activeIds[pageStart + i] != null) {
           e.preventDefault();
-          paneRefs.current[i]?.focus();
+          paneRefs.current[pageStart + i]?.focus();
         }
       }
       // Zoom: Ctrl+= / Ctrl+- / Ctrl+0
@@ -2083,7 +2119,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [createSession, activeIds, layout, zoomIn, zoomOut, zoomReset, openPalette]);
+  }, [createSession, activeIds, layout, pageStart, zoomIn, zoomOut, zoomReset, openPalette]);
 
   // Ctrl+MouseWheel zoom
   useEffect(() => {
@@ -2591,8 +2627,10 @@ export default function App() {
               // lists SLOTS in CELL order, so this slot's cell index is its
               // position in paneOrder; cell 0 is the big featured cell in
               // 3/5/7. Hence "featured cell" === "slot paneOrder[0]".
-              const cellIndex = paneOrder.indexOf(idx);
-              const area = gridLayout.areas[cellIndex] || gridLayout.areas[idx] || { col: "auto", row: "auto" };
+              // `idx` is the GLOBAL slot; featuredIndex and the cell maths are
+              // PAGE-relative, hence `idx - pageStart` (0 in scroll mode).
+              const cellIndex = paneOrder.indexOf(idx - pageStart);
+              const area = gridLayout.areas[cellIndex] || gridLayout.areas[idx - pageStart] || { col: "auto", row: "auto" };
               // Featured/cell placement is a GRID concept. In scroll mode the
               // auto-flow places panes and `featuredIndex` is left untouched --
               // reinterpreting it here would give the slot/cell/order triple a
@@ -2626,6 +2664,25 @@ export default function App() {
                   if (data.startsWith("session:")) {
                     const droppedId = parseInt(data.slice(8), 10);
                     placeSession(droppedId, idx, { insert: scrollMode });
+                    // A parent dropped on screen offers to bring its workers
+                    // along. "On screen" is this page in the grid and any
+                    // placed slot in scroll; a worker never prompts. In the
+                    // grid the slot dropped on is excluded: a replace-drop
+                    // evicts whatever sat there, so that worker is not shown.
+                    const droppedSession = sessions.find((x) => x.id === droppedId);
+                    if (droppedSession?.terminalId && !droppedSession.parentTerminalId) {
+                      const shown = new Set(
+                        scrollMode
+                          ? activeIds
+                          : activeIds.slice(pageStart, pageStart + layout).filter((_, k) => pageStart + k !== idx),
+                      );
+                      const workerIds = sessions
+                        .filter((w) => w.parentTerminalId === droppedSession.terminalId && !shown.has(w.id))
+                        .map((w) => w.id);
+                      if (workerIds.length > 0) {
+                        setFamilyPull({ parentId: droppedId, parentName: droppedSession.name, workerIds, anchor: idx });
+                      }
+                    }
                     // A session's GROUP follows its working directory, so
                     // dropping one into another folder's row does not re-home
                     // it -- it appears under its own folder. Say so, rather
@@ -2786,7 +2843,7 @@ export default function App() {
                         onSwap={layout > 1 ? swapPanes : undefined}
                         onMakeFeatured={
                           FEATURED_LAYOUTS.has(layout) && !isFeaturedSlot
-                            ? () => setFeaturedIndex(idx)
+                            ? () => setFeaturedIndex(idx - pageStart)
                             : undefined
                         }
                         onDragSourceChange={layout > 1 ? setDragSource : undefined}
@@ -2979,7 +3036,7 @@ export default function App() {
                 <Sidebar
                   sessions={sessions}
                   subagentsByTerminal={subagentsByTerminal}
-                  activeIds={(scrollMode ? activeIds : activeIds.slice(0, layout)).filter((id) => id != null)}
+                  activeIds={(scrollMode ? activeIds : activeIds.slice(pageStart, pageStart + layout)).filter((id) => id != null)}
                   onSelect={selectSession}
                   onFocusFolder={scrollToFolder}
                   visibleFolder={scrollMode ? visibleFolder : null}
@@ -3284,6 +3341,9 @@ export default function App() {
             onZoomOut={zoomOut}
             layout={layout}
             onLayoutChange={setLayout}
+            page={page}
+            pageCount={scrollMode ? 1 : gridPageCount}
+            onPageChange={setPage}
             onFlip={() => setFlipLayout((v) => !v)}
           />
 
@@ -3335,6 +3395,14 @@ export default function App() {
             onCancel={() => setShowNewDialog(false)}
           />
         )}
+
+        <FamilyPullDialog
+          open={familyPull !== null}
+          parentName={familyPull?.parentName ?? ""}
+          count={familyPull?.workerIds.length ?? 0}
+          onConfirm={confirmFamilyPull}
+          onCancel={() => setFamilyPull(null)}
+        />
 
         {bridgeModal.open && (() => {
           const fromSession = sessions.find((s) => s.id === bridgeModal.fromSessionId);

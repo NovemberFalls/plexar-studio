@@ -59,6 +59,70 @@ export function computePaneOrder(layout, featuredIndex) {
 }
 
 /**
+ * Grid paging. Sessions and workers have no cap; the grid shows `layout` panes
+ * per PAGE, and a slot is still a position in `activeIds` -- paging only moves
+ * the window the grid renders (`page * layout`), never the numbering.
+ */
+
+/** Pages needed to show every placed session: at least 1, and trailing nulls
+ *  never add a page (an empty last page is not worth a pager button). */
+export function pageCount(ids, layout) {
+  let last = -1;
+  for (let i = ids.length - 1; i >= 0; i--) {
+    if (ids[i] != null) { last = i; break; }
+  }
+  return Math.max(1, Math.ceil((last + 1) / layout));
+}
+
+/** The page a slot lives on. */
+export function pageOfSlot(slot, layout) {
+  return Math.floor(slot / layout);
+}
+
+/** First null/absent slot at or after `from`. Never -1: the list is unbounded,
+ *  so a slot past its end is always empty. */
+export function firstEmptySlot(ids, from = 0) {
+  for (let i = from; i < ids.length; i++) {
+    if (ids[i] == null) return i;
+  }
+  return Math.max(from, ids.length);
+}
+
+/**
+ * Pull a parent's workers into the grid. Each worker goes into the next EMPTY
+ * slot at or after the page start of `anchorSlot`, flowing onto following pages.
+ * An occupied slot is never overwritten or shifted, a worker already placed
+ * elsewhere MOVES (its old slot becomes null -- never compacted, so slot
+ * indices stay stable), and no id outside `workerIds` is touched.
+ */
+export function pullFamily(ids, workerIds, anchorSlot, layout) {
+  const next = [...ids];
+  const workers = [...new Set(workerIds.filter((w) => w != null))];
+  for (const w of workers) {
+    const at = next.indexOf(w);
+    if (at !== -1) next[at] = null;
+  }
+  const start = pageOfSlot(anchorSlot, layout) * layout;
+  for (const w of workers) {
+    const slot = firstEmptySlot(next, start);
+    while (next.length <= slot) next.push(null);
+    next[slot] = w;
+  }
+  return next;
+}
+
+/** Scroll mode: splice the not-yet-placed workers in directly after the parent. */
+export function spliceFamilyAfter(ids, workerIds, parentId) {
+  const at = ids.indexOf(parentId);
+  if (at === -1) return ids;
+  const fresh = [...new Set(workerIds)].filter((w) => w != null && !ids.includes(w));
+  if (fresh.length === 0) return ids;
+  const next = [...ids];
+  next.splice(at + 1, 0, ...fresh);
+  return next;
+}
+
+/**
  * Pure body of App's `swapPanes` — swap two slots in the activeIds list,
  * growing it with nulls so a swap onto a never-filled slot still works.
  * Extracted so "drop into the featured cell promotes the dragged pane" can be
