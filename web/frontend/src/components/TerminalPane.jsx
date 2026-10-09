@@ -717,7 +717,7 @@ const TerminalPane = forwardRef(function TerminalPane({
     >
       {/* Pane header */}
       <div
-        className="flex items-center justify-between px-3 flex-shrink-0"
+        className="pane-head flex items-center justify-between px-3 flex-shrink-0"
         style={{
           height: codexRef.current ? "auto" : 38,
           minHeight: 38,
@@ -751,17 +751,17 @@ const TerminalPane = forwardRef(function TerminalPane({
           onDragSourceChange?.(null);
         }}
       >
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="pane-head-left flex items-center gap-2 min-w-0">
           {onSwap && (
             <GripVertical
               size={12}
-              className="flex-shrink-0 cursor-grab"
+              className="ph-t3 flex-shrink-0 cursor-grab"
               style={{ color: "var(--text-muted)" }}
             />
           )}
-          <span className="cc-chip" data-state={dataState}>
+          <span className="cc-chip flex-shrink-0" data-state={dataState} title={stateWord}>
             <StateIcon state={activityState} size={10} color={`var(--cc-${dataState})`} />
-            {stateWord}
+            <span className="ph-t2">{stateWord}</span>
           </span>
           {taskDone && (
             <span
@@ -817,16 +817,16 @@ const TerminalPane = forwardRef(function TerminalPane({
             </div>
           ) : (
             <span
-              className="truncate"
+              className="truncate min-w-0"
               style={{ color: "var(--cc-fg, var(--text-primary))", fontSize: 13, fontWeight: 700 }}
               onDoubleClick={startRename}
-              title="Double-click to rename"
+              title={`${session.name} (double-click to rename)`}
             >
               {session.name}
             </span>
           )}
           <span
-            className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
+            className="ph-t2 text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
             style={{
               color: "var(--cc-muted, var(--text-muted))",
               border: "1px solid var(--cc-border, var(--border-color))",
@@ -834,19 +834,19 @@ const TerminalPane = forwardRef(function TerminalPane({
           >
             {modelLabel}
           </span>
-          {(usage?.effort || session.effort) && <span className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0" title="Thinking effort" style={{ color: "var(--cc-muted, var(--text-muted))", backgroundColor: "var(--bg-surface)" }}>
+          {(usage?.effort || session.effort) && <span className="ph-t1 text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0" title="Thinking effort" style={{ color: "var(--cc-muted, var(--text-muted))", backgroundColor: "var(--bg-surface)" }}>
             {(usage?.effort || session.effort) === "xhigh" ? "xHigh" : (usage?.effort || session.effort)}
           </span>}
           {session.bypassPermissions && !isShell && (
             <span
-              className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+              className="ph-bypass text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
               style={{
                 color: "var(--cc-waiting, var(--yellow))",
                 backgroundColor: "color-mix(in srgb, var(--cc-waiting, var(--yellow)) 12%, transparent)",
               }}
               title="Bypass permissions is armed for this session"
             >
-              BYPASS
+              <span className="ph-bypass-word">BYPASS</span>
             </span>
           )}
         </div>
@@ -854,7 +854,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           {codexRef.current && <button type="button" onClick={() => setShowTranscript(true)} title="Read saved Codex messages" style={{ fontSize: 10 }}>Conversation history</button>}
           {codexRef.current && <CodexUsageBadge usage={usage} />}
           {!codexRef.current && usage && (
-            <div className="pane-usage-stats flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
+            <div className="pane-usage-stats ph-t1 flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
               <span
                 className="text-[10px] truncate"
                 style={{ color: "var(--cc-muted, var(--text-muted))" }}
@@ -880,7 +880,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           )}
           {!codexRef.current && session.context_percent != null && (
             <span
-              className="flex items-center gap-0.5 flex-shrink-0"
+              className="ph-t3 flex items-center gap-0.5 flex-shrink-0"
               title={`Context used: ${Math.round(session.context_percent)}%`}
             >
               <svg width="17" height="17" viewBox="0 0 20 20" aria-hidden="true">
@@ -901,7 +901,7 @@ const TerminalPane = forwardRef(function TerminalPane({
                   transform="rotate(-90 10 10)"
                 />
               </svg>
-              <span className="text-[10px]" style={{ color: "var(--cc-dim, var(--text-muted))" }}>
+              <span className="ph-t2 text-[10px]" style={{ color: "var(--cc-dim, var(--text-muted))" }}>
                 {Math.round(session.context_percent)}%
               </span>
             </span>
@@ -923,7 +923,7 @@ const TerminalPane = forwardRef(function TerminalPane({
             <button
               type="button"
               onClick={() => onPopout(session)}
-              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
+              className="ph-t1 icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
               data-tooltip="Pop out"
               aria-label="Open terminal in separate window"
@@ -935,7 +935,7 @@ const TerminalPane = forwardRef(function TerminalPane({
             <button
               type="button"
               onClick={onFork}
-              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
+              className="ph-t1 icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
               data-tooltip="Fork"
               aria-label="Fork session (new session, same workdir)"
@@ -944,7 +944,7 @@ const TerminalPane = forwardRef(function TerminalPane({
             </button>
           )}
           {workflowSummary && workflowSummary.count > 0 && (
-            <div className="relative">
+            <div className="ph-t2 relative">
               <button
                 type="button"
                 onClick={() => setWorkflowsOpen((o) => !o)}
@@ -1000,7 +1000,7 @@ const TerminalPane = forwardRef(function TerminalPane({
             <button
               type="button"
               onClick={onOpenBridge}
-              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
+              className="ph-t1 icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
               data-tooltip="Bridge"
               aria-label="Bridge to another session"

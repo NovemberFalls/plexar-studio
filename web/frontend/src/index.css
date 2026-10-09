@@ -127,6 +127,41 @@ body {
   white-space: nowrap;
 }
 
+/* Pane header legibility. The header is a size container, and items leave in
+   priority order as the PANE narrows (8 columns of scroll mode is ~250px), so
+   nothing ever slides underneath the action icons. Always kept: state icon,
+   session name, a bypass marker, interrupt, more-actions, hide, end. Everything
+   dropped here is still in the Inspector for the focused pane. */
+.pane-head {
+  container-type: inline-size;
+  container-name: pane-head;
+}
+.pane-head-left {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+/* <720px: usage figures, effort, pop out / fork / bridge. */
+@container pane-head (max-width: 720px) {
+  .ph-t1 { display: none !important; }
+}
+/* <480px: model chip, the state WORD (its icon stays), context %, workflows. */
+@container pane-head (max-width: 480px) {
+  .ph-t2 { display: none !important; }
+  .pane-head .cc-chip { padding: 2px 4px; }
+}
+/* <320px: drag grip and context ring go; BYPASS shrinks to a dot, never away. */
+@container pane-head (max-width: 320px) {
+  .ph-t3 { display: none !important; }
+  .ph-bypass-word { display: none; }
+  .pane-head .ph-bypass {
+    padding: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: var(--cc-waiting, var(--yellow)) !important;
+  }
+}
+
 /* Icon tooltip — fast-appearing label, no native title delay */
 .icon-tooltip {
   position: relative;
