@@ -117,12 +117,10 @@ async def test_depth_is_one(world):
     assert len(world.spawned) == 1
 
 
-async def test_child_cap(world):
+async def test_no_child_cap(world):
     async with _client() as c:
-        for _ in range(agent_api.MAX_CHILDREN):
+        for _ in range(12):
             assert (await c.post("/api/agent/spawn", json={}, headers=_h("tok-p1"))).status_code == 201
-        r = await c.post("/api/agent/spawn", json={}, headers=_h("tok-p1"))
-    assert r.status_code == 409
 
 
 async def test_only_the_parent_can_prompt_read_or_close_its_worker(world):

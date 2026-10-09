@@ -1,9 +1,8 @@
-"""The concurrent-session cap now comes from settings, with env taking precedence.
+"""The concurrent-session cap comes from settings, with env taking precedence.
 
-`sessions.max_sessions` sat in DEFAULT_SETTINGS unread since the facelift. Scroll
-mode (backlog row 19) is the feature that needs more than 8, so the key is wired
-up here. The cap is NOT removed: it remains the backstop against a runaway spawn
-loop -- it is just no longer pinned to the old 8-pane grid's ceiling.
+Owner ruling 2026-10-06: sessions have NO cap by default. 0 means "no limit";
+an explicit positive value (env or settings) stays an opt-in ceiling. The grid
+shows 8 panes per page, which is a display matter and not a session limit.
 
 Precedence matters and is asserted in both directions: an operator who exports
 MAX_SESSIONS for a headless run must not be overridden by a settings file, and a
@@ -26,14 +25,31 @@ def test_env_var_wins_over_settings(monkeypatch):
     assert _resolve_max_sessions() == 24
 
 
+def test_env_zero_means_no_limit_and_wins(monkeypatch):
+    monkeypatch.setenv("MAX_SESSIONS", "0")
+    monkeypatch.setattr("settings_store.read_settings", lambda: {"sessions": {"max_sessions": 3}})
+    assert _resolve_max_sessions() == 0
+
+
+def test_negative_env_falls_through_to_settings(monkeypatch):
+    monkeypatch.setenv("MAX_SESSIONS", "-1")
+    monkeypatch.setattr("settings_store.read_settings", lambda: {"sessions": {"max_sessions": 5}})
+    assert _resolve_max_sessions() == 5
+
+
 def test_settings_used_when_no_env(monkeypatch):
     monkeypatch.setattr("settings_store.read_settings", lambda: {"sessions": {"max_sessions": 20}})
     assert _resolve_max_sessions() == 20
 
 
-def test_falls_back_to_eight_when_settings_has_nothing_usable(monkeypatch):
+def test_settings_zero_is_accepted(monkeypatch):
+    monkeypatch.setattr("settings_store.read_settings", lambda: {"sessions": {"max_sessions": 0}})
+    assert _resolve_max_sessions() == 0
+
+
+def test_defaults_to_no_limit_when_settings_has_nothing_usable(monkeypatch):
     monkeypatch.setattr("settings_store.read_settings", lambda: {"sessions": {}})
-    assert _resolve_max_sessions() == 8
+    assert _resolve_max_sessions() == 0
 
 
 @pytest.mark.parametrize("bad", ["", "eight", "3.5", "-"])
@@ -45,33 +61,29 @@ def test_unparseable_env_falls_back_rather_than_crashing(monkeypatch, bad):
 
 
 def test_a_settings_read_that_raises_is_survivable(monkeypatch):
-    """Fail open to the default -- an unreadable settings file must not stop
+    """Fail open to no limit -- an unreadable settings file must not stop
     the user from creating any session at all."""
     def boom():
         raise OSError("settings.json is a directory")
 
     monkeypatch.setattr("settings_store.read_settings", boom)
-    assert _resolve_max_sessions() == 8
+    assert _resolve_max_sessions() == 0
 
 
 def test_bool_is_not_accepted_as_a_count(monkeypatch):
     """isinstance(True, int) is True in Python; `max_sessions: true` is a typo,
     not a cap of 1."""
     monkeypatch.setattr("settings_store.read_settings", lambda: {"sessions": {"max_sessions": True}})
-    assert _resolve_max_sessions() == 8
+    assert _resolve_max_sessions() == 0
 
 
-def test_zero_and_negative_are_rejected(monkeypatch):
-    """A cap of 0 blocks every session and is indistinguishable from a mistyped
-    'off' -- the same stance spend_guard takes on a 0 cap."""
-    for value in (0, -5):
-        monkeypatch.setattr("settings_store.read_settings", lambda v=value: {"sessions": {"max_sessions": v}})
-        assert _resolve_max_sessions() == 8
+def test_negative_settings_value_is_rejected(monkeypatch):
+    monkeypatch.setattr("settings_store.read_settings", lambda: {"sessions": {"max_sessions": -5}})
+    assert _resolve_max_sessions() == 0
 
 
-def test_the_settings_bound_actually_permits_more_than_the_grid_shows():
-    """The whole point of the row: the bound must exceed the 8-pane grid, or the
-    setting cannot express what scroll mode exists for."""
+def test_the_settings_bound_permits_zero_and_more_than_the_grid_shows():
+    """0 is the no-limit sentinel, and the upper bound must exceed the 8-pane grid."""
     low, high = _NUMERIC_BOUNDS["sessions.max_sessions"]
-    assert low == 1
-    assert high >= 16, "raising the cap is pointless if the bound still caps it at the grid size"
+    assert low == 0
+    assert high >= 16, "an opt-in ceiling is pointless if the bound caps it at the grid size"

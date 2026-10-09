@@ -311,7 +311,7 @@ DEFAULT_SETTINGS = {
     # (launcher noise -- a GUI app's rendering must not depend on which shell
     # started it) and re-applies it from here (intent).
     "claude_cli": {"binary_path": "", "detected_version": None},
-    "sessions": {"model": None, "permission_mode": None, "effort": None, "fast": False, "max_sessions": 8},
+    "sessions": {"model": None, "permission_mode": None, "effort": None, "fast": False, "max_sessions": 0},
     "appearance": {
         "theme": None, "accent": None, "glow_enabled": True, "glow_size": 30,
         "token_overrides": {}, "user_palettes": {},
@@ -415,11 +415,9 @@ _NUMERIC_BOUNDS = {
     "providers.lane_broker.concurrency": (1, 8),
     "providers.vllm.gpu_util": (0.05, 1.0),
     "appearance.glow_size": (0, 48),
-    # Widened from 16 for the scrolling layout: the grid can only show 8 at a
-    # time, but scroll mode's whole point is holding more than fits. The cap
-    # stays a cap -- it is the backstop against a runaway spawn loop, not a
-    # display limit -- it is just no longer set to the old grid's ceiling.
-    "sessions.max_sessions": (1, 64),
+    # 0 means NO LIMIT (owner ruling 2026-10-06) and is the default; a positive
+    # value is an opt-in ceiling. The grid's 8 panes per page is display only.
+    "sessions.max_sessions": (0, 1024),
     "data.retention_days": (1, 3650),
     "spend.monthly_reset_day": (1, 28),
     "spend.alert_at_percent": (1, 100),

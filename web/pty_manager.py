@@ -627,38 +627,39 @@ class TerminalSession:
 
 
 def _resolve_max_sessions() -> int:
-    """Concurrent-session cap: env var wins, else settings.json, else 8.
+    """Concurrent-session cap: env var wins, else settings.json, else 0 (no limit).
 
-    `sessions.max_sessions` has been in DEFAULT_SETTINGS since the facelift and
-    NOTHING read it -- one of the documented "persisted but not yet enforced"
-    keys. It is read here now, so the Settings field means something.
+    Owner ruling 2026-10-06: sessions have NO cap by default. 0 means "no
+    limit"; an explicit positive value stays an opt-in ceiling. The grid shows
+    at most 8 panes per page, but that is a display matter, not a session limit.
 
     Precedence is env-first because MAX_SESSIONS is how a headless/CI run pins
     the value, and a settings file on disk must not override an operator who
-    set it explicitly for this process.
+    set it explicitly for this process. A negative or non-integer env value
+    warns and falls through to settings; every fallback returns 0.
 
-    This is deliberately NOT removed as a cap. It is the backstop against a
-    runaway spawn loop; what changed is that it is a value the user can raise
-    (up to the 1-64 bound in settings_store) rather than a constant matching
-    the old 8-pane grid. Read ONCE at import: the limit is checked on every
-    create, and a live read would let a settings save change it mid-flight
-    with no way to see that it had.
+    Read ONCE at import: the limit is checked on every create, and a live read
+    would let a settings save change it mid-flight with no way to see that it
+    had.
     """
     env = os.getenv("MAX_SESSIONS")
     if env is not None:
         try:
-            return max(1, int(env))
+            parsed = int(env)
+            if parsed >= 0:
+                return parsed
+            logger.warning("MAX_SESSIONS=%r is negative -- falling back to settings", env)
         except ValueError:
             logger.warning("MAX_SESSIONS=%r is not an integer -- falling back to settings", env)
     try:
         from settings_store import read_settings
 
         value = read_settings().get("sessions", {}).get("max_sessions")
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
     except Exception:
         logger.warning("Could not read sessions.max_sessions from settings", exc_info=True)
-    return 8
+    return 0
 
 
 MAX_SESSIONS = _resolve_max_sessions()
@@ -1147,7 +1148,7 @@ class PtyManager:
             model_provider config. provider="local" is REFUSED (Codex speaks
             the Responses API; the local engines serve Chat Completions).
         """
-        if len(self.sessions) >= MAX_SESSIONS:
+        if MAX_SESSIONS and len(self.sessions) >= MAX_SESSIONS:
             raise RuntimeError(f"Maximum session limit ({MAX_SESSIONS}) reached")
 
         # Validate provider against the allowlist before anything else — every

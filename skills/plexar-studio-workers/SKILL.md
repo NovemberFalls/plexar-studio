@@ -27,7 +27,7 @@ Studio pane · `3` a wait timed out, stalled, or did not match.
 
 ## Rules (enforced by Studio, not advisory)
 
-- Workers cannot spawn workers. At most 8 live workers per session.
+- Workers cannot spawn workers. There is no per-session worker cap.
 - A worker inherits your permission mode and never gets more.
 - You control only YOUR workers. `peers` shows the user's other sessions read-only.
 - A worker blocked on a question or approval is never prompted (`prompt` → refused).
@@ -85,5 +85,5 @@ ps peers                              # the user's other sessions (read-only)
 ps close reviewer
 ```
 
-Close workers you no longer need: they count against the user's session limit. Closing a
+Close workers you no longer need: they stay open (and use resources) until closed. Closing a
 worktree worker leaves the worktree and branch on disk for the user to merge or remove.

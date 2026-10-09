@@ -25,7 +25,8 @@ it. ``/peers`` lists the user's other sessions read-only, and nothing more.
 
 Deliberate limits, all refusals rather than silent clamps:
   * depth 1 -- a worker cannot spawn workers;
-  * at most ``MAX_CHILDREN`` live workers per parent, inside the global MAX_SESSIONS;
+  * no per-parent worker cap (owner ruling 2026-10-06); only an explicit MAX_SESSIONS
+    ceiling, if the user set one, bounds the total;
   * a worker never gets MORE permission than its parent: bypass only if the parent
     bypasses;
   * a worker blocked on a question is never prompted (409): the human answers it.
@@ -49,7 +50,6 @@ logger = logging.getLogger("cockpit.agent")
 
 router = APIRouter()
 
-MAX_CHILDREN = 8
 TOKEN_HEADER = "x-plexar-session-token"
 _MAX_PROMPT_BYTES = 100_000
 _READY_TIMEOUT = 60.0          # how long an initial prompt waits for a fresh worker's CLI
@@ -200,7 +200,7 @@ async def whoami(request: Request):
     if caller is None:
         return _err(401, _UNAUTH)
     return JSONResponse({**_summary(caller), "can_spawn": caller.parent_id is None,
-                         "max_children": MAX_CHILDREN})
+                         "max_children": None})
 
 
 @router.get("/api/agent/children")
@@ -235,8 +235,6 @@ async def spawn(request: Request):
         return _err(401, _UNAUTH)
     if caller.parent_id is not None:
         return _err(403, "a worker cannot spawn workers (depth is limited to 1)")
-    if len(_children(caller.id)) >= MAX_CHILDREN:
-        return _err(409, f"this session already has {MAX_CHILDREN} live workers")
     body = await _json_body(request)
     prompt = body.get("prompt")
     if prompt is not None and (not isinstance(prompt, str) or len(prompt.encode()) > _MAX_PROMPT_BYTES):

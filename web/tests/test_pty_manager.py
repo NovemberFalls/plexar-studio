@@ -75,6 +75,20 @@ class TestPtyManager:
         finally:
             _pm.MAX_SESSIONS = original
 
+    def test_max_sessions_zero_means_no_limit(self):
+        import pty_manager as _pm
+        original = _pm.MAX_SESSIONS
+        try:
+            _pm.MAX_SESSIONS = 0
+            for i in range(3):
+                self.mgr.sessions[f"s{i}"] = make_mock_session(f"s{i}")
+            try:
+                self.mgr.create_terminal(name="past-limit", workdir="C:\\Code")
+            except Exception as exc:  # may fail later for unrelated reasons (no real PTY)
+                assert "Maximum session limit" not in str(exc)
+        finally:
+            _pm.MAX_SESSIONS = original
+
     def test_write_pty_dead_session(self):
         session = make_mock_session("dead", alive=False)
         self.mgr.sessions["dead"] = session

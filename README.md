@@ -16,7 +16,7 @@ Studio runs the `claude` and `codex` CLIs in terminal emulators (xterm.js), driv
 
 Plexar Studio keeps multiple CLI sessions organized while preserving the tools and authentication each CLI already uses.
 
-- **Grid and scrolling layouts.** Choose 1–8 grid panes, or scroll through sessions grouped by folder. The concurrent-session limit defaults to 8 and can be configured separately; settings support up to 64, subject to your machine's resources.
+- **Grid and scrolling layouts.** Choose 1–8 grid panes per page, or scroll through sessions grouped by folder. There is no session limit by default; an optional ceiling can be set (0 = no limit), subject to your machine's resources.
 - **Live per-pane state** — idle / busy / waiting-on-you, parsed off the terminal stream. The point is knowing at a glance which pane needs you.
 - **Sessions grouped by project folder**, with live git branch and dirty status.
 - **Agents that spawn visible workers.** An agent in a pane can start its own worker panes (Claude Code, Codex, Plexar Harness or a plain shell, optionally each on its own git worktree), prompt them, wait on them and read their answers. Workers appear nested under the session that started them, and you can open, watch or type into any of them.
@@ -216,7 +216,7 @@ A few are environment variables, set in `web/.env` (copy `web/.env.example`):
 |---|---|---|
 | `HOST` | `127.0.0.1` | Bind address. See the security note below before changing this. |
 | `PORT` | `8420` | Server port |
-| `MAX_SESSIONS` | settings value, else `8` | Overrides the concurrent-session limit at server startup |
+| `MAX_SESSIONS` | settings value, else `0` (no limit) | Overrides the concurrent-session limit at server startup |
 | `IDLE_TIMEOUT` | `0` | Kill idle sessions after N seconds (0 = disabled) |
 | `NO_BROWSER` | `0` | `1` suppresses auto-opening a browser |
 | `CLAUDE_CLI_PATH` | — | Full path to the `claude` executable, if it isn't discoverable |

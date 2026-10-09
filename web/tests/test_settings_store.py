@@ -57,7 +57,7 @@ def test_defaults_returned_when_no_file(isolated_settings):
     settings = settings_store.read_settings()
 
     assert settings["general"]["autostart_broker"] is True
-    assert settings["sessions"]["max_sessions"] == 8
+    assert settings["sessions"]["max_sessions"] == 0
     assert settings["appearance"]["glow_size"] == 30
     assert settings["providers"]["lmstudio"]["default"] is True
     # A pure read must not create the file.
@@ -90,7 +90,7 @@ def test_corrupt_json_reads_as_defaults(isolated_settings):
     settings = settings_store.read_settings()
 
     assert settings == settings_store.read_settings()
-    assert settings["sessions"]["max_sessions"] == 8
+    assert settings["sessions"]["max_sessions"] == 0
     assert settings["general"]["minimize_to_tray"] is False
 
 
@@ -143,7 +143,7 @@ def test_valid_partial_patch_merges_without_clobbering_siblings(isolated_setting
     assert effective["providers"]["vllm"]["base_url"] == "http://127.0.0.1:8001"
     assert effective["providers"]["lmstudio"]["default"] is True
     assert effective["sessions"]["fast"] is True
-    assert effective["sessions"]["max_sessions"] == 8
+    assert effective["sessions"]["max_sessions"] == 0
 
     # Only the patched keys are actually persisted; defaults are not baked in.
     on_disk = json.loads(settings_file.read_text(encoding="utf-8"))
@@ -240,12 +240,9 @@ def test_freeform_leaf_must_be_a_dict(isolated_settings):
     ({"providers": {"vllm": {"gpu_util": 1.5}}}, "gpu_util"),
     ({"appearance": {"glow_size": -1}}, "glow_size"),
     ({"appearance": {"glow_size": 49}}, "glow_size"),
-    ({"sessions": {"max_sessions": 0}}, "max_sessions"),
-    # 17 used to be out of range. The ceiling moved to 64 for the scrolling
-    # layout, which exists to hold more sessions than the 8-pane grid can show.
-    # There is still a ceiling -- it is a runaway-spawn backstop, not a display
-    # limit -- so the over-bound case is asserted at the NEW edge.
-    ({"sessions": {"max_sessions": 65}}, "max_sessions"),
+    # 0 is valid now (no limit, 2026-10-06); the bounds are 0..1024.
+    ({"sessions": {"max_sessions": -1}}, "max_sessions"),
+    ({"sessions": {"max_sessions": 1025}}, "max_sessions"),
     ({"data": {"retention_days": 0}}, "retention_days"),
     ({"data": {"retention_days": 3651}}, "retention_days"),
 ])
@@ -301,7 +298,7 @@ async def test_get_settings_endpoint(client, isolated_settings):
     body = resp.json()
     assert body["path"].endswith("settings.json")
     assert os.path.isabs(body["path"])
-    assert body["settings"]["sessions"]["max_sessions"] == 8
+    assert body["settings"]["sessions"]["max_sessions"] == 0
 
 
 @pytest.mark.asyncio
