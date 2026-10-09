@@ -206,7 +206,7 @@ describe("SessionDefaultsSettings — honesty", () => {
   it("offers the session cap, and says it is enforced but needs a restart", () => {
     renderPage(makeShell());
     const field = screen.getByTestId("field-sessions.max_sessions");
-    expect(field).toHaveValue(8);
+    expect(field).toHaveValue(0);
     // Not under the "not in force" umbrella -- this one IS read at startup.
     const note = screen.getByTestId("max-sessions-restart");
     expect(note.textContent).toMatch(/is enforced/i);
@@ -219,10 +219,10 @@ describe("SessionDefaultsSettings — honesty", () => {
     const shell = makeShell();
     renderPage(shell);
     const field = screen.getByTestId("field-sessions.max_sessions");
-    fireEvent.change(field, { target: { value: "900" } });
-    expect(shell.setField).toHaveBeenCalledWith("sessions.max_sessions", 64);
-    fireEvent.change(field, { target: { value: "0" } });
-    expect(shell.setField).toHaveBeenCalledWith("sessions.max_sessions", 1);
+    fireEvent.change(field, { target: { value: "2000" } });
+    expect(shell.setField).toHaveBeenCalledWith("sessions.max_sessions", 1024);
+    fireEvent.change(field, { target: { value: "-5" } });
+    expect(shell.setField).toHaveBeenCalledWith("sessions.max_sessions", 0);
   });
 
   it("does not offer fast mode as live for a non-Opus model", () => {

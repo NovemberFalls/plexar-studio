@@ -13,8 +13,6 @@
 
 import { X, LayoutGrid, Zap, GitBranch } from "lucide-react";
 
-const MAX_SESSIONS = 8;
-
 // Model-tint sequence used for the spend-by-model stacked bar + legend swatches.
 const MODEL_TINTS = [
   "var(--cc-working, var(--accent))",
@@ -521,15 +519,7 @@ export default function FleetView({
           />
           <SummaryCard
             label="Active"
-            value={
-              <>
-                {activeCount}
-                <span style={{ fontSize: 15, color: "var(--cc-muted, var(--text-muted))", fontWeight: 600 }}>
-                  {" "}
-                  / {MAX_SESSIONS}
-                </span>
-              </>
-            }
+            value={activeCount}
             valueColor="var(--cc-fg, var(--text-primary))"
             sub={activeBreakdown || undefined}
             subColor="var(--cc-working, var(--accent))"

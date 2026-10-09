@@ -500,20 +500,20 @@ export default function SessionDefaultsSettings({ get, setField, isDirty }) {
             note rather than sitting under the blanket "not in force" one. */}
         <FieldRow
           label="Maximum sessions"
-          hint="How many can run at once"
+          hint="How many can run at once (0 = no limit)"
         >
           <input
             type="number"
-            min={1}
-            max={64}
+            min={0}
+            max={1024}
             step={1}
-            value={get("sessions.max_sessions", 8)}
+            value={get("sessions.max_sessions", 0)}
             onChange={(e) => {
               const n = parseInt(e.target.value, 10);
               // Clamp here so the field cannot submit a value the server will
               // reject wholesale -- a 400 discards the ENTIRE patch, taking the
               // user's other edits on this page with it.
-              if (Number.isFinite(n)) setField("sessions.max_sessions", Math.min(64, Math.max(1, n)));
+              if (Number.isFinite(n)) setField("sessions.max_sessions", Math.min(1024, Math.max(0, n)));
             }}
             aria-label="Maximum concurrent sessions"
             data-testid="field-sessions.max_sessions"
@@ -533,8 +533,7 @@ export default function SessionDefaultsSettings({ get, setField, isDirty }) {
 
         <Callout token="var(--cc-dim)" icon={Info} testId="max-sessions-restart">
           The cap <strong>is enforced</strong>, but it is read once when Plexar Studio starts,
-          so a change here applies after you restart the app. The grid shows at most 8 panes;
-          the scrolling layout is what makes a higher cap useful.
+          so a change here applies after you restart the app. 0 means no limit. The grid shows 8 panes per page; the scrolling layout shows them all.
         </Callout>
 
         {/* The honesty note. Same pattern as ProvidersSettings' NotEnforcedNote,
