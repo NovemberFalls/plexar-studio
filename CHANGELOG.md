@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.54] - 2026-10-09
+
+### Changed
+- **No session limit.** Studio no longer stops you at 8 sessions, and an agent can spawn as many workers as it needs. You can still set a ceiling in Settings > Session defaults (0 means no limit).
+- **The grid pages.** The grid still shows 1-8 panes at a time; sessions beyond that go on further pages, with previous/next arrows in the status bar. The scrolling layout is unchanged and shows everything.
+- **Bring an orchestrator's workers with it.** Dropping a session that has workers onto a pane asks whether to open its workers too.
+
+### Fixed
+- Pane headers stay readable in narrow panes: less important details drop out as a pane narrows instead of overlapping the buttons.
+
 ## [2.1.53] - 2026-10-03
 
 ### Changed
