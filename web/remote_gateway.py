@@ -53,7 +53,9 @@ PROTOCOL_VERSION = 1
 # `branch` is likewise derived, via `RemoteBackend.git_branch`. `effort` IS a
 # field on the desktop's own record (`TerminalSession.effort`, already merged
 # live-vs-launch by `pty_manager.list_terminals()`), so it is copied straight
-# through like every other passthrough field.
+# through like every other passthrough field. `parent_id` is a straight
+# passthrough too (`_session_to_dict`): the orchestrator's terminal id for a
+# worker spawned via /api/agent, null for a top-level session.
 SESSION_FIELDS = (
     "id",
     "name",
@@ -67,6 +69,7 @@ SESSION_FIELDS = (
     "preview",
     "branch",
     "effort",
+    "parent_id",
 )
 
 # The ONLY per-row fields a phone gets from a folder listing. `entry_count`,

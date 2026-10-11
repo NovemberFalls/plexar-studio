@@ -389,12 +389,12 @@ def test_authenticate_websocket_mirrors_the_rules(rig):
 # -- sessions --------------------------------------------------------------
 
 
-def test_sessions_list_carries_only_the_twelve_fields(rig):
+def test_sessions_list_carries_only_the_thirteen_fields(rig):
     _backend, store, client = rig
     paired = pair(client, store)
     body = client.get("/remote/v1/sessions", headers=auth(paired["token"])).json()
     assert list(body["sessions"][0]) == list(remote_gateway.SESSION_FIELDS)
-    assert len(remote_gateway.SESSION_FIELDS) == 12
+    assert len(remote_gateway.SESSION_FIELDS) == 13
 
 
 def test_hello(rig):

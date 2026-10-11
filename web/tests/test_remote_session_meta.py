@@ -129,9 +129,22 @@ def test_session_view_effort_null_when_absent():
     assert view["effort"] is None
 
 
-def test_field_pin_is_twelve_and_ordered():
-    assert len(remote_gateway.SESSION_FIELDS) == 12
-    assert remote_gateway.SESSION_FIELDS[-2:] == ("branch", "effort")
+def test_field_pin_is_thirteen_and_ordered():
+    assert len(remote_gateway.SESSION_FIELDS) == 13
+    assert remote_gateway.SESSION_FIELDS[-3:] == ("branch", "effort", "parent_id")
+
+
+# -- parent_id -------------------------------------------------------------
+
+
+def test_session_view_parent_id_passthrough_for_worker_and_null_for_top_level():
+    backend = _minimal_backend()
+    worker = remote_gateway._session_view({"id": "w1", "parent_id": "p1"}, backend)
+    top = remote_gateway._session_view({"id": "p1", "parent_id": None}, backend)
+    absent = remote_gateway._session_view({"id": "p2"}, backend)
+    assert worker["parent_id"] == "p1"
+    assert top["parent_id"] is None
+    assert absent["parent_id"] is None
 
 
 # -- image tags ------------------------------------------------------------
