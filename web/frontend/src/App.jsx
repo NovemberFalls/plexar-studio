@@ -211,11 +211,30 @@ function lsSave(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
 }
 
+/** Identity of a saved location. Two spellings of one folder ("C:/x/" and
+ *  "C:\x") used to be two sidebar rows, each listing the same sessions.
+ *  Windows drive paths are case-insensitive, so those compare lowercased. */
+function locationKey(dir) {
+  const n = normalizeWorkdir(dir);
+  return /^[A-Za-z]:/.test(n) ? n.toLowerCase() : n;
+}
+
+/** Drop later duplicates by locationKey; the first entry (and its bypass flag) wins. */
+function dedupeLocations(locations) {
+  const seen = new Set();
+  return locations.filter((loc) => {
+    const key = locationKey(loc?.path);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function loadSavedLocations() {
   const raw = lsLoad(LOCATIONS_KEY);
-  return raw.map((item) =>
+  return dedupeLocations(raw.map((item) =>
     typeof item === "string" ? { path: item, bypassPermissions: false } : item
-  );
+  ));
 }
 
 function loadSavedSessions() {
@@ -718,11 +737,8 @@ export default function App() {
 
   const addLocations = useCallback((dirs) => {
     updateLocations((prev) => {
-      const byPath = new Map(prev.map((loc) => [loc.path, loc]));
-      dirs.forEach((d) => {
-        if (d && !byPath.has(d)) byPath.set(d, { path: d, bypassPermissions: false });
-      });
-      return [...byPath.values()];
+      const added = dirs.filter(Boolean).map((d) => ({ path: d, bypassPermissions: false }));
+      return dedupeLocations([...prev, ...added]);
     });
   }, [updateLocations]);
 

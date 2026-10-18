@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.56] - 2026-10-18
+
+### Fixed
+- **A folder saved twice no longer shows its sessions twice.** Two spellings of one folder (slash direction, trailing slash, or drive-path letter case) were two sidebar rows listing the same sessions. Adding a folder now recognises it, and existing duplicates are merged on load.
+
 ## [2.1.55] - 2026-10-11
 
 ### Changed
