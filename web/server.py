@@ -71,6 +71,7 @@ from pricing_store import pricing_store  # noqa: E402
 import spend_guard  # noqa: E402 -- reads settings_store/usage_tracker lazily; the sole spend-decision module
 import origin_guard  # noqa: E402 -- grouped with the other local-module imports above; the browser-origin guard wired as middleware below
 import temp_sweep  # noqa: E402 -- grouped with the other local-module imports above; startup sweep of stale scratch dirs
+import window_watchdog  # noqa: E402 -- replaces a hung desktop window; sessions untouched
 import context_window  # noqa: E402 -- pure resolver; fed the local /models payload below so local sessions get a real context ring
 
 START_TIME = _time.time()
@@ -217,9 +218,23 @@ async def lifespan(app: FastAPI):
     # cancelled cleanly on shutdown.
     app.state.pricing_refresh_task = asyncio.create_task(_pricing_refresh_loop())
 
+    # A deadlocked desktop window is ended and relaunched from here, the process
+    # that stays healthy. See window_watchdog's docstring for the 2026-10-26 hang.
+    if window_watchdog.enabled():
+        app.state.window_watchdog_task = asyncio.create_task(
+            window_watchdog.run(app_paths.data_path("logs", "dumps")))
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
     yield
+
+    window_task = getattr(app.state, "window_watchdog_task", None)
+    if window_task:
+        window_task.cancel()
+        try:
+            await window_task
+        except asyncio.CancelledError:
+            pass
 
     # ---- Shutdown ----
     # Cancel idle cleanup loop
