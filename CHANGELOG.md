@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.57] - 2026-10-28
+
+### Fixed
+- **A frozen window now recovers by itself, sessions intact.** When the desktop window stops responding for 30 seconds (white "Not Responding" haze while panes keep updating behind it), the local server saves a crash file, closes only the window and reopens it; every running session reattaches. At most three times an hour.
+
+### Added
+- Sessions started from Plexar Mobile appear on the desktop, tagged "phone". Up to 20 images per upload. The phone shows inline CLI images, the full slash-command list, and session origin.
+
 ## [2.1.56] - 2026-10-18
 
 ### Fixed
