@@ -142,3 +142,17 @@ describe("Sidebar: Claude Code's in-process agents (read-only)", () => {
     expect(screen.queryByTestId("session-with-workers")).toBeNull();
   });
 });
+
+describe("reconcileWorkers — phone-created sessions", () => {
+  it("adopts a live remote-origin terminal as a top-level fromPhone session", () => {
+    const out = reconcileWorkers([], [{ id: "r1", name: "Phone", alive: true, origin: "remote" }], () => 7);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: 7, terminalId: "r1", fromPhone: true });
+    expect(out[0].parentTerminalId).toBeUndefined();
+  });
+
+  it("drops a fromPhone session whose terminal is gone", () => {
+    const prev = [{ id: 7, name: "Phone", terminalId: "r1", fromPhone: true }];
+    expect(reconcileWorkers(prev, [], () => 8)).toEqual([]);
+  });
+});

@@ -1374,12 +1374,12 @@ def test_upload_saves_files_and_returns_absolute_paths(rig):
     assert backend.saved == [("a.png", 3), ("b.png", 3)]
 
 
-def test_upload_refuses_more_than_four_and_reports_per_file_errors(rig):
+def test_upload_refuses_more_than_twenty_and_reports_per_file_errors(rig):
     backend, client, headers = chat_rig(rig)
-    too_many = [("files", ("%d.png" % i, b"x", "image/png")) for i in range(5)]
+    too_many = [("files", ("%d.png" % i, b"x", "image/png")) for i in range(21)]
     resp = client.post("/remote/v1/sessions/t1/upload", headers=headers, files=too_many)
     assert resp.status_code == 400
-    assert resp.json() == {"error": "at most 4 files"}
+    assert resp.json() == {"error": "at most 20 files"}
 
     backend.save_error = "Rejected 'x.exe': unsupported file type '.exe'"
     resp = client.post(

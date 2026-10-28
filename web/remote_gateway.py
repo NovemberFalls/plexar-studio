@@ -1220,7 +1220,8 @@ _IMAGE_MEDIA_TYPES = {
 #: enough that a refusal is a bug report rather than a slow tab.
 FILES_MAX_BYTES = 10 * 1024 * 1024
 
-MAX_UPLOAD_FILES = 4
+#: Matches the phone composer. Claude's own apps take up to 20 per message.
+MAX_UPLOAD_FILES = 20
 
 MESSAGE_LIMIT_DEFAULT = 50
 MESSAGE_LIMIT_MAX = 200

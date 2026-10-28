@@ -245,9 +245,9 @@ function saveSessions(sessions) {
   const toSave = sessions
     .filter((s) => s.status !== "history")
     .map(({ name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId }) => ({
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone }) => ({
       name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId,
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone,
     }));
   lsSave(SESSIONS_KEY, toSave);
 }
@@ -1327,7 +1327,7 @@ export default function App() {
               return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId, codex_session_id: newCodexSessionId, name: newName, backendName: newBackendName };
             });
 
-            // Adopt agent-spawned workers (and drop ones whose terminal is gone).
+            // Adopt agent-spawned workers and phone-created sessions (and drop ones whose terminal is gone).
             const result = reconcileWorkers(changed ? updated : prev, data.terminals, () => nextLocalId++);
 
             for (const s of result) {

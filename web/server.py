@@ -989,7 +989,8 @@ async def browse_directories(path: str = ""):
                         if p.is_dir()
                         and p.name.lower().startswith(prefix)
                         and not p.name.startswith(".")
-                    ]
+                    ],
+                    key=lambda d: os.path.basename(d).casefold(),
                 )[:20]
                 return JSONResponse({"dirs": dirs, "parent": str(parent), "entries": _browse_entries(dirs)})
             except PermissionError:
@@ -1002,8 +1003,11 @@ async def browse_directories(path: str = ""):
                 str(p)
                 for p in target.iterdir()
                 if p.is_dir() and not p.name.startswith(".")
-            ]
-        )[:50]
+            ],
+            # Case-insensitive, and no cap: a code folder easily holds more
+            # than 50 repos, and a truncated listing hides one with no hint.
+            key=lambda d: os.path.basename(d).casefold(),
+        )
         return JSONResponse({"dirs": dirs, "parent": str(target), "entries": _browse_entries(dirs)})
     except PermissionError:
         return JSONResponse({"dirs": [], "parent": str(target), "entries": []})
@@ -1320,6 +1324,28 @@ async def _create_terminal_from_body(body: dict, parent_id: str | None = None) -
         ) from e
 
 
+# Terminal ids spawned through Studio Remote (the phone). The desktop UI only
+# renders sessions it POSTed itself or adopts from the /api/terminals poll, so a
+# phone-created session needs a marker the poll can see: `origin: "remote"`.
+# Kept here rather than on TerminalSession so the spawn path stays the one
+# shared `_create_terminal_from_body`; ids of dead sessions are harmless.
+_remote_origin_ids: set[str] = set()
+
+
+async def _create_remote_terminal(body: dict) -> dict:
+    """Studio Remote's create: the shared spawn path, then tag the id as phone-made."""
+    result = await _create_terminal_from_body(body)
+    _remote_origin_ids.add(result["id"])
+    return {**result, "origin": "remote"}
+
+
+def _tag_terminal_origins(terminals: list[dict]) -> list[dict]:
+    for t in terminals:
+        if t.get("id") in _remote_origin_ids:
+            t["origin"] = "remote"
+    return terminals
+
+
 @app.post("/api/terminals")
 async def create_terminal(request: Request):
     """Create a new interactive Claude CLI terminal session."""
@@ -1347,7 +1373,8 @@ async def list_terminals():
     so two concurrent callers converge on the same value rather than
     corrupting anything.
     """
-    return JSONResponse({"terminals": await asyncio.to_thread(pty_manager.list_terminals)})
+    terminals = await asyncio.to_thread(pty_manager.list_terminals)
+    return JSONResponse({"terminals": _tag_terminal_origins(terminals)})
 
 
 @app.delete("/api/terminals/{terminal_id}")
@@ -7669,7 +7696,7 @@ remote_gateway.configure(
         app_version=_app_version,
         list_sessions=pty_manager.list_terminals,
         get_session=pty_manager.get_terminal,
-        create_session=_create_terminal_from_body,
+        create_session=_create_remote_terminal,
         submit=_paste_and_submit,
         write_raw=pty_manager.write_pty_async,
         interrupt=lambda terminal_id: pty_manager.write_pty_async(terminal_id, "\x1b"),

@@ -215,6 +215,9 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
         >
           {session.name}
         </span>
+        {session.fromPhone && (
+          <span className="text-[9px] flex-shrink-0" style={{ color: "var(--cc-muted)" }} title="Started from the phone">phone</span>
+        )}
         {session.harness === "shell" && (
           <span className="text-[9px] flex-shrink-0" style={{ color: "var(--cc-muted)" }} title="Shell worker">sh</span>
         )}

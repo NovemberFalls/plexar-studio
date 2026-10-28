@@ -9,6 +9,9 @@
  *
  * A worker whose terminal is gone from the backend is dropped, because nothing local
  * can resume it: its parent spawned it, and its parent decides whether it comes back.
+ *
+ * Sessions created from the phone (Studio Remote) are adopted the same way: the poll
+ * tags them `origin: "remote"`, and they land as top-level rows marked `fromPhone`.
  */
 
 /** @returns the same array when nothing changed, so React can bail out. */
@@ -18,7 +21,7 @@ export function reconcileWorkers(prev, terminals, makeId) {
 
   const kept = [];
   for (const s of prev) {
-    if (s.parentTerminalId && s.terminalId && !byTid.has(s.terminalId)) {
+    if ((s.parentTerminalId || s.fromPhone) && s.terminalId && !byTid.has(s.terminalId)) {
       changed = true;
       continue;
     }
@@ -34,13 +37,17 @@ export function reconcileWorkers(prev, terminals, makeId) {
 
   const known = new Set(kept.map((s) => s.terminalId).filter(Boolean));
   for (const t of terminals || []) {
-    if (!t.alive || !t.parent_id || known.has(t.id) || !known.has(t.parent_id)) continue;
+    if (!t.alive || known.has(t.id)) continue;
+    const isWorker = !!t.parent_id && known.has(t.parent_id);
+    const fromPhone = t.origin === "remote";
+    if (!isWorker && !fromPhone) continue;
     kept.push({
       id: makeId(),
       name: t.name,
       backendName: t.name,
       terminalId: t.id,
-      parentTerminalId: t.parent_id,
+      ...(isWorker ? { parentTerminalId: t.parent_id } : {}),
+      ...(fromPhone ? { fromPhone: true } : {}),
       model: t.model,
       harness: t.harness || "claude-code",
       status: "running",
