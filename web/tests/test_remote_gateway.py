@@ -389,12 +389,12 @@ def test_authenticate_websocket_mirrors_the_rules(rig):
 # -- sessions --------------------------------------------------------------
 
 
-def test_sessions_list_carries_only_the_thirteen_fields(rig):
+def test_sessions_list_carries_only_the_fourteen_fields(rig):
     _backend, store, client = rig
     paired = pair(client, store)
     body = client.get("/remote/v1/sessions", headers=auth(paired["token"])).json()
     assert list(body["sessions"][0]) == list(remote_gateway.SESSION_FIELDS)
-    assert len(remote_gateway.SESSION_FIELDS) == 13
+    assert len(remote_gateway.SESSION_FIELDS) == 14
 
 
 def test_hello(rig):
@@ -1258,7 +1258,6 @@ def test_user_image_paths_become_image_blocks_including_quoted(rig, tmp_path):
         claude_entry(
             "u2", "user", [{"type": "text", "text": str(tmp_path / "elsewhere.png")}]
         ),
-        # An assistant message naming an in-root image is still text only.
         claude_entry("a1", "assistant", [{"type": "text", "text": upload_png}]),
     ]
     _backend, client, headers = chat_rig(rig, entries=entries, workdir=workdir)
@@ -1266,7 +1265,45 @@ def test_user_image_paths_become_image_blocks_including_quoted(rig, tmp_path):
     images = [b for b in messages[0]["blocks"] if b["type"] == "image"]
     assert [b["path"] for b in images] == [upload_png, str(spaced)]
     assert all(b["type"] != "image" for b in messages[1]["blocks"])
-    assert all(b["type"] != "image" for b in messages[2]["blocks"])
+    assert [b["path"] for b in messages[2]["blocks"] if b["type"] == "image"] == [upload_png]
+
+
+def test_assistant_and_tool_image_references_become_image_blocks(rig, tmp_path):
+    shot = tmp_path / "tmpshots" / "s1.png"
+    shot.parent.mkdir()
+    shot.write_bytes(b"x")
+    wrote = tmp_path / "tmpshots" / "w.jpg"
+    wrote.write_bytes(b"x")
+    gone = tmp_path / "tmpshots" / "gone.png"
+    entries = [
+        claude_entry(
+            "a1",
+            "assistant",
+            [
+                {"type": "text", "text": "see ![shot](%s) and %s" % (shot, gone)},
+                {"type": "tool_use", "tool_name": "Write", "input": {"file_path": str(wrote)}},
+            ],
+        ),
+    ]
+    _backend, client, headers = chat_rig(rig, entries=entries)
+    blocks = client.get("/remote/v1/sessions/t1/messages", headers=headers).json()["messages"][0]["blocks"]
+    assert [b["path"] for b in blocks if b["type"] == "image"] == [str(shot), str(wrote)]
+    # The markdown image syntax is dropped from the prose (the thumbnail replaces it).
+    assert "![" not in blocks[0]["text"]
+
+
+def test_files_serves_an_image_named_in_the_transcript_only(rig, tmp_path):
+    shot = tmp_path / "tmpshots" / "s1.png"
+    shot.parent.mkdir()
+    shot.write_bytes(b"png")
+    other = tmp_path / "tmpshots" / "other.png"
+    other.write_bytes(b"png")
+    entries = [claude_entry("a1", "assistant", [{"type": "text", "text": "made %s" % shot}])]
+    _backend, client, headers = chat_rig(rig, entries=entries)
+    ok = client.get("/remote/v1/files", params={"path": str(shot)}, headers=headers)
+    assert ok.status_code == 200 and ok.content == b"png"
+    refused = client.get("/remote/v1/files", params={"path": str(other)}, headers=headers)
+    assert refused.status_code == 404
 
 
 def test_messages_paging_after_before_and_unknown_cursor(rig):

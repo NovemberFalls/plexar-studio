@@ -946,6 +946,9 @@ def _browse_entry(dir_path: str) -> dict:
     return entry
 
 
+_BROWSE_MAX_ENTRIES = 2000
+
+
 def _browse_entries(dirs: list[str]) -> list[dict]:
     """`entries` list parallel to (same order as) *dirs*."""
     return [_browse_entry(d) for d in dirs]
@@ -1004,11 +1007,14 @@ async def browse_directories(path: str = ""):
                 for p in target.iterdir()
                 if p.is_dir() and not p.name.startswith(".")
             ],
-            # Case-insensitive, and no cap: a code folder easily holds more
-            # than 50 repos, and a truncated listing hides one with no hint.
+            # Case-insensitive. The old cap of 50 hid repos in a busy code
+            # folder with no hint; the ceiling is now high, and SAID when hit.
             key=lambda d: os.path.basename(d).casefold(),
         )
-        return JSONResponse({"dirs": dirs, "parent": str(target), "entries": _browse_entries(dirs)})
+        truncated = len(dirs) > _BROWSE_MAX_ENTRIES
+        dirs = dirs[:_BROWSE_MAX_ENTRIES]
+        return JSONResponse({"dirs": dirs, "parent": str(target), "entries": _browse_entries(dirs),
+                             "truncated": truncated})
     except PermissionError:
         return JSONResponse({"dirs": [], "parent": str(target), "entries": []})
 
@@ -7648,6 +7654,9 @@ async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
 
 app.include_router(remote_gateway.router)
 app.include_router(remote_gateway.admin_router)
+import slash_catalog  # noqa: E402 -- phone slash-command catalogue, wired beside the gateway
+
+app.include_router(slash_catalog.router)
 
 # The Studio-managed Cloudflare connector. Its routes live under /api/remote/
 # and are therefore ordinary origin-guarded /api routes — no exemption is added
@@ -7694,7 +7703,7 @@ remote_gateway.configure(
     remote_gateway.RemoteBackend(
         settings=settings_store.read_settings,
         app_version=_app_version,
-        list_sessions=pty_manager.list_terminals,
+        list_sessions=lambda: _tag_terminal_origins(pty_manager.list_terminals()),
         get_session=pty_manager.get_terminal,
         create_session=_create_remote_terminal,
         submit=_paste_and_submit,

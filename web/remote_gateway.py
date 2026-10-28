@@ -55,7 +55,9 @@ PROTOCOL_VERSION = 1
 # live-vs-launch by `pty_manager.list_terminals()`), so it is copied straight
 # through like every other passthrough field. `parent_id` is a straight
 # passthrough too (`_session_to_dict`): the orchestrator's terminal id for a
-# worker spawned via /api/agent, null for a top-level session.
+# worker spawned via /api/agent, null for a top-level session. `origin` is
+# "remote" for a session created from the phone (server._remote_origin_ids tags
+# it on the list) and "desktop" for everything else.
 SESSION_FIELDS = (
     "id",
     "name",
@@ -70,6 +72,7 @@ SESSION_FIELDS = (
     "branch",
     "effort",
     "parent_id",
+    "origin",
 )
 
 # The ONLY per-row fields a phone gets from a folder listing. `entry_count`,
@@ -407,6 +410,7 @@ def _session_view(entry: dict, backend: "RemoteBackend | None" = None) -> dict:
     enriched["preview"] = _session_preview(entry)
     enriched["branch"] = _session_branch(backend, entry) if backend is not None else None
     enriched["effort"] = _session_effort(backend, entry)
+    enriched["origin"] = "remote" if entry.get("origin") == "remote" else "desktop"
     return {key: enriched.get(key) for key in SESSION_FIELDS}
 
 
@@ -1368,6 +1372,69 @@ def _image_paths_in(text: str, roots: list[str]) -> list[str]:
     return found
 
 
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)")
+
+
+def _entry_strings(entry: dict) -> list[str]:
+    """Every string in a transcript entry a path could be written in: text
+    blocks, tool_use input values (a Read/Write file_path, a Bash command) and
+    tool_result content."""
+    out: list[str] = []
+    content = entry.get("content") if isinstance(entry, dict) else None
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text" and isinstance(block.get("text"), str):
+            out.append(block["text"])
+        elif kind == "tool_use" and isinstance(block.get("input"), dict):
+            out.extend(v for v in block["input"].values() if isinstance(v, str))
+        elif kind == "tool_result" and isinstance(block.get("content"), str):
+            out.append(block["content"])
+    return out
+
+
+def _referenced_image_paths(strings: list[str]) -> list[str]:
+    """Absolute image paths written verbatim in *strings*, in order, unique."""
+    found: list[str] = []
+    for text in strings:
+        for match in _IMAGE_PATH_RE.finditer(text):
+            raw = match.group(1) or match.group(2)
+            if raw and raw not in found:
+                found.append(raw)
+    return found
+
+
+def _transcript_references(backend: RemoteBackend, raw: str) -> bool:
+    """True when *raw* appears verbatim as an image path in a live Claude
+    session's transcript. This is what lets /files serve a screenshot the CLI
+    wrote to a temp dir: the path was named in the conversation the owner is
+    reading, so showing it is not a new disclosure."""
+    if backend.messages_claude is None:
+        return False
+    try:
+        sessions = backend.list_sessions() or []
+    except Exception:  # noqa: BLE001
+        return False
+    for entry in sessions:
+        sid = _session_field(entry, "id")
+        try:
+            session = backend.get_session(sid) if sid else None
+            if session is None:
+                continue
+            if str(_session_field(session, "harness", "claude-code")) != "claude-code":
+                continue
+            entries = backend.messages_claude(session) or []
+            if inspect.isawaitable(entries):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        for e in entries:
+            if raw in _referenced_image_paths(_entry_strings(e)):
+                return True
+    return False
+
+
 def _claude_message(entry: dict, roots: list[str]) -> dict | None:
     """One jsonl_watcher dict -> the unified shape, or None when it carries
     nothing a chat view can draw."""
@@ -1419,6 +1486,23 @@ def _claude_message(entry: dict, roots: list[str]) -> dict | None:
                 continue
             for path in _image_paths_in(block["text"], roots):
                 blocks.append({"type": "image", "path": path})
+    if role == "assistant":
+        # The CLI naming an image (prose, markdown, a Read/Write tool input)
+        # is shown inline. Only files that exist: a mention of a path that is
+        # gone must not become a thumbnail that 404s.
+        shown: list[str] = []
+        for path in _referenced_image_paths(_entry_strings(entry)):
+            resolved = _real(path)
+            if resolved and os.path.isfile(resolved):
+                shown.append(path)
+                blocks.append({"type": "image", "path": path})
+        if shown:
+            for block in blocks:
+                if block["type"] == "text":
+                    block["text"] = _MD_IMAGE_RE.sub(
+                        lambda m: "" if m.group(1) in shown else m.group(0), block["text"]
+                    )
+            blocks = [b for b in blocks if b["type"] != "text" or b["text"].strip()]
     if not blocks:
         return None
     timestamp = entry.get("timestamp")
@@ -1660,8 +1744,12 @@ async def get_file(path: str = "", device: Device = Depends(require_device)):
     if resolved.startswith("\\\\"):
         return _refuse_file(raw, "resolved to a UNC path")
     roots = _serve_roots(backend)
-    if not any(_within(resolved, root) for root in roots):
-        return _refuse_file(raw, "outside every served root")
+    # Reading every live transcript is disk + JSON work: off the loop, or one
+    # thumbnail fetch stalls every pane (see CLAUDE.md, loop starvation).
+    if not any(_within(resolved, root) for root in roots) and not await asyncio.to_thread(
+        _transcript_references, backend, raw
+    ):
+        return _refuse_file(raw, "outside every served root and not named in a transcript")
     if not os.path.isfile(resolved):
         return _refuse_file(raw, "not a file")
     try:

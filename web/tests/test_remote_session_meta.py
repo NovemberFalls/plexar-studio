@@ -129,9 +129,15 @@ def test_session_view_effort_null_when_absent():
     assert view["effort"] is None
 
 
-def test_field_pin_is_thirteen_and_ordered():
-    assert len(remote_gateway.SESSION_FIELDS) == 13
-    assert remote_gateway.SESSION_FIELDS[-3:] == ("branch", "effort", "parent_id")
+def test_field_pin_is_fourteen_and_ordered():
+    assert len(remote_gateway.SESSION_FIELDS) == 14
+    assert remote_gateway.SESSION_FIELDS[-4:] == ("branch", "effort", "parent_id", "origin")
+
+
+def test_session_view_origin_remote_or_desktop():
+    backend = _minimal_backend()
+    assert remote_gateway._session_view({"id": "a", "origin": "remote"}, backend)["origin"] == "remote"
+    assert remote_gateway._session_view({"id": "b"}, backend)["origin"] == "desktop"
 
 
 # -- parent_id -------------------------------------------------------------
