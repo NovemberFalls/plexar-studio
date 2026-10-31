@@ -120,7 +120,17 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Voice's ML stack is NOT bundled, and never was: the 2.1.57 sidecar (52 MB) has
+    # no faster_whisper, ctranslate2, onnxruntime or av. voice_service imports
+    # faster_whisper lazily, so once it is merely INSTALLED on the build machine the
+    # analysis follows it (ctranslate2 -> transformers -> datasets / diffusers / gradio)
+    # down to CUDA torch: measured 2026-10-31, a 2.89 GB sidecar NSIS could not mmap.
+    # Excluded here so the bundle depends on the code, not on what this machine has.
+    excludes=['faster_whisper', 'ctranslate2', 'onnxruntime', 'av', 'tokenizers',
+              'huggingface_hub', 'torch', 'torchvision', 'torchaudio', 'transformers',
+              'datasets', 'diffusers', 'gradio', 'polars', 'pyarrow', 'duckdb', 'spacy',
+              'thinc', 'blis', 'scipy', 'matplotlib', 'pandas', 'sympy', 'llvmlite',
+              'numba', 'tensorflow', 'jax', 'triton', 'botocore', 'boto3'],
     noarchive=False,
 )
 
