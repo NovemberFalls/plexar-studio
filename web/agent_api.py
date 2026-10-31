@@ -21,7 +21,16 @@ initiative, so it must answer "which pane is asking". The token answers that and
 stops a browser page (which cannot learn it) and a sibling pane (which holds a
 different one). Every mutating or reading route is scoped to the caller's own
 children: a worker cannot be prompted, read or closed by a session that did not spawn
-it. ``/peers`` lists the user's other sessions read-only, and nothing more.
+it. ``/peers`` lists every other live session (another session's workers too)
+read-only. Control of a session the caller did not spawn comes only through
+``/adopt``, and only once the USER approves it in the desktop (see "Approvals").
+
+Standing-agent support (2026-10-31): ``/clear`` resets a worker's conversation in
+place and confirms it took; ``/self/refresh`` does the same to the caller after
+approval; ``/events`` is a long-poll of worker idle/asking/ended transitions, built
+for ``studio_cli.py events --follow`` under Claude Code's Monitor tool. A clear keeps
+the pane, id, token, ``--name`` (the SendMessage name) and every worker, so an
+orchestrator's roster survives its own refresh.
 
 Deliberate limits, all refusals rather than silent clamps:
   * depth 1 -- a worker cannot spawn workers;
@@ -35,10 +44,12 @@ Deliberate limits, all refusals rather than silent clamps:
 from __future__ import annotations
 
 import asyncio
+import collections
 import hmac
 import logging
 import os
 import re
+import secrets
 import subprocess
 import time
 from typing import Any, Awaitable, Callable, Optional
@@ -151,7 +162,8 @@ def _summary(s) -> dict:
 
 
 def _next_child_name(parent) -> str:
-    taken = {s.name for s in _deps["pty"].sessions.values() if s.parent_id == parent.id}
+    taken = {s.name for s in _deps["pty"].sessions.values()
+             if s.parent_id == parent.id or s.alive}
     n = 1
     while f"{parent.name}.{n}" in taken:
         n += 1
@@ -213,18 +225,24 @@ async def list_children(request: Request):
 
 @router.get("/api/agent/peers")
 async def peers(request: Request):
-    """The user's other top-level sessions, READ-ONLY (name, harness, state, cwd). An
-    agent can see what is open; it can never prompt, read or close a session it did not
-    spawn -- those stay the user's."""
+    """Every other live Studio session, READ-ONLY -- including another session's workers.
+    Hiding workers made a skill-spawned roster (/fw-agents spawns its agents as workers
+    of whichever session ran it) invisible to every other agent (2026-10-31). Seeing a
+    session never grants control of it: that takes /adopt, which the user approves."""
     caller = _caller(request)
     if caller is None:
         return _err(401, _UNAUTH)
+    sessions = _deps["pty"].sessions
     out = []
-    for s in list(_deps["pty"].sessions.values()):
-        if s.id == caller.id or s.parent_id is not None or not s.alive:
+    for s in list(sessions.values()):
+        if s.id == caller.id or s.parent_id == caller.id or not s.alive:
             continue
         d = _summary(s)
-        out.append({k: d[k] for k in ("id", "name", "harness", "state", "working_dir")})
+        parent = sessions.get(s.parent_id) if s.parent_id else None
+        out.append({**{k: d[k] for k in ("id", "name", "harness", "state", "working_dir")},
+                    "parent_id": s.parent_id,
+                    "parent_name": parent.name if parent else None,
+                    "orphaned": bool(s.parent_id) and not (parent and parent.alive)})
     return JSONResponse({"peers": out})
 
 
@@ -245,6 +263,15 @@ async def spawn(request: Request):
     name = name.strip() if name else _next_child_name(caller)
     if any(s.name == name for s in _children(caller.id)):
         return _err(409, f"this session already has a live worker named {name!r}")
+    # A name is an address (Claude Code's SendMessage name is the --name Studio passes),
+    # so two live sessions sharing one makes a message's destination a guess.
+    twin = next((s for s in list(_deps["pty"].sessions.values())
+                 if s.alive and s.name == name and s.id != caller.id), None)
+    if twin is not None:
+        return JSONResponse({"error": f"another live session is already named {name!r}; "
+                                      "adopt it instead of spawning a twin",
+                             "live_elsewhere": {"id": twin.id, "parent_id": twin.parent_id}},
+                            status_code=409)
 
     harness = body.get("harness") or caller.harness
     harness = _HARNESS_ALIASES.get(harness, harness)
@@ -484,3 +511,405 @@ async def close_child(ref: str, request: Request):
         return refusal
     _deps["pty"].kill_terminal(child.id)
     return JSONResponse({"ok": True, "closed": child.id})
+
+
+# ── Clear: reset a worker's conversation, confirmed ──────────────────────────
+#
+# The pane, its terminal id, its token, its name and its workers all survive a clear;
+# only the CLI's conversation resets. That is what lets an orchestrator refresh a
+# standing agent (or itself) without its SendMessage name or its roster changing.
+
+_CLEAR_COMMANDS = {"claude-code": "/clear", "codex": "/new"}
+_CLEAR_CONFIRM_S = 15.0
+# Codex only, and UNVERIFIED against a live Codex: a TUI that resets its conversation is
+# expected to repaint from scratch (erase-display or a full reset). Claude Code does NOT
+# (measured 2026-10-31), which is why it is confirmed by its transcript instead.
+_CLEAR_SCREEN_RE = re.compile(r"\x1b\[[23]J|\x1bc")
+_CLEAR_RECORD = "<command-name>/clear</command-name>"
+
+
+def _transcript_dir(s) -> Optional[str]:
+    """~/.claude/projects/<project-id>, derived exactly as pty_manager._get_jsonl_path."""
+    if not s.working_dir:
+        return None
+    project_id = s.working_dir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+    return os.path.join(os.path.expanduser("~"), ".claude", "projects", project_id)
+
+
+def _transcripts(d: Optional[str]) -> set[str]:
+    try:
+        return {f for f in os.listdir(d) if f.endswith(".jsonl")} if d else set()
+    except OSError:
+        return set()
+
+
+def _cleared_transcript(s, d: Optional[str], before: set[str]) -> Optional[str]:
+    """A transcript that appeared after the clear and opens with the /clear command
+    record: Claude Code's /clear starts a NEW conversation file (measured 2026-10-31:
+    the first user records are the local-command caveat and `<command-name>/clear`).
+    Files other live sessions hold are never claimed (the bug #15 family)."""
+    held = {f"{o.claude_session_id}.jsonl" for o in list(_deps["pty"].sessions.values())
+            if o.id != s.id and getattr(o, "claude_session_id", None)}
+    for f in _transcripts(d) - before - held:
+        try:
+            with open(os.path.join(d, f), encoding="utf-8", errors="replace") as fh:
+                head = fh.read(16_384)
+        except OSError:
+            continue
+        if _CLEAR_RECORD in head:
+            return f[:-len(".jsonl")]
+    return None
+
+
+async def _clear_session(s, then_prompt: Optional[str] = None) -> dict:
+    """Submit the harness's reset command, CONFIRM it took, then optionally prompt.
+
+    Claude Code is confirmed by the new transcript /clear opens, and the session is
+    re-pointed at it, so usage, `read`'s latest_assistant and the sidebar follow the
+    new conversation instead of reporting the old one. Codex is confirmed by a
+    full-screen repaint. Unconfirmed is reported, never assumed: a clear swallowed by
+    a composer leaves the old context in place, and an orchestrator that believed
+    otherwise would brief an agent that still remembers the last sprint."""
+    command = _CLEAR_COMMANDS[s.harness]
+    if not await _deps["idle"](s.id, timeout=30.0):
+        return {"ok": False, "error": "session did not become idle within 30s"}
+    mark = s.history.sequence
+    tdir = _transcript_dir(s) if s.harness == "claude-code" else None
+    before = await asyncio.to_thread(_transcripts, tdir)
+    if not await _deps["paste"](s.id, command):
+        return {"ok": False, "error": f"{command} write failed"}
+    confirmed = False
+    deadline = time.monotonic() + _CLEAR_CONFIRM_S
+    while True:
+        if s.harness == "claude-code":
+            new_id = await asyncio.to_thread(_cleared_transcript, s, tdir, before)
+            if new_id:
+                logger.info("Session %s cleared: conversation %s -> %s",
+                            s.id, getattr(s, "claude_session_id", None), new_id)
+                s.claude_session_id = new_id
+                confirmed = True
+                break
+        else:
+            raw = "".join(d for seq, d, _ in list(s.history.chunks) if seq > mark)
+            if _CLEAR_SCREEN_RE.search(raw):
+                confirmed = True
+                break
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(_POLL_S)
+    prompted = False
+    if then_prompt:
+        if not await _deps["idle"](s.id, timeout=30.0):
+            return {"ok": False, "confirmed": confirmed,
+                    "error": "cleared, but the session did not become idle for the prompt"}
+        prompted = await _deps["paste"](s.id, then_prompt)
+        if not prompted:
+            return {"ok": False, "confirmed": confirmed, "error": "prompt write failed"}
+    return {"ok": True, "confirmed": confirmed, "command": command, "prompted": prompted}
+
+
+def _check_clearable(s) -> Optional[str]:
+    if s.harness not in _CLEAR_COMMANDS:
+        return f"clear is not supported for a {s.harness} session"
+    if _state(s) == "waiting":
+        return "session is blocked on a question or approval; read it and ask the user"
+    return None
+
+
+def _prompt_arg(body: dict, key: str) -> tuple[Optional[str], Optional[JSONResponse]]:
+    v = body.get(key)
+    if v is None:
+        return None, None
+    if not isinstance(v, str) or not v.strip() or len(v.encode()) > _MAX_PROMPT_BYTES:
+        return None, _err(400, f"{key} must be a non-empty string under 100 KB")
+    return v, None
+
+
+@router.post("/api/agent/{ref}/clear")
+async def clear_child(ref: str, request: Request):
+    """Reset a worker's conversation (/clear, or /new under Codex), confirm it took, then
+    optionally submit `then_prompt` (its boot line). Same pane, id, name and token."""
+    _, child, refusal = await _authed_child(request, ref)
+    if refusal:
+        return refusal
+    why = _check_clearable(child)
+    if why:
+        return _err(409, why)
+    then_prompt, bad = _prompt_arg(await _json_body(request), "then_prompt")
+    if bad:
+        return bad
+    result = await _clear_session(child, then_prompt)
+    logger.info("Worker %s cleared (confirmed=%s)", child.id, result.get("confirmed"))
+    return JSONResponse({**result, "worker": child.id}, status_code=200 if result["ok"] else 502)
+
+
+# ── Approvals: what an agent may do only once the human says so ──────────────
+#
+# Two acts are gated: ADOPTING a session the agent did not spawn (it gains prompt,
+# keys, clear and close over it) and SELF-REFRESH (the agent wipes its own context).
+# The agent files a request; the desktop shows it (the pending list rides the
+# /api/terminals poll, so there is no new poller) and the user answers in an in-app
+# dialog through the ordinary origin-guarded /api/agent-approvals routes.
+#
+# HONEST LIMIT: those routes are loopback and unauthenticated like Studio's others, so
+# an agent determined to approve its own request could curl them. The gate stops an
+# agent acting on its own initiative through this API; it is not a sandbox against a
+# hostile process on the machine, which nothing on loopback is.
+
+_APPROVAL_TTL_S = 900.0
+_approvals: dict[str, dict] = {}
+
+
+def _expire_approvals() -> None:
+    now = time.time()
+    for a in _approvals.values():
+        if a["status"] == "pending" and now - a["created_at"] > _APPROVAL_TTL_S:
+            a["status"], a["detail"] = "expired", "no answer within 15 minutes"
+    # Finished records stay an hour so a waiting agent can still read its verdict.
+    for aid in [k for k, a in _approvals.items()
+                if a["status"] != "pending" and now - a["created_at"] > 3600]:
+        del _approvals[aid]
+
+
+def _public_approval(a: dict) -> dict:
+    return {k: a[k] for k in ("id", "kind", "caller_id", "caller_name", "target_id",
+                              "target_name", "prompt", "status", "detail", "created_at")}
+
+
+def pending_approvals() -> list[dict]:
+    """For the /api/terminals poll: what the user still has to answer."""
+    _expire_approvals()
+    return [_public_approval(a) for a in _approvals.values() if a["status"] == "pending"]
+
+
+def _file_approval(kind: str, caller, target, prompt: Optional[str] = None) -> dict:
+    _expire_approvals()
+    for a in _approvals.values():
+        if (a["status"] == "pending" and a["kind"] == kind and a["caller_id"] == caller.id
+                and a["target_id"] == target.id):
+            a["prompt"] = prompt  # a re-request replaces the boot line, not the queue slot
+            return a
+    a = {"id": secrets.token_hex(6), "kind": kind, "caller_id": caller.id,
+         "caller_name": caller.name, "target_id": target.id, "target_name": target.name,
+         "prompt": prompt, "status": "pending", "detail": None, "created_at": time.time()}
+    _approvals[a["id"]] = a
+    logger.info("Session %s requested %s of %s (approval %s)", caller.id, kind, target.id, a["id"])
+    return a
+
+
+def _adopt_refusal(caller, target) -> Optional[tuple[int, str]]:
+    """Checked when the request is filed AND again when it is approved: the world may
+    have moved in between (the target spawned workers, a session closed)."""
+    if not (caller.alive and target.alive and target.id in _deps["pty"].sessions):
+        return 404, "session is gone"
+    if caller.parent_id is not None:
+        return 403, "a worker cannot adopt workers (depth is limited to 1)"
+    if target.id == caller.id:
+        return 400, "a session cannot adopt itself"
+    if _children(target.id):
+        return 409, (f"{target.name!r} has live workers of its own; depth is limited to 1, "
+                     "so it cannot become a worker")
+    if target.bypass_permissions and not caller.bypass_permissions:
+        return 403, (f"{target.name!r} runs with bypassed permissions and this session does "
+                     "not; adopting it would escalate")
+    return None
+
+
+def _resolve_peer(caller, ref: str):
+    """Any live session but the caller, by id or exact unique name -> (session, None)
+    or (None, (status, why))."""
+    sessions = _deps["pty"].sessions
+    if ref in sessions and sessions[ref].alive and ref != caller.id:
+        return sessions[ref], None
+    named = [s for s in list(sessions.values()) if s.alive and s.name == ref and s.id != caller.id]
+    if len(named) > 1:
+        return None, (409, f"{len(named)} live sessions are named {ref!r}; use an id from peers")
+    if not named:
+        return None, (404, "no such live session")
+    return named[0], None
+
+
+async def _run_self_refresh(a: dict) -> None:
+    """After approval: wait for the requester's own turn to end (it is still running the
+    tool call that filed the request), then clear it and submit its boot line."""
+    s = _deps["pty"].sessions.get(a["caller_id"])
+    try:
+        if s is None or not s.alive:
+            a["status"], a["detail"] = "failed", "session is gone"
+            return
+        a["status"] = "running"
+        if not await _deps["idle"](s.id, timeout=1800.0):
+            a["status"], a["detail"] = "failed", "session never became idle (30 min)"
+            return
+        result = await _clear_session(s, a["prompt"])
+        a["status"] = "done" if result["ok"] else "failed"
+        a["detail"] = result.get("error") or ("confirmed" if result.get("confirmed")
+                                              else "clear submitted but NOT confirmed")
+    except Exception:
+        logger.warning("Self-refresh %s failed", a["id"], exc_info=True)
+        a["status"], a["detail"] = "failed", "internal error; see cockpit.log"
+
+
+@router.post("/api/agent/adopt")
+async def adopt(request: Request):
+    """Ask the user to make a live session (top-level, or another session's worker) one
+    of the caller's workers. 202 + a pending approval; poll /api/agent/approvals/{id}."""
+    caller = _caller(request)
+    if caller is None:
+        return _err(401, _UNAUTH)
+    ref = (await _json_body(request)).get("peer")
+    if not isinstance(ref, str) or not ref.strip():
+        return _err(400, "peer must be a session id or name")
+    ref = ref.strip()
+    mine = _resolve_child(caller, ref)
+    if mine is not None:
+        return JSONResponse({"already": True, "worker": _summary(mine)})
+    target, miss = _resolve_peer(caller, ref)
+    if miss:
+        return _err(*miss)
+    why = _adopt_refusal(caller, target)
+    if why:
+        return _err(*why)
+    return JSONResponse({"approval": _public_approval(_file_approval("adopt", caller, target))},
+                        status_code=202)
+
+
+@router.post("/api/agent/self/refresh")
+async def self_refresh(request: Request):
+    """Ask the user to let the caller clear ITS OWN conversation and restart on `prompt`
+    (its hand-off file is its state). Runs after approval, once the caller's turn ends.
+    Its workers are untouched and stay its workers: same pane, same id."""
+    caller = _caller(request)
+    if caller is None:
+        return _err(401, _UNAUTH)
+    prompt, bad = _prompt_arg(await _json_body(request), "prompt")
+    if bad:
+        return bad
+    if not prompt:
+        return _err(400, "prompt (the boot line to restart on) is required")
+    if caller.harness not in _CLEAR_COMMANDS:
+        return _err(409, f"clear is not supported for a {caller.harness} session")
+    a = _file_approval("self_refresh", caller, caller, prompt)
+    return JSONResponse({"approval": _public_approval(a)}, status_code=202)
+
+
+@router.get("/api/agent/approvals/{approval_id}")
+async def approval_status(approval_id: str, request: Request, wait_ms: int = 0):
+    """The caller's own request. `wait_ms` long-polls until it leaves `pending`."""
+    caller = _caller(request)
+    if caller is None:
+        return _err(401, _UNAUTH)
+    deadline = time.monotonic() + min(max(wait_ms, 0), _WAIT_MAX_MS) / 1000
+    while True:
+        _expire_approvals()
+        a = _approvals.get(approval_id)
+        if a is None or a["caller_id"] != caller.id:
+            return _err(404, "no such approval request of this session")
+        if a["status"] != "pending" or time.monotonic() >= deadline:
+            return JSONResponse({"approval": _public_approval(a)})
+        await asyncio.sleep(_POLL_S)
+
+
+@router.get("/api/agent-approvals")
+async def list_approvals():
+    """Desktop: requests awaiting the user (also carried on GET /api/terminals)."""
+    return JSONResponse({"approvals": pending_approvals()})
+
+
+@router.post("/api/agent-approvals/{approval_id}")
+async def answer_approval(approval_id: str, request: Request):
+    """Desktop: {"approve": true|false}. An adopt is re-checked at this moment."""
+    approve = (await _json_body(request)).get("approve")
+    if not isinstance(approve, bool):
+        return _err(400, "approve must be true or false")
+    _expire_approvals()
+    a = _approvals.get(approval_id)
+    if a is None or a["status"] != "pending":
+        return _err(404, "no such pending request")
+    if not approve:
+        a["status"], a["detail"] = "denied", "the user declined"
+        logger.info("Approval %s (%s) denied", a["id"], a["kind"])
+        return JSONResponse({"approval": _public_approval(a)})
+    sessions = _deps["pty"].sessions
+    caller, target = sessions.get(a["caller_id"]), sessions.get(a["target_id"])
+    if caller is None or target is None:
+        a["status"], a["detail"] = "failed", "session is gone"
+        return JSONResponse({"approval": _public_approval(a)}, status_code=409)
+    if a["kind"] == "adopt":
+        why = _adopt_refusal(caller, target)
+        if why:
+            a["status"], a["detail"] = "failed", why[1]
+            return JSONResponse({"approval": _public_approval(a)}, status_code=409)
+        previous = target.parent_id
+        target.parent_id = caller.id
+        a["status"], a["detail"] = "done", f"adopted (previous parent: {previous or 'none'})"
+        logger.info("Session %s adopted %s (previous parent %s)", caller.id, target.id, previous)
+    else:
+        a["status"] = "approved"
+        asyncio.create_task(_run_self_refresh(a))
+    return JSONResponse({"approval": _public_approval(a)})
+
+
+# ── Events: push instead of poll ─────────────────────────────────────────────
+#
+# A long-poll over the caller's workers' state transitions. `studio_cli.py events
+# --follow` prints one JSON line per event, which is exactly the shape Claude Code's
+# Monitor tool turns into a wake-up -- so an orchestrator is told when a worker
+# finishes or asks, instead of sitting in `wait` on one worker while others idle.
+# Transitions are detected while someone listens; a gap between calls is diffed
+# against the last state seen, so a finished turn is not missed, only merged.
+
+_EVENT_KINDS = {"idle": "idle", "waiting": "asking", "ended": "ended"}
+_event_state: dict[str, dict] = {}
+
+
+def _collect_events(caller) -> dict:
+    st = _event_state.setdefault(caller.id, {"seq": 0, "last": None,
+                                             "log": collections.deque(maxlen=500)})
+    sessions = _deps["pty"].sessions
+    current = {s.id: (_state(s) if s.alive else "ended") for s in list(sessions.values())
+               if s.parent_id == caller.id and s.harness != "shell"}
+    seeding = st["last"] is None
+    last = st["last"] or {}
+
+    def emit(wid, event, state, prev):
+        st["seq"] += 1
+        s = sessions.get(wid)
+        st["log"].append({"seq": st["seq"], "event": event, "worker": wid,
+                          "name": s.name if s else wid, "state": state, "previous": prev,
+                          "at": time.time()})
+
+    for wid, state in current.items():
+        prev = last.get(wid)
+        if prev == state or state not in _EVENT_KINDS:
+            continue
+        # On the first look only a blocked worker is news; the rest is a baseline.
+        if seeding and state != "waiting":
+            continue
+        emit(wid, _EVENT_KINDS[state], state, prev)
+    for wid, prev in last.items():
+        if wid not in current and prev != "ended":  # purged, or adopted away
+            emit(wid, "gone", "gone", prev)
+    st["last"] = current
+    return st
+
+
+@router.get("/api/agent/events")
+async def events(request: Request, after: Optional[int] = None, timeout_ms: int = 60_000):
+    """Worker events with seq > `after`: idle (a turn finished), asking (blocked on a
+    question/approval), ended, gone. Returns as soon as there is one, else at timeout.
+    Pass the returned `next` as the following call's `after`. With no `after`, the
+    first call reports workers already blocked and then follows from now."""
+    caller = _caller(request)
+    if caller is None:
+        return _err(401, _UNAUTH)
+    if after is None:
+        prior = _event_state.get(caller.id)
+        after = prior["seq"] if prior else 0
+    deadline = time.monotonic() + min(max(timeout_ms, 0), _WAIT_MAX_MS) / 1000
+    while True:
+        st = _collect_events(caller)
+        found = [e for e in st["log"] if e["seq"] > after]
+        if found or time.monotonic() >= deadline or not caller.alive:
+            return JSONResponse({"events": found, "next": st["seq"]})
+        await asyncio.sleep(_POLL_S)

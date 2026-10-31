@@ -47,6 +47,7 @@ import {
   pageCount, pageOfSlot, firstEmptySlot, pullFamily, spliceFamilyAfter,
 } from "./utils/paneLayout";
 import FamilyPullDialog from "./components/FamilyPullDialog";
+import AgentApprovalDialog from "./components/AgentApprovalDialog";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -541,6 +542,33 @@ export default function App() {
   }, [activeIds, layout, scrollMode]);
   /** Pending "open this parent's workers too?" prompt, or null. */
   const [familyPull, setFamilyPull] = useState(null);
+  /** Agent requests awaiting the user (adopt / self-refresh), from the terminals poll. */
+  const [agentApprovals, setAgentApprovals] = useState([]);
+  /** Ids dismissed without an answer this run; they stay pending server-side. */
+  const [dismissedApprovals, setDismissedApprovals] = useState(() => new Set());
+  const pendingApproval = agentApprovals.find((a) => !dismissedApprovals.has(a.id)) || null;
+  const answerAgentApproval = useCallback(async (id, approve) => {
+    try {
+      const res = await fetch(`/api/agent-approvals/${encodeURIComponent(id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { ok: false, error: data.approval?.detail || data.error || `Studio answered ${res.status}` };
+      }
+      setAgentApprovals((prev) => prev.filter((a) => a.id !== id));
+      return { ok: true };
+    } catch (_) {
+      return { ok: false, error: "Studio did not answer; try again." };
+    }
+  }, []);
+  const dismissAgentApproval = useCallback(() => {
+    if (!pendingApproval) return;
+    const id = pendingApproval.id;
+    setDismissedApprovals((prev) => new Set(prev).add(id));
+  }, [pendingApproval]);
   const confirmFamilyPull = () => {
     const fp = familyPull;
     setFamilyPull(null);
@@ -1292,6 +1320,10 @@ export default function App() {
         if (!res.ok) throw new Error("not ok");
         pollFailCount.current = 0; // Reset on success
         const data = await res.json();
+        const approvals = Array.isArray(data.agent_approvals) ? data.agent_approvals : [];
+        setAgentApprovals((prev) => (
+          prev.length === approvals.length && prev.every((a, i) => a.id === approvals[i].id) ? prev : approvals
+        ));
         const termMap = {};
         for (const t of data.terminals) {
           termMap[t.id] = t;
@@ -3411,6 +3443,13 @@ export default function App() {
             onCancel={() => setShowNewDialog(false)}
           />
         )}
+
+        <AgentApprovalDialog
+          key={pendingApproval?.id ?? "none"}
+          request={pendingApproval}
+          onAnswer={answerAgentApproval}
+          onDismiss={dismissAgentApproval}
+        />
 
         <FamilyPullDialog
           open={familyPull !== null}

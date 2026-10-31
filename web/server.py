@@ -1380,7 +1380,8 @@ async def list_terminals():
     corrupting anything.
     """
     terminals = await asyncio.to_thread(pty_manager.list_terminals)
-    return JSONResponse({"terminals": _tag_terminal_origins(terminals)})
+    return JSONResponse({"terminals": _tag_terminal_origins(terminals),
+                         "agent_approvals": agent_api.pending_approvals()})
 
 
 @app.delete("/api/terminals/{terminal_id}")
