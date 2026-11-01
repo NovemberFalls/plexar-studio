@@ -38,7 +38,7 @@ import StatusStrip from "./components/shell/StatusStrip";
 import SettingsView from "./components/settings/SettingsView";
 import ChatView from "./components/ChatView.jsx";
 import TasksView, { prefetchFrameworkProbe } from "./components/TasksView.jsx";
-import { reconcileWorkers } from "./subsessions.js";
+import { reconcileWorkers, restoredGrid } from "./subsessions.js";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneStripFrom } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
@@ -242,12 +242,15 @@ function loadSavedSessions() {
   return lsLoad(SESSIONS_KEY).map((s) => ({ ...s, harness: s.harness || getModelHarness(s.model) }));
 }
 
-function saveSessions(sessions) {
+/** `inGrid` records whether the pane was on screen, so a reload restores the grid the
+ *  user left rather than every live session (workers and hidden panes included). */
+function saveSessions(sessions, activeIds = []) {
+  const shown = new Set(activeIds.filter((id) => id != null));
   const toSave = sessions
     .filter((s) => s.status !== "history")
     .map(({ name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone }) => ({
-      name, model, workdir, terminalId, harness, codex_session_id,
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone, id }) => ({
+      inGrid: shown.has(id), name, model, workdir, terminalId, harness, codex_session_id,
       claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone,
     }));
   lsSave(SESSIONS_KEY, toSave);
@@ -1198,8 +1201,8 @@ export default function App() {
   // Persist sessions to localStorage
   const [sessionsHydrated, setSessionsHydrated] = useState(false);
   useEffect(() => {
-    if (sessionsHydrated) saveSessions(sessions);
-  }, [sessions, sessionsHydrated]);
+    if (sessionsHydrated) saveSessions(sessions, activeIds);
+  }, [sessions, activeIds, sessionsHydrated]);
 
   // Restore saved sessions once backend is ready.
   // Reattach by identity, or resume a known Codex chat after a backend restart.
@@ -1259,6 +1262,10 @@ export default function App() {
               // If the backend doesn't expose this field yet, it will be undefined
               // and removeSession will fall back to continueSession: true.
               claude_session_id: match.claude_session_id || null,
+              // Without this a reloaded worker looked top-level and joined the grid.
+              ...(match.parent_id ? { parentTerminalId: match.parent_id } : {}),
+              ...(s.fromPhone ? { fromPhone: true } : {}),
+              inGrid: s.inGrid,
             });
           } else if (s.harness === "codex") {
             if (s.codex_session_id) toResume.push(s);
@@ -1273,7 +1280,7 @@ export default function App() {
           console.log(`[cockpit] Reattached ${reattached.length} session(s) to surviving backend terminals`);
           setSessions(reattached);
           // No slot ceiling: panes beyond `layout` simply land on later pages.
-          setActiveIds(reattached.map((s) => s.id));
+          setActiveIds(restoredGrid(reattached));
           addLocations(reattached.map((s) => s.workdir).filter(Boolean));
         } else {
           setSessions([]);

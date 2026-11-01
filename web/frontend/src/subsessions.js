@@ -81,3 +81,11 @@ export function groupWorkers(sessions) {
   }
   return { top, workersOf };
 }
+
+/** Which reattached sessions go back on screen: exactly those that were, or for a
+ *  record saved before `inGrid` existed, every session that is not a worker. */
+export function restoredGrid(reattached) {
+  return reattached
+    .filter((s) => (s.inGrid === undefined ? !s.parentTerminalId : s.inGrid))
+    .map((s) => s.id);
+}
