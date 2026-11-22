@@ -8,8 +8,14 @@ describe("orchEventToast", () => {
       .toEqual({ type: "warning", message: "Move refused · [scope] · W1 touched a file it does not own" });
     expect(orchEventToast({ kind: "gate_fail", detail: "exit 1" }).type).toBe("error");
     expect(orchEventToast({ kind: "halted_for_decision", detail: "which engine?" }).type).toBe("warning");
-    expect(orchEventToast({ kind: "run_closed", worker: "W2" }))
-      .toEqual({ type: "success", message: "Run closed · W2" });
+    expect(orchEventToast({ kind: "run_closed", detail: "closed COMPLETED" }))
+      .toEqual({ type: "success", message: "Run closed · closed COMPLETED" });
+    // Shapes taken from the live feed on 2026-11-22.
+    expect(orchEventToast({ kind: "run_closed", detail: "closed ABANDONED" }).type).toBe("info");
+    expect(orchEventToast({ kind: "run_closed", detail: "closed HALTED_FOR_DECISION" }).type).toBe("info");
+    expect(orchEventToast({ kind: "refusal", worker: null, rule: "the gate is not answerable to the implementation",
+      detail: "the gate script changed after the plan froze" }).message)
+      .toBe("Move refused · [the gate is not answerable to the implementation] · the gate script changed after the plan froze");
   });
 
   it("stays quiet for a passing gate, an ordinary transition and junk", () => {

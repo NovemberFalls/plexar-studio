@@ -27,7 +27,10 @@ export function orchEventToast(ev) {
   if (ev.worker) bits.push(String(ev.worker));
   if (ev.rule) bits.push(`[${ev.rule}]`);
   if (ev.detail) bits.push(clip(ev.detail));
-  return { type: spec[0], message: bits.join(" · ") };
+  // A run can close HALTED or ABANDONED too; only a completed one earns the green.
+  const completed = String(ev.detail || "").split(" ").includes("COMPLETED");
+  const type = ev.kind === "run_closed" && !completed ? "info" : spec[0];
+  return { type, message: bits.join(" · ") };
 }
 
 /** The cursor to poll from next: never moves backwards, never becomes a non-integer. */
