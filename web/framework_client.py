@@ -311,3 +311,51 @@ def fetch_orch_events(base: str, since: Optional[int]) -> dict:
 
     _mark_reachable(validated)
     return {"up": True, "base": validated, "events": events, "cursor": cursor, "seeded": seeding}
+
+
+_RUN_FIELDS = ("run_id", "state", "stage", "loop", "task", "cwd", "started_at", "updated_at")
+
+
+def _shape_run(run: dict) -> dict:
+    gate = run.get("gate")
+    gate_exit = gate.get("exit") if isinstance(gate, dict) else None
+    row = {k: run.get(k) for k in _RUN_FIELDS}
+    row["orchestrator_session_id"] = run.get("orchestrator_session_id") or None
+    row["gate_exit"] = gate_exit
+    row["workers"] = [
+        {"worker": w.get("worker"), "lane": w.get("lane"), "status": w.get("status")}
+        for w in (run.get("workers") or []) if isinstance(w, dict)
+    ]
+    return row
+
+
+def fetch_orch_runs(base: str) -> dict:
+    """``GET {base}/api/orch/runs`` (open runs only), as ``{up, base, runs}``.
+
+    BLOCKING (urllib) -- run via ``asyncio.to_thread``. Only the fields the
+    orchestrators list and run dock read are kept; the framework's per-run event
+    log and card paths are dropped here. A framework without the route is
+    ``up: False, reason: "http 404"``.
+    """
+    validated = _validate_base_url(base)
+    if validated is None:
+        return {"up": False, "base": base, "reason": "bad url"}
+    try:
+        runs = _get_json(f"{validated}/api/orch/runs").get("runs")
+        if not isinstance(runs, list):
+            raise ValueError("runs field was not a list")
+        shaped = [_shape_run(r) for r in runs if isinstance(r, dict) and r.get("run_id")]
+    except urllib.error.HTTPError as exc:
+        logger.debug("framework /api/orch/runs refused: %s", exc, exc_info=True)
+        return {"up": False, "base": validated, "reason": f"http {exc.code}"}
+    except urllib.error.URLError as exc:
+        _log_unreachable(validated, exc)
+        return {"up": False, "base": validated, "reason": "unreachable"}
+    except (TimeoutError, OSError) as exc:
+        logger.info("framework request timed out or errored: %s", exc, exc_info=True)
+        return {"up": False, "base": validated, "reason": "timeout"}
+    except (ValueError, json.JSONDecodeError, AttributeError, TypeError) as exc:
+        logger.info("framework returned unparseable/unexpected JSON: %s", exc, exc_info=True)
+        return {"up": False, "base": validated, "reason": "bad response"}
+    _mark_reachable(validated)
+    return {"up": True, "base": validated, "runs": shaped}

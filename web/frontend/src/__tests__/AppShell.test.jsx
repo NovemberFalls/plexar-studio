@@ -25,6 +25,11 @@
  */
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// Mounting the whole App cold takes several seconds when the full suite runs in
+// parallel (measured 2026-11-22: 8.4 s for this file, timing out at the 5 s default
+// in about one full run in three). The assertions are unchanged; only the wait is.
+vi.setConfig({ testTimeout: 20000 });
 import { render, screen, act, waitFor, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 

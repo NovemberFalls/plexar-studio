@@ -1,4 +1,5 @@
 import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search, Monitor } from "lucide-react";
+import OrchestratorsList from "./OrchestratorsList";
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { groupWorkers } from "../subsessions.js";
 import { describePeerStatus, peerDragData } from "../utils/peers";
@@ -583,6 +584,11 @@ export default function Sidebar({
   peers = [],
   // (peerId, remoteSession) => void -- place that machine's session in the grid.
   onSelectPeerSession,
+  // Open orchestration runs: rows from utils/orchRuns.orchestratorRows, the run the
+  // dock shows, and (run, session|null) => void.
+  orchRows = [],
+  selectedRunId = null,
+  onPickRun,
 }) {
   // Context menu state (location tree)
   const [ctxMenu, setCtxMenu] = useState(null);
@@ -698,6 +704,8 @@ export default function Sidebar({
             </div>
           </div>
         )}
+
+        <OrchestratorsList rows={orchRows} selectedRunId={selectedRunId} onPick={onPickRun} />
 
         {/* Workspace presets */}
         <div className="mb-2" style={{ padding: "0 2px" }}>

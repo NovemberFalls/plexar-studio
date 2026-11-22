@@ -421,3 +421,53 @@ async def test_orch_events_route_is_always_200_and_passes_the_cursor(client, mon
     assert (r1.status_code, r2.status_code, r3.status_code) == (200, 200, 200)
     assert r1.json()["up"] is False
     assert seen == [None, 41, 0]
+
+
+# Open orch runs for the Orchestrators list and run dock.
+
+def _live_run(**over):
+    run = {
+        "run_id": "orch-1", "state": "FROZEN", "task": "do it", "cwd": "C:/x", "stage": "workers",
+        "loop": None, "close_status": None, "events": [{"step": "start"}],
+        "orchestrator_session_id": "653b77ee", "started_at": "t0", "updated_at": "t1",
+        "workers": [{"worker": "W1", "batch": 1, "lane": "sonnet", "status": "DISPATCHED",
+                     "card_path": "C:/secret/card.txt"}],
+        "gate": {"exit": 0, "x": 1},
+    }
+    run.update(over)
+    return run
+
+
+def test_orch_runs_keep_only_the_agreed_fields(monkeypatch):
+    payload = {"runs": [_live_run(), _live_run(run_id="orch-2", orchestrator_session_id="", gate=None)],
+               "studio": {"a": 1}, "prompts": []}
+    monkeypatch.setattr(framework_client, "_get_json", lambda url: payload)
+    result = framework_client.fetch_orch_runs(BASE)
+    assert result["up"] is True and result["base"] == BASE
+    first, second = result["runs"]
+    assert set(first) == {"run_id", "state", "stage", "loop", "task", "cwd", "orchestrator_session_id",
+                          "started_at", "updated_at", "gate_exit", "workers"}
+    assert first["gate_exit"] == 0 and first["workers"] == [{"worker": "W1", "lane": "sonnet", "status": "DISPATCHED"}]
+    assert second["orchestrator_session_id"] is None and second["gate_exit"] is None
+    assert "studio" not in result
+
+
+def test_orch_runs_failures_are_reported_not_raised(monkeypatch):
+    def old(url):
+        raise _http(url, 404)
+
+    monkeypatch.setattr(framework_client, "_get_json", old)
+    assert framework_client.fetch_orch_runs(BASE) == {"up": False, "base": BASE, "reason": "http 404"}
+    monkeypatch.setattr(framework_client, "_get_json", lambda url: {"runs": "nope"})
+    assert framework_client.fetch_orch_runs(BASE)["reason"] == "bad response"
+    monkeypatch.setattr(framework_client, "_get_json", lambda url: {"runs": [_live_run(workers=[None, 3])]})
+    assert framework_client.fetch_orch_runs(BASE)["runs"][0]["workers"] == []
+    assert framework_client.fetch_orch_runs("ftp://x")["reason"] == "bad url"
+
+
+@pytest.mark.asyncio
+async def test_orch_runs_route_is_always_200(client, monkeypatch):
+    monkeypatch.setattr(framework_client, "fetch_orch_runs",
+                        lambda base: {"up": False, "base": base, "reason": "unreachable"})
+    r = await client.get("/api/framework/orch-runs")
+    assert r.status_code == 200 and r.json()["up"] is False

@@ -44,6 +44,9 @@ import { reconcileWorkers, restoredGrid } from "./subsessions.js";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneStripFrom } from "./utils/laneMath";
 import { useLocalModelsPoller } from "./hooks/useLocalModels";
+import { useOrchRunsPoller } from "./hooks/useOrchRuns";
+import { orchestratorRows, runForSession } from "./utils/orchRuns";
+import RunDock from "./components/RunDock";
 import {
   FEATURED_LAYOUTS, clampFeatured, computePaneOrder, swapSlots,
   pageCount, pageOfSlot, firstEmptySlot, pullFamily, spliceFamilyAfter,
@@ -2305,6 +2308,30 @@ export default function App() {
   // framework sends no CORS headers, so a fetch from this origin could not
   // read the response anyway. Both go through Studio's own backend routes.
 
+  // Orchestrators list + run dock. One poller (hooks/useOrchRuns); the dock follows
+  // pane focus, and a run picked from an "outside Studio" row stays until another
+  // row or pane is chosen. Neither touches paneOrder, so no terminal remounts.
+  const orch = useOrchRunsPoller();
+  const orchRows = useMemo(() => orchestratorRows(orch.runs, sessions), [orch.runs, sessions]);
+  const [dockRunId, setDockRunId] = useState(null);
+  const [dockOpen, setDockOpen] = useState(() => {
+    try { return localStorage.getItem("cockpit-run-dock-open") !== "false"; } catch { return true; }
+  });
+  const setDockOpenPersist = useCallback((open) => {
+    setDockOpen(open);
+    try { localStorage.setItem("cockpit-run-dock-open", open ? "true" : "false"); } catch { /* unpersisted */ }
+  }, []);
+  const focusedRunId = runForSession(orch.runs, focusedSession?.terminalId)?.run_id || null;
+  useEffect(() => {
+    if (focusedRunId) setDockRunId(focusedRunId);
+  }, [focusedSessionId, focusedRunId]);
+  const pickRun = useCallback((run, session) => {
+    setDockRunId(run.run_id);
+    setDockOpenPersist(true);
+    if (session) selectSession(session.id);
+  }, [selectSession, setDockOpenPersist]);
+  const dockRun = dockRunId ? orch.runs.find((r) => r.run_id === dockRunId) || null : null;
+
   // B10: rail badge, polled every 10s regardless of which section is open —
   // the badge must be visible from anywhere, not just while TASKS is open.
   const [frameworkSummary, setFrameworkSummary] = useState(null);
@@ -3069,6 +3096,9 @@ export default function App() {
                   onDeleteWorkspace={deleteWorkspace}
                   peers={sidebarPeers}
                   onSelectPeerSession={openPeerSession}
+                  orchRows={orchRows}
+                  selectedRunId={dockRunId}
+                  onPickRun={pickRun}
                 />
                 <div
                   onMouseDown={startSidebarResize}
@@ -3249,6 +3279,10 @@ export default function App() {
                 )
               )}
             </main>
+
+            {activeSection === "work" && dockOpen && dockRunId && (
+              <RunDock base={orch.base} runId={dockRunId} run={dockRun} onClose={() => setDockOpenPersist(false)} />
+            )}
 
             {/* Settings owns INTENT (Phase 4). It renders instead of the panes +
                 Inspector, but the pane grid above is only display:none'd — the

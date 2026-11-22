@@ -2154,6 +2154,17 @@ async def get_framework_events(since: str | None = None):
     return JSONResponse(await asyncio.to_thread(framework_client.fetch_events, base, since))
 
 
+@app.get("/api/framework/orch-runs")
+async def get_framework_orch_runs():
+    """Open orchestration runs, for the Orchestrators list and the run dock.
+
+    ALWAYS 200 and read-only, like its siblings; a framework without the orch
+    surface answers `{"up": False, "reason": "http 404"}`.
+    """
+    base = _framework_base_url()
+    return JSONResponse(await asyncio.to_thread(framework_client.fetch_orch_runs, base))
+
+
 @app.get("/api/framework/orch-events")
 async def get_framework_orch_events(since: int | None = None):
     """The framework's orch run feed (refusals, gate results, halts), for toasts.
