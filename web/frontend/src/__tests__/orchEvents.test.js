@@ -12,6 +12,9 @@ describe("orchEventToast", () => {
       .toEqual({ type: "success", message: "Run closed · closed COMPLETED" });
     // Shapes taken from the live feed on 2026-11-22.
     expect(orchEventToast({ kind: "run_closed", detail: "closed ABANDONED" }).type).toBe("info");
+    // The machine field wins over the wording when both are present.
+    expect(orchEventToast({ kind: "run_closed", close_status: "COMPLETED", detail: "closed" }).type).toBe("success");
+    expect(orchEventToast({ kind: "run_closed", close_status: "ABANDONED", detail: "was COMPLETED before" }).type).toBe("info");
     expect(orchEventToast({ kind: "run_closed", detail: "closed HALTED_FOR_DECISION" }).type).toBe("info");
     expect(orchEventToast({ kind: "refusal", worker: null, rule: "the gate is not answerable to the implementation",
       detail: "the gate script changed after the plan froze" }).message)

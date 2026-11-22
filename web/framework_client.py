@@ -252,7 +252,7 @@ def fetch_events(base: str, since: Optional[str]) -> dict:
 # worth telling the user about; ordinary transitions (dispatch, report, land) are
 # dropped here so the page never has to know step names.
 _ORCH_EVENT_FIELDS = ("id", "ts", "run_id", "session_id", "step", "ok", "worker", "rule",
-                      "detail", "kind")
+                      "detail", "kind", "close_status")
 _ORCH_PAGE = 200
 _ORCH_SEED_PAGE = 500
 # The feed keeps 2000 events; seeding at 500 a page needs four calls plus the

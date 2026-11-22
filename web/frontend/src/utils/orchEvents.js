@@ -28,7 +28,11 @@ export function orchEventToast(ev) {
   if (ev.rule) bits.push(`[${ev.rule}]`);
   if (ev.detail) bits.push(clip(ev.detail));
   // A run can close HALTED or ABANDONED too; only a completed one earns the green.
-  const completed = String(ev.detail || "").split(" ").includes("COMPLETED");
+  // `close_status` is the framework's own field; events stored before it existed
+  // carry the status only as a word in `detail`.
+  const completed = ev.close_status
+    ? ev.close_status === "COMPLETED"
+    : String(ev.detail || "").split(" ").includes("COMPLETED");
   const type = ev.kind === "run_closed" && !completed ? "info" : spec[0];
   return { type, message: bits.join(" · ") };
 }
