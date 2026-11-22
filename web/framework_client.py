@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -359,3 +360,76 @@ def fetch_orch_runs(base: str) -> dict:
         return {"up": False, "base": validated, "reason": "bad response"}
     _mark_reachable(validated)
     return {"up": True, "base": validated, "runs": shaped}
+
+
+# Session directory (Studio -> framework). The framework only ever learns a pane's
+# PLEXAR_SESSION_ID; Studio knows what the user called it. Owner QA, 2.1.59: a run
+# list headed "session 02a5e5ba" was "impossible to track". The framework merges
+# entries by id and keeps them, so a closed session's past runs keep their name.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_NAMES_MAX = 500
+
+
+def _put_json(url: str, body: dict) -> dict:
+    """Blocking PUT of a JSON body, returning the parsed JSON reply."""
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), method="PUT",
+        headers={"Content-Type": "application/json", "Accept": "application/json",
+                 "User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        raw = resp.read()
+    data = json.loads(raw) if raw else {}
+    if not isinstance(data, dict):
+        raise ValueError("framework response was not a JSON object")
+    return data
+
+
+def session_directory(sessions: list[dict]) -> list[dict]:
+    """The rows worth sending: valid ids only, text capped, never truncated ids.
+
+    A row whose id the framework would refuse is DROPPED here, because one bad
+    id makes the framework refuse the whole request and every name with it.
+    """
+    out: list[dict] = []
+    for row in sessions:
+        sid = row.get("id")
+        if not isinstance(sid, str) or not _SESSION_ID_RE.match(sid):
+            continue
+        parent = row.get("parent_id")
+        out.append({
+            "id": sid,
+            "name": str(row.get("name") or "")[:100],
+            "cwd": str(row.get("cwd") or "")[:300],
+            "parent_id": parent if isinstance(parent, str) and _SESSION_ID_RE.match(parent) else None,
+        })
+        if len(out) >= _NAMES_MAX:
+            break
+    return out
+
+
+def put_session_names(base: str, sessions: list[dict]) -> dict:
+    """``PUT {base}/api/orch/studio/sessions``. BLOCKING -- run via ``asyncio.to_thread``.
+
+    Any failure is ``{"up": False, ...}``; an older framework answers 404 or 405,
+    which the caller treats as "nothing to do", not as an error.
+    """
+    validated = _validate_base_url(base)
+    if validated is None:
+        return {"up": False, "base": base, "reason": "bad url"}
+    rows = session_directory(sessions)
+    try:
+        _put_json(f"{validated}/api/orch/studio/sessions", {"sessions": rows})
+    except urllib.error.HTTPError as exc:
+        logger.debug("framework session directory refused: %s", exc, exc_info=True)
+        return {"up": False, "base": validated, "reason": f"http {exc.code}"}
+    except urllib.error.URLError as exc:
+        _log_unreachable(validated, exc)
+        return {"up": False, "base": validated, "reason": "unreachable"}
+    except (TimeoutError, OSError) as exc:
+        logger.debug("framework session directory timed out: %s", exc, exc_info=True)
+        return {"up": False, "base": validated, "reason": "timeout"}
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.debug("framework session directory reply unreadable: %s", exc, exc_info=True)
+        return {"up": False, "base": validated, "reason": "bad response"}
+    _mark_reachable(validated)
+    return {"up": True, "base": validated, "sent": len(rows)}

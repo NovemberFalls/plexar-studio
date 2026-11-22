@@ -211,6 +211,10 @@ async def lifespan(app: FastAPI):
     # so the in-app History view is derived from Plexar Studio alone (no Prometheus).
     app.state.fleet_history_task = asyncio.create_task(_fleet_history_loop())
 
+    # Tell the Plexar-Framework what each pane is called, so its run views show
+    # names instead of bare session ids. Best-effort and silent when it is absent.
+    app.state.framework_names_task = asyncio.create_task(_framework_names_loop())
+
     # Daily model-price refresh. Prices are only ever APPENDED (pricing_store),
     # so a refresh updates what NEW events cost and can never re-price history.
     # Best-effort, same posture as managed vLLM: never blocks startup,
@@ -269,6 +273,14 @@ async def lifespan(app: FastAPI):
         pricing_task.cancel()
         try:
             await pricing_task
+        except asyncio.CancelledError:
+            pass
+
+    names_task = getattr(app.state, "framework_names_task", None)
+    if names_task:
+        names_task.cancel()
+        try:
+            await names_task
         except asyncio.CancelledError:
             pass
 
@@ -2163,6 +2175,42 @@ async def get_framework_orch_runs():
     """
     base = _framework_base_url()
     return JSONResponse(await asyncio.to_thread(framework_client.fetch_orch_runs, base))
+
+
+_FRAMEWORK_NAMES_INTERVAL = 15.0
+# Re-send an unchanged list this often, so a framework restarted with an empty
+# directory gets its names back without waiting for someone to rename a pane.
+_FRAMEWORK_NAMES_RESEND = 300.0
+
+
+def _framework_session_rows() -> list[dict]:
+    """id, name, cwd and parent of every live session. No paths beyond cwd, no cost."""
+    return [{"id": s.id, "name": s.name or "", "cwd": s.working_dir or "",
+             "parent_id": getattr(s, "parent_id", None)}
+            for s in list(pty_manager.sessions.values())]
+
+
+async def _framework_names_loop() -> None:
+    """Publish the session directory when it changed, or every few minutes."""
+    last_sent: list[dict] | None = None
+    last_ok = 0.0
+    while True:
+        try:
+            await asyncio.sleep(_FRAMEWORK_NAMES_INTERVAL)
+            rows = framework_client.session_directory(_framework_session_rows())
+            now = _time.monotonic()
+            if rows == last_sent and now - last_ok < _FRAMEWORK_NAMES_RESEND:
+                continue
+            if not rows and last_sent is None:
+                continue  # nothing to say yet
+            result = await asyncio.to_thread(
+                framework_client.put_session_names, _framework_base_url(), rows)
+            if result.get("up"):
+                last_sent, last_ok = rows, now
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.debug("Framework session directory publish skipped", exc_info=True)
 
 
 @app.get("/api/framework/orch-events")

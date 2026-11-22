@@ -471,3 +471,59 @@ async def test_orch_runs_route_is_always_200(client, monkeypatch):
                         lambda base: {"up": False, "base": base, "reason": "unreachable"})
     r = await client.get("/api/framework/orch-runs")
     assert r.status_code == 200 and r.json()["up"] is False
+
+
+# ---------------------------------------------------------------------------
+# Session directory: Studio tells the framework what each pane is called.
+# ---------------------------------------------------------------------------
+
+def test_session_directory_drops_bad_ids_and_caps_text():
+    rows = framework_client.session_directory([
+        {"id": "02a5e5ba", "name": "studio", "cwd": "C:/x", "parent_id": None},
+        {"id": "bad id!", "name": "nope"},
+        {"id": 7, "name": "nope"},
+        {"id": "w1", "name": "n" * 300, "cwd": "c" * 900, "parent_id": "02a5e5ba"},
+        {"id": "w2", "name": None, "parent_id": "not valid!"},
+    ])
+    assert [r["id"] for r in rows] == ["02a5e5ba", "w1", "w2"]
+    assert len(rows[1]["name"]) == 100 and len(rows[1]["cwd"]) == 300
+    assert rows[1]["parent_id"] == "02a5e5ba"
+    assert rows[2] == {"id": "w2", "name": "", "cwd": "", "parent_id": None}
+
+
+def test_session_directory_is_capped():
+    rows = framework_client.session_directory([{"id": f"s{i}", "name": "x"} for i in range(700)])
+    assert len(rows) == 500
+
+
+def test_put_session_names_sends_the_directory(monkeypatch):
+    seen = {}
+
+    def fake_put(url, body):
+        seen["url"], seen["body"] = url, body
+        return {"ok": True, "known": 1}
+
+    monkeypatch.setattr(framework_client, "_put_json", fake_put)
+    result = framework_client.put_session_names(BASE, [{"id": "a1", "name": "studio", "cwd": "C:/x"}])
+    assert result == {"up": True, "base": BASE, "sent": 1}
+    assert seen["url"] == f"{BASE}/api/orch/studio/sessions"
+    assert seen["body"] == {"sessions": [{"id": "a1", "name": "studio", "cwd": "C:/x", "parent_id": None}]}
+
+
+def test_put_session_names_is_silent_on_an_older_framework(monkeypatch):
+    def fake_put(url, body):
+        raise _http(url, 404)
+
+    monkeypatch.setattr(framework_client, "_put_json", fake_put)
+    assert framework_client.put_session_names(BASE, [{"id": "a1"}]) == {
+        "up": False, "base": BASE, "reason": "http 404"}
+    assert framework_client.put_session_names("ftp://x", [])["reason"] == "bad url"
+
+
+def test_framework_session_rows_carry_only_id_name_cwd_parent(monkeypatch):
+    import types
+    fake = types.SimpleNamespace(id="t1", name="studio", working_dir="C:/x", parent_id=None,
+                                 spawn_token="secret", claude_session_id="c1")
+    monkeypatch.setattr(server.pty_manager, "sessions", {"t1": fake})
+    assert server._framework_session_rows() == [
+        {"id": "t1", "name": "studio", "cwd": "C:/x", "parent_id": None}]
