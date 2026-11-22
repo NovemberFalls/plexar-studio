@@ -16,9 +16,27 @@ import { useModelCatalog, getModelHarness, harnessModelServedName } from "../mod
 import { createReplayCursor, replayQuery, consumeReplayFrame, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
 import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
-import { buildXtermTheme } from "../utils/xtermTheme";
+import { buildXtermTheme, withAlpha } from "../utils/xtermTheme";
 import { diagnoseSocketFailure, WS_REFUSED, REFUSED_MESSAGE } from "../wsDiagnose";
 import "@xterm/xterm/css/xterm.css";
+
+/**
+ * xterm theme for a pane. With the app background showing, only the canvas
+ * BACKGROUND turns translucent; text colours stay fully opaque. The solid
+ * source is the override or the theme value, because the computed --cc-term is
+ * already a translucent mix by then.
+ */
+function buildPaneXtermTheme({ theme, accent, tokenOverrides, backgroundActive, backgroundPaneOpacity }) {
+  const base = buildXtermTheme(theme, { accent, tokenOverrides });
+  if (!backgroundActive) return base;
+  const solid = (tokenOverrides && tokenOverrides["--cc-term"]) || theme?.term || theme?.bg;
+  if (!solid) return base;
+  return {
+    ...base,
+    background: withAlpha(solid, backgroundPaneOpacity, typeof document !== "undefined" ? document : undefined),
+    cursorAccent: solid,
+  };
+}
 
 const TerminalPane = forwardRef(function TerminalPane({
   session,       // { id, name, terminalId, model, status, activityState }
@@ -75,12 +93,12 @@ const TerminalPane = forwardRef(function TerminalPane({
   const searchInputRef = useRef(null);
   const renameInputRef = useRef(null);
   const actionsMenuBtnRef = useRef(null);
-  const { theme, accent, tokenOverrides } = useTheme();
+  const { theme, accent, tokenOverrides, backgroundActive = false, backgroundPaneOpacity = 1 } = useTheme();
 
   // Latest theme inputs, readable from the mount-only terminal-construction
   // effect without adding them to its dep list.
   const xtermThemeInputsRef = useRef({ theme, accent, tokenOverrides });
-  xtermThemeInputsRef.current = { theme, accent, tokenOverrides };
+  xtermThemeInputsRef.current = { theme, accent, tokenOverrides, backgroundActive, backgroundPaneOpacity };
 
   // Long OpenRouter slugs (e.g. "deepseek/deepseek-v4-pro") would overflow the
   // pill in the header — display the friendly label when the id is known,
@@ -295,8 +313,8 @@ const TerminalPane = forwardRef(function TerminalPane({
         lineHeight: 1.3,
         // Built from the ref so a theme/accent/override change that lands while
         // the async platform-info fetch is in flight is not missed.
-        theme: buildXtermTheme(xtermThemeInputsRef.current.theme, xtermThemeInputsRef.current),
-        allowTransparency: false,
+        theme: buildPaneXtermTheme(xtermThemeInputsRef.current),
+        allowTransparency: Boolean(xtermThemeInputsRef.current.backgroundActive),
         scrollback: codexRef.current ? 50000 : 10000,
         convertEol: true,
         ...(windowsPty ? { windowsPty } : {}),
@@ -533,9 +551,15 @@ const TerminalPane = forwardRef(function TerminalPane({
   // is not observed here would never reach the terminal.
   useEffect(() => {
     if (xtermRef.current) {
-      xtermRef.current.options.theme = buildXtermTheme(theme, { accent, tokenOverrides });
+      // The canvas renderer follows allowTransparency live (TextRenderLayer
+      // listens for the option change), so the terminal is never remounted.
+      // Set it BEFORE the theme so the new background paints with the right mode.
+      xtermRef.current.options.allowTransparency = backgroundActive;
+      xtermRef.current.options.theme = buildPaneXtermTheme({
+        theme, accent, tokenOverrides, backgroundActive, backgroundPaneOpacity,
+      });
     }
-  }, [theme, accent, tokenOverrides]);
+  }, [theme, accent, tokenOverrides, backgroundActive, backgroundPaneOpacity]);
 
   // Update font size when zoom changes — font size changes cols/rows WITHOUT
   // changing the container's box size, so the ResizeObserver above can never

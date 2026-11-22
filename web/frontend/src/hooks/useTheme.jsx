@@ -84,6 +84,8 @@ function parseMirrorPayload(raw, sanitize) {
   }
 }
 
+const DEFAULT_BACKGROUND = Object.freeze({ enabled: false, dim: 0.55, blur: 0, paneOpacity: 0.85 });
+
 export function ThemeProvider({ children }) {
   const [themeId, setThemeId] = useState(() => getSavedTheme() || DEFAULT_THEME_ID);
   const [accent, setAccentState] = useState(() => getSavedAccent());
@@ -95,12 +97,32 @@ export function ThemeProvider({ children }) {
   const [tokenOverrides, setTokenOverridesState] = useState(() => getSavedTokenOverrides());
   const [userPalettes, setUserPalettesState] = useState(() => getSavedUserPalettes());
 
+  // App background image. Off by default and only ever fed by AppBackground
+  // (mounted once in App), so a popout document, which never mounts it, keeps
+  // solid surfaces. `active` needs BOTH the setting and an image on disk.
+  const [backgroundConfig, setBackgroundConfigState] = useState(DEFAULT_BACKGROUND);
+  const [backgroundImageSet, setBackgroundImageSet] = useState(false);
+  const setBackgroundConfig = useCallback((patch) => {
+    if (!patch || typeof patch !== "object") return;
+    setBackgroundConfigState((prev) => {
+      const next = { ...prev, ...patch };
+      return next.enabled === prev.enabled && next.dim === prev.dim
+        && next.blur === prev.blur && next.paneOpacity === prev.paneOpacity ? prev : next;
+    });
+  }, []);
+  const backgroundActive = Boolean(backgroundConfig.enabled && backgroundImageSet);
+  const backgroundPaneOpacity = backgroundConfig.paneOpacity;
+
   const theme = getTheme(themeId) || getTheme(DEFAULT_THEME_ID);
 
   useEffect(() => {
-    applyThemeToDOM(theme, { accent, glowEnabled, glowStrength, tokenOverrides });
+    applyThemeToDOM(theme, {
+      accent, glowEnabled, glowStrength, tokenOverrides,
+      background: { active: backgroundActive, paneOpacity: backgroundPaneOpacity },
+    });
     saveTheme(themeId);
-  }, [themeId, theme, accent, glowEnabled, glowStrength, tokenOverrides]);
+  }, [themeId, theme, accent, glowEnabled, glowStrength, tokenOverrides,
+    backgroundActive, backgroundPaneOpacity]);
 
   const switchTheme = useCallback((id) => {
     if (getTheme(id)) setThemeId(id);
@@ -129,10 +151,10 @@ export function ThemeProvider({ children }) {
   const commitTimerRef = useRef(null);
   // Latest paint inputs, so the immediate paint during a drag never reads a
   // stale closure and never has to be a dependency of the setters.
-  const paintRef = useRef({ theme, accent, glowEnabled, glowStrength });
+  const paintRef = useRef({ theme, accent, glowEnabled, glowStrength, backgroundActive, backgroundPaneOpacity });
   useEffect(() => {
-    paintRef.current = { theme, accent, glowEnabled, glowStrength };
-  }, [theme, accent, glowEnabled, glowStrength]);
+    paintRef.current = { theme, accent, glowEnabled, glowStrength, backgroundActive, backgroundPaneOpacity };
+  }, [theme, accent, glowEnabled, glowStrength, backgroundActive, backgroundPaneOpacity]);
 
   const cancelPendingCommit = useCallback(() => {
     if (commitTimerRef.current !== null) {
@@ -151,8 +173,11 @@ export function ThemeProvider({ children }) {
 
   /** Immediate, identity-free paint. applyThemeToDOM stays the single writer. */
   const paintOverrides = useCallback((map) => {
-    const { theme: t, accent: a, glowEnabled: ge, glowStrength: gs } = paintRef.current;
-    applyThemeToDOM(t, { accent: a, glowEnabled: ge, glowStrength: gs, tokenOverrides: map });
+    const { theme: t, accent: a, glowEnabled: ge, glowStrength: gs, backgroundActive: ba, backgroundPaneOpacity: bo } = paintRef.current;
+    applyThemeToDOM(t, {
+      accent: a, glowEnabled: ge, glowStrength: gs, tokenOverrides: map,
+      background: { active: ba, paneOpacity: bo },
+    });
   }, []);
 
   const commitOverrides = useCallback((next) => {
@@ -329,6 +354,8 @@ export function ThemeProvider({ children }) {
         themeId, theme, switchTheme, themes: listThemes(),
         accent, setAccent, glowEnabled, setGlowEnabled, glowStrength, setGlowStrength,
         tokenOverrides,
+        backgroundConfig, setBackgroundConfig, backgroundImageSet, setBackgroundImageSet,
+        backgroundActive, backgroundPaneOpacity,
         overrideCount: Object.keys(tokenOverrides).length,
         setTokenOverride, clearTokenOverride, resetTokenOverrides,
         persistTokenOverrides,
@@ -371,6 +398,12 @@ export function useThemeSafe() {
     glowStrength: 30,
     setGlowStrength: () => {},
     tokenOverrides: {},
+    backgroundConfig: DEFAULT_BACKGROUND,
+    setBackgroundConfig: () => {},
+    backgroundImageSet: false,
+    setBackgroundImageSet: () => {},
+    backgroundActive: false,
+    backgroundPaneOpacity: 1,
     overrideCount: 0,
     setTokenOverride: () => {},
     clearTokenOverride: () => Promise.resolve({ ok: true, changed: false }),

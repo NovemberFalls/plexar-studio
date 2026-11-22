@@ -15,9 +15,9 @@ const STEPS = [
     desc: "Pick 1–8 panes from the status bar. Even counts tile into clean grids; 3, 5 and 7 give one featured pane plus a rail. Drag a header to rearrange.",
   },
   {
-    eyebrow: "BRIDGE & CHANNEL",
+    eyebrow: "BRIDGE",
     title: "Let your sessions talk",
-    desc: "Relay a single message, auto-bridge two sessions for a back-and-forth, or run a channel where one lead coordinates several workers.",
+    desc: "Relay a single message between two sessions, or start a mailbox bridge so they can work a problem out between themselves.",
   },
   {
     eyebrow: "MAKE IT YOURS",

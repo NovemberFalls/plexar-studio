@@ -186,9 +186,12 @@ export function saveUserPalettes(map) {
  * `--cc-*` custom properties. Legacy `--bg`, `--text-primary`, etc. vars are
  * aliased to the `--cc-*` tokens statically in index.css, so they update too.
  */
+const BACKGROUND_SURFACE_TOKENS = ["--cc-bg", "--cc-bg2", "--cc-surface", "--cc-elev", "--cc-term"];
+
 export function applyThemeToDOM(theme, options = {}) {
   if (!theme) return;
   const { accent, glowEnabled = true, glowStrength = DEFAULT_GLOW_SIZE } = options;
+  const bgOpt = options.background && typeof options.background === "object" ? options.background : null;
   const overrides = sanitizeOverrides(options.tokenOverrides);
   const root = document.documentElement;
   const s = root.style;
@@ -226,6 +229,19 @@ export function applyThemeToDOM(theme, options = {}) {
   // rewritten on each call, so clearing an override restores the base value.
   for (const name of OVERRIDABLE_TOKENS) {
     if (name in overrides) s.setProperty(name, overrides[name]);
+  }
+
+  // With an app background image showing, the five surface tokens become
+  // translucent so the picture reads through. Only here: every consumer keeps
+  // reading the same --cc-* names, and with the feature off nothing above is
+  // touched, so every computed colour is exactly what it was.
+  if (bgOpt && bgOpt.active) {
+    const raw = Number(bgOpt.paneOpacity);
+    const pct = Math.round((Number.isFinite(raw) ? Math.max(0.3, Math.min(1, raw)) : 1) * 100);
+    for (const name of BACKGROUND_SURFACE_TOKENS) {
+      const solid = s.getPropertyValue(name);
+      if (solid) s.setProperty(name, `color-mix(in srgb, ${solid} ${pct}%, transparent)`);
+    }
   }
 
   s.setProperty("--cc-glow-size", `${glowStrength}px`);

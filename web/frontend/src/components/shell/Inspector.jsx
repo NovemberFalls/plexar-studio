@@ -119,17 +119,14 @@ function ActionButton({ icon: Icon, label, onClick, danger, disabled }) {
 const BRIDGE_ROLE_LABEL = {
   sender: "BRIDGE SENDER",
   receiver: "BRIDGE RECEIVER",
-  lead: "CHANNEL LEAD",
-  worker: "CHANNEL WORKER",
 };
 
-/** Bridge/channel card — red for bridge, orange for channel, per design handoff tokens. */
+/** Bridge card, red per design handoff tokens. */
 function BridgeCard({ bridge, onEndBridge, onOpenTranscript }) {
-  const isChannel = bridge.kind === "channel";
-  const accent = isChannel ? "#ff8c00" : "#ff0033";
-  const border = isChannel ? "rgba(255,140,0,.4)" : "rgba(255,0,51,.4)";
-  const bg = isChannel ? "rgba(255,140,0,.08)" : "rgba(255,0,51,.08)";
-  const roleLabel = BRIDGE_ROLE_LABEL[bridge.role] || (isChannel ? "CHANNEL" : "BRIDGE");
+  const accent = "#ff0033";
+  const border = "rgba(255,0,51,.4)";
+  const bg = "rgba(255,0,51,.08)";
+  const roleLabel = BRIDGE_ROLE_LABEL[bridge.role] || "BRIDGE";
 
   return (
     <div
@@ -318,7 +315,7 @@ const FAST_OPTIONS = [
 
 /**
  * Inspector — right-hand 296px panel of the Workspace shell. Follows pane focus:
- * shows session identity, an active bridge/channel card, per-session overrides,
+ * shows session identity, an active bridge card, per-session overrides,
  * usage/cost, in-flight workflow steps, and the primary pane action grid.
  *
  * Purely presentational — all state and side effects are owned by App.jsx.

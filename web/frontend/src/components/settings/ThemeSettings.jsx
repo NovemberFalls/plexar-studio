@@ -39,7 +39,7 @@
  *   isDirty(dottedPath) → bool (prefix-aware)
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Palette, Sparkles } from "lucide-react";
 import { useTheme } from "../../hooks/useTheme.jsx";
 
@@ -52,6 +52,17 @@ const THEME_PATH = "appearance.theme";
 const ACCENT_PATH = "appearance.accent";
 const GLOW_ENABLED_PATH = "appearance.glow_enabled";
 const GLOW_SIZE_PATH = "appearance.glow_size";
+// Listened for by AppBackground, which refetches the image metadata.
+const BACKGROUND_EVENT = "plexar-background-changed";
+const BG_ENABLED_PATH = "appearance.background.enabled";
+const BG_DIM_PATH = "appearance.background.dim";
+const BG_BLUR_PATH = "appearance.background.blur";
+const BG_OPACITY_PATH = "appearance.background.pane_opacity";
+const BG_BUTTON = {
+  height: 26, padding: "0 12px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+  fontFamily: "inherit", background: "var(--cc-elev)", border: "1px solid var(--cc-border)",
+  color: "var(--cc-fg)", cursor: "pointer",
+};
 
 /** Kept identical to ThemePopover's presets so the two surfaces agree. */
 const ACCENT_PRESETS = ["#4ea1e8", "#5bbf9f", "#e0b060", "#c497d6"];
@@ -322,6 +333,7 @@ export default function ThemeSettings({ get, setField, isDirty }) {
     setGlowStrength,
     tokenOverrides,
     clearTokenOverride,
+    setBackgroundConfig,
   } = useTheme() || {};
 
   const overrides = tokenOverrides || {};
@@ -332,6 +344,9 @@ export default function ThemeSettings({ get, setField, isDirty }) {
   const superseded = Boolean(accentOverride);
 
   const [clearError, setClearError] = useState(null);
+  const [bgError, setBgError] = useState(null);
+  const [bgBusy, setBgBusy] = useState(false);
+  const bgFileRef = useRef(null);
 
   const paletteDirty = Boolean(isDirty?.(THEME_PATH));
   const accentDirty = Boolean(isDirty?.(ACCENT_PATH));
@@ -359,6 +374,56 @@ export default function ThemeSettings({ get, setField, isDirty }) {
     if (Number.isNaN(n)) return;
     setGlowStrength?.(n);
     setField(GLOW_SIZE_PATH, n);
+  };
+
+  // Background: the sliders/toggle go through the draft (Save changes) AND the
+  // theme context so the window previews live. Upload and remove act at once on
+  // the server, so their errors are shown inside the card.
+  const bgEnabled = Boolean(get(BG_ENABLED_PATH, false));
+  const bgDim = Number(get(BG_DIM_PATH, 0.55));
+  const bgBlur = Number(get(BG_BLUR_PATH, 0));
+  const bgOpacity = Number(get(BG_OPACITY_PATH, 0.85));
+  const bgDirty = Boolean(isDirty?.("appearance.background"));
+  const handleBg = (path, key, value) => {
+    setBackgroundConfig?.({ [key]: value });
+    setField(path, value);
+  };
+  const announceBackground = () => window.dispatchEvent(new Event(BACKGROUND_EVENT));
+  const handleBgFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBgError(null);
+    setBgBusy(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch("/api/background", { method: "PUT", body });
+      if (!res.ok) {
+        let msg = res.status === 413 ? "That image is larger than 15 MB." : "That file was not accepted.";
+        try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep the default */ }
+        setBgError(msg);
+        return;
+      }
+      announceBackground();
+    } catch {
+      setBgError("Could not reach the server to upload the image.");
+    } finally {
+      setBgBusy(false);
+    }
+  };
+  const handleBgRemove = async () => {
+    setBgError(null);
+    setBgBusy(true);
+    try {
+      const res = await fetch("/api/background", { method: "DELETE" });
+      if (!res.ok) { setBgError("The image could not be removed."); return; }
+      announceBackground();
+    } catch {
+      setBgError("Could not reach the server to remove the image.");
+    } finally {
+      setBgBusy(false);
+    }
   };
 
   // clearTokenOverride persists to settings.json and resolves {ok, error}. A
@@ -577,6 +642,92 @@ export default function ThemeSettings({ get, setField, isDirty }) {
             {sizeValue}px
           </span>
         </div>
+      </div>
+
+      {/* ── background image ───────────────────────── */}
+      <div style={CARD} data-testid="background-card">
+        <CardHeader
+          label="Background image"
+          dirty={bgDirty}
+          note="One image behind the whole window. Panels and terminals turn slightly see-through; dim keeps text readable. Terminals opened before a change keep their old look until reopened. Popout windows always stay solid."
+        />
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+          <input
+            ref={bgFileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            onChange={handleBgFile}
+            aria-label="Choose background image"
+            data-testid="background-file"
+            style={{ display: "none" }}
+          />
+          <button
+            type="button"
+            data-testid="background-choose"
+            disabled={bgBusy}
+            onClick={() => bgFileRef.current?.click()}
+            className="transition-colors hover-bg-elevated"
+            style={BG_BUTTON}
+          >
+            Choose image
+          </button>
+          <button
+            type="button"
+            data-testid="background-remove"
+            disabled={bgBusy}
+            onClick={handleBgRemove}
+            className="transition-colors hover-bg-elevated"
+            style={BG_BUTTON}
+          >
+            Remove image
+          </button>
+          <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>PNG, JPEG or WebP, up to 15 MB</span>
+        </div>
+        {bgError && (
+          <div role="alert" data-testid="background-error" style={{ fontSize: 11, color: "var(--cc-error)", marginBottom: 12 }}>
+            {bgError}
+          </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <Toggle
+            on={bgEnabled}
+            onToggle={() => handleBg(BG_ENABLED_PATH, "enabled", !bgEnabled)}
+            label={bgEnabled ? "Hide the background image" : "Show the background image"}
+            testId={`field-${BG_ENABLED_PATH}`}
+            dirty={Boolean(isDirty?.(BG_ENABLED_PATH))}
+          />
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-fg)" }}>
+            {bgEnabled ? "Enabled" : "Disabled"}
+          </span>
+        </div>
+        {[
+          { label: "Dim", path: BG_DIM_PATH, key: "dim", value: bgDim, min: 0, max: 0.95, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
+          { label: "Blur", path: BG_BLUR_PATH, key: "blur", value: bgBlur, min: 0, max: 40, step: 1, fmt: (v) => `${v}px` },
+          { label: "Panel opacity", path: BG_OPACITY_PATH, key: "paneOpacity", value: bgOpacity, min: 0.3, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
+        ].map((r) => (
+          <div key={r.path} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, opacity: bgEnabled ? 1 : 0.45 }}>
+            <span style={{ ...LABEL, width: 96, flexShrink: 0 }}>{r.label}</span>
+            <input
+              type="range"
+              min={r.min}
+              max={r.max}
+              step={r.step}
+              value={r.value}
+              disabled={!bgEnabled}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (!Number.isNaN(n)) handleBg(r.path, r.key, n);
+              }}
+              aria-label={r.label}
+              data-testid={`field-${r.path}`}
+              data-dirty={isDirty?.(r.path) ? "true" : "false"}
+              style={{ flex: 1, minWidth: 0, accentColor: isDirty?.(r.path) ? DIRTY : "var(--cc-accent)" }}
+            />
+            <span style={{ fontSize: 12, fontWeight: 700, minWidth: 44, textAlign: "right", color: "var(--cc-fg)" }}>
+              {r.fmt(r.value)}
+            </span>
+          </div>
+        ))}
       </div>
 
       {/* ── relationship to the tokens page ────────── */}

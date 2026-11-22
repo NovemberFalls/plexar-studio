@@ -36,6 +36,7 @@ import LaneStrip from "./components/shell/LaneStrip";
 import Inspector from "./components/shell/Inspector";
 import StatusStrip from "./components/shell/StatusStrip";
 import SettingsView from "./components/settings/SettingsView";
+import AppBackground from "./components/AppBackground";
 import ChatView from "./components/ChatView.jsx";
 import TasksView, { prefetchFrameworkProbe } from "./components/TasksView.jsx";
 import { reconcileWorkers, restoredGrid } from "./subsessions.js";
@@ -2804,6 +2805,7 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden relative" style={{ background: "var(--cc-bg)" }}>
+        <AppBackground />
         {/* The rail is now FULL HEIGHT and the command bar / status strip live
             inside the content column to its right — the redesigned shell. */}
         <div className="relative z-10 flex h-full min-h-0">
