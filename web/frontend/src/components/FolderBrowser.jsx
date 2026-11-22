@@ -26,6 +26,11 @@
  * does not register tauri-plugin-dialog yet, so the handoff surfaces an inline
  * error instead of throwing — never a console error, never a silent no-op.
  *
+ * INJECTED FETCHER. `fetchListing(path)` replaces GET /api/browse, so the same
+ * browser can list ANOTHER machine's folders (a Studio peer's /browse). It must
+ * resolve to that route's JSON body or throw. With a fetcher injected the native
+ * dialog is disabled with its reason: it can only pick a folder on this computer.
+ *
  * SELECTION MODEL. `path` is the folder being LISTED; `selectedPath` is the
  * candidate working directory. Clicking a row selects it; Enter / double-click
  * navigates into it (and selects it). The parent owns both.
@@ -218,6 +223,7 @@ export default function FolderBrowser({
   savedLocations = [],
   selectedGit = null,
   onPastePath,
+  fetchListing = null,
 }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -229,7 +235,12 @@ export default function FolderBrowser({
   const filterRef = useRef(null);
   const reqRef = useRef(0);
 
-  const tauri = isTauriRuntime();
+  const tauri = isTauriRuntime() && !fetchListing;
+  const nativeTitle = fetchListing
+    ? "The native folder dialog lists this computer's folders, not the other machine's"
+    : tauri
+      ? "Pick a folder with the operating system dialog"
+      : "The native folder dialog needs the desktop app";
 
   // Fetch the listing whenever the browsed folder changes.
   useEffect(() => {
@@ -239,9 +250,14 @@ export default function FolderBrowser({
     setError("");
     (async () => {
       try {
-        const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
-        if (!res.ok) throw new Error(`server returned ${res.status}`);
-        const data = await res.json();
+        let data;
+        if (fetchListing) {
+          data = await fetchListing(path);
+        } else {
+          const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+          if (!res.ok) throw new Error(`server returned ${res.status}`);
+          data = await res.json();
+        }
         if (reqRef.current !== req) return;
         setEntries(normaliseEntries(data));
       } catch (err) {
@@ -254,7 +270,7 @@ export default function FolderBrowser({
         if (reqRef.current === req) setLoading(false);
       }
     })();
-  }, [path]);
+  }, [path, fetchListing]);
 
   // A new folder resets the filter and the keyboard cursor.
   useEffect(() => {
@@ -443,11 +459,7 @@ export default function FolderBrowser({
           disabled={!tauri}
           className={tauri ? "hover-bg-surface flex items-center gap-1" : "flex items-center gap-1"}
           aria-label="Open the native folder dialog"
-          title={
-            tauri
-              ? "Pick a folder with the operating system dialog"
-              : "The native folder dialog needs the desktop app"
-          }
+          title={nativeTitle}
           style={{
             height: 22,
             padding: "0 8px",

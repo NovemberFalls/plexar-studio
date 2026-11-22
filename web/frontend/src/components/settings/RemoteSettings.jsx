@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, Cloud, Copy, KeyRound, Plug, RadioTower, QrCode, ShieldOff, Smartphone, TriangleAlert } from "lucide-react";
 import QRCode from "qrcode";
+import PeersCard from "./PeersCard";
 
 const PROBE_HINTS = {
   access: "Cloudflare Access answered — the tunnel is up and gated by Access.",
@@ -1382,6 +1383,9 @@ export default function RemoteSettings({ get, setField }) {
 
       {/* ── Plexar Harness ────────────────────────────────── */}
       <HarnessCard get={get} setField={setField} />
+
+      {/* ── Other machines (Studio peers) ─────────────────── */}
+      <PeersCard />
 
       {/* ── Devices ───────────────────────────────────────── */}
       <div style={CARD} data-testid="card-devices">

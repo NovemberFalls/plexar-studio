@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { SearchAddon } from "@xterm/addon-search";
-import { X, Minus, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow, OctagonX, EllipsisVertical } from "lucide-react";
+import { X, Minus, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow, OctagonX, EllipsisVertical, Star, Monitor } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import WorkflowsPanel from "./WorkflowsPanel";
@@ -18,6 +18,7 @@ import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalF
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
 import { buildXtermTheme, withAlpha } from "../utils/xtermTheme";
 import { diagnoseSocketFailure, WS_REFUSED, REFUSED_MESSAGE } from "../wsDiagnose";
+import { isPeerSession, sessionSocketPath, PEER_UNAVAILABLE } from "../utils/peers";
 import "@xterm/xterm/css/xterm.css";
 
 /**
@@ -72,6 +73,15 @@ const TerminalPane = forwardRef(function TerminalPane({
   codexRef.current = session.harness === "codex" || getModelHarness(session.model) === "codex";
   const terminalIdRef = useRef(session.terminalId);
   terminalIdRef.current = session.terminalId;
+  // A session on another machine (Studio peer) attaches through /ws/peer and has
+  // no LOCAL terminal id, so nothing keyed on one (upload, rename, transcript,
+  // the actions menu's /api/terminals routes) may run for it.
+  const isPeer = isPeerSession(session);
+  const peerRef = useRef(isPeer);
+  peerRef.current = isPeer;
+  const socketPath = sessionSocketPath(session);
+  const socketPathRef = useRef(socketPath);
+  socketPathRef.current = socketPath;
   const resizeObserver = useRef(null);
   const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
   const reconnectTimer = useRef(null);
@@ -122,6 +132,7 @@ const TerminalPane = forwardRef(function TerminalPane({
      *  is serialized by the backend's per-session write lock like any keystroke.
      *  No-ops when the socket is not open rather than throwing. */
     interrupt: () => {
+      // Same ESC over the same socket for a peer pane; /ws/peer forwards it as input.
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send("\x1b");
         return true;
@@ -178,15 +189,17 @@ const TerminalPane = forwardRef(function TerminalPane({
   // The ref is assigned immediately after the useCallback declaration below.
   const connectWsRef = useRef(null);
 
-  // Connect terminal to PTY via WebSocket
-  const connectWs = useCallback((terminalId) => {
+  // Connect terminal to PTY via WebSocket. `path` is /ws/terminal/{id} for a
+  // local session or /ws/peer/{peer}/{session} for one on another machine; both
+  // speak the same frames and take the same replay query.
+  const connectWs = useCallback((path) => {
     if (!xtermRef.current) return;
     if (originRefused.current) return;
 
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${terminalId}${replayQuery(replayCursorRef.current)}`);
+    const ws = new WebSocket(`${proto}//${location.host}${path}${replayQuery(replayCursorRef.current)}`);
     wsRef.current = ws;
-    connectedTerminalIdRef.current = terminalId;
+    connectedTerminalIdRef.current = path;
 
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
@@ -278,7 +291,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         // After attempt 3, reconnect silently every 10s
       }
       // Use the ref to avoid a stale closure on connectWs itself
-      reconnectTimer.current = setTimeout(() => connectWsRef.current?.(terminalId), delay);
+      reconnectTimer.current = setTimeout(() => connectWsRef.current?.(path), delay);
     };
 
     ws.onerror = () => {
@@ -374,6 +387,11 @@ const TerminalPane = forwardRef(function TerminalPane({
       // own bracketed-paste-mode-aware path, so onData fires exactly once with
       // correctly framed data.
       const clipboardPaste = createTerminalClipboard({
+        // An image is uploaded to THIS computer, so its path means nothing to a
+        // peer's CLI: refuse it there. Text paste is unaffected.
+        ...(peerRef.current
+          ? { upload: () => Promise.reject(new Error(PEER_UNAVAILABLE)) }
+          : {}),
         captureTarget: () => wsRef.current?.readyState === WebSocket.OPEN
           ? { term, socket: wsRef.current, terminalId: terminalIdRef.current } : null,
         isCurrent: (target) => !cancelled && xtermRef.current === target.term
@@ -384,7 +402,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       const pasteHandler = clipboardPaste.paste;
       const termEl = termRef.current;
       const historyScroll = attachCodexHistoryScroll(term, termEl, {
-        enabled: () => codexRef.current && !transcriptOpenRef.current,
+        enabled: () => codexRef.current && !peerRef.current && !transcriptOpenRef.current,
         onHistory: () => setShowTranscript("scroll"),
       });
       termEl.addEventListener("paste", pasteHandler, { capture: true });
@@ -480,9 +498,9 @@ const TerminalPane = forwardRef(function TerminalPane({
       };
       document.addEventListener("visibilitychange", handleVisibilityChange);
 
-      // Connect to PTY if we have a terminalId
-      if (terminalIdRef.current) {
-        connectWs(terminalIdRef.current);
+      // Connect to PTY if there is something to attach to
+      if (socketPathRef.current) {
+        connectWs(socketPathRef.current);
       }
 
       cleanup = () => {
@@ -578,9 +596,9 @@ const TerminalPane = forwardRef(function TerminalPane({
     return () => { cancelled = true; clearTimeout(fallback); };
   }, [terminalZoom, safeFit]);
 
-  // Connect/reconnect when terminalId changes
+  // Connect/reconnect when the socket target changes
   useEffect(() => {
-    if (session.terminalId && xtermRef.current && connectedTerminalIdRef.current !== session.terminalId) {
+    if (socketPath && xtermRef.current && connectedTerminalIdRef.current !== socketPath) {
       // The mount effect already connects when platform info is cached. Only a
       // genuinely different PTY should replace that socket and erase its buffer.
       // Close old connection and cancel pending reconnects
@@ -603,9 +621,9 @@ const TerminalPane = forwardRef(function TerminalPane({
       // the dedupe cache so the post-connect safeFit() always sends fresh
       // dims even if they happen to match the old terminal's last-known size.
       lastSentDimsRef.current = null;
-      connectWs(session.terminalId);
+      connectWs(socketPath);
     }
-  }, [session.terminalId, connectWs]);
+  }, [socketPath, connectWs]);
 
   // Refit when pane position changes (layout switch causes external size change)
   useEffect(() => {
@@ -622,6 +640,11 @@ const TerminalPane = forwardRef(function TerminalPane({
 
     e.preventDefault();
     e.stopPropagation();
+
+    if (peerRef.current) {
+      toast?.(`File drop: ${PEER_UNAVAILABLE}`, "info");
+      return;
+    }
 
     const formData = new FormData();
     files.forEach((f) => formData.append("files", f));
@@ -663,6 +686,11 @@ const TerminalPane = forwardRef(function TerminalPane({
   // Interrupt (ESC) the busy generation — never gated on server side, so no
   // 409 handling needed here (unlike the /command endpoint used by PaneActionsMenu).
   const handleInterrupt = useCallback(async () => {
+    if (isPeer) {
+      if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send("\x1b");
+      else toast?.("Session is not connected — nothing to interrupt", "error");
+      return;
+    }
     if (!session.terminalId) return;
     try {
       const res = await fetch(`/api/terminals/${session.terminalId}/interrupt`, { method: "POST" });
@@ -673,7 +701,7 @@ const TerminalPane = forwardRef(function TerminalPane({
     } catch (err) {
       toast?.(`Interrupt failed: ${err.message}`, "error");
     }
-  }, [session.terminalId, toast]);
+  }, [session.terminalId, toast, isPeer]);
 
   // Rename: enter inline-edit mode. Triggered by double-click on the pane
   // header name or by the "Rename…" row in PaneActionsMenu.
@@ -684,11 +712,12 @@ const TerminalPane = forwardRef(function TerminalPane({
   const renameCommittedRef = useRef(false);
 
   const startRename = useCallback(() => {
+    if (isPeer) return;
     renameCommittedRef.current = false;
     setRenameValue(session.name);
     setRenameSyncClaude(true);
     setRenaming(true);
-  }, [session.name]);
+  }, [session.name, isPeer]);
 
   const cancelRename = useCallback(() => {
     renameCommittedRef.current = true;
@@ -831,9 +860,20 @@ const TerminalPane = forwardRef(function TerminalPane({
               className="truncate min-w-0"
               style={{ color: "var(--cc-fg, var(--text-primary))", fontSize: 13, fontWeight: 700 }}
               onDoubleClick={startRename}
-              title={`${session.name} (double-click to rename)`}
+              title={!isPeer ? `${session.name} (double-click to rename)` : `${session.name} (rename: ${PEER_UNAVAILABLE})`}
             >
               {session.name}
+            </span>
+          )}
+          {isPeer && (
+            <span
+              data-testid="pane-machine"
+              className="ph-t2 flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
+              style={{ color: "var(--cc-accent)", border: "1px solid var(--cc-border, var(--border-color))" }}
+              title={`Running on ${session.machineLabel || session.machine}`}
+            >
+              <Monitor size={10} aria-hidden="true" />
+              {session.machineLabel || session.machine}
             </span>
           )}
           <span
@@ -862,7 +902,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0" style={codexRef.current ? { flexWrap: "wrap", maxWidth: "100%" } : undefined}>
-          {codexRef.current && <button type="button" onClick={() => setShowTranscript(true)} title="Read saved Codex messages" style={{ fontSize: 10 }}>Conversation history</button>}
+          {codexRef.current && !isPeer && <button type="button" onClick={() => setShowTranscript(true)} title="Read saved Codex messages" style={{ fontSize: 10 }}>Conversation history</button>}
           {codexRef.current && <CodexUsageBadge usage={usage} />}
           {!codexRef.current && usage && (
             <div className="pane-usage-stats ph-t1 flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
@@ -1019,6 +1059,22 @@ const TerminalPane = forwardRef(function TerminalPane({
               <Link2 size={13} />
             </button>
           )}
+          {isPeer ? (
+            // The actions menu drives /api/terminals/{id} routes, which a session
+            // on another machine has none of; Make featured is the one grid act kept.
+            onMakeFeatured && (
+              <button
+                type="button"
+                onClick={onMakeFeatured}
+                className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
+                style={{ color: "var(--text-muted)" }}
+                data-tooltip="Make featured"
+                aria-label="Make featured"
+              >
+                <Star size={13} />
+              </button>
+            )
+          ) : (
           <div className="relative">
             <button
               ref={actionsMenuBtnRef}
@@ -1047,6 +1103,7 @@ const TerminalPane = forwardRef(function TerminalPane({
               />
             )}
           </div>
+          )}
           {onHide && (
             <button
               type="button"
@@ -1168,7 +1225,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         onDragOver={handleDragOver}
       >
         <div ref={termRef} className="w-full h-full" />
-        {codexRef.current && showTranscript && <CodexTranscript key={session.terminalId} terminalId={session.terminalId} statusHost={transcriptStatusHost} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
+        {codexRef.current && !isPeer && showTranscript && <CodexTranscript key={session.terminalId} terminalId={session.terminalId} statusHost={transcriptStatusHost} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
       </div>
     </div>
   );

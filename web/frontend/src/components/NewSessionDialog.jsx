@@ -36,6 +36,14 @@
  *     themselves, folder changes no longer overwrite their choice.
  *   · The CLAUDE_CLI_PATH escape-hatch note is retained.
  *
+ * OTHER MACHINES (Studio peers). With `machines` non-empty a Machine select
+ * appears ("This computer" plus each paired machine). Choosing a peer swaps the
+ * folder source to that peer's workdirs/browse and the harness/model/permission/
+ * effort vocabularies to its catalog; anything the peer does not offer stays
+ * listed but not selectable, with the reason (utils/peers.peerChoiceOptions).
+ * The 4th onConfirm argument then carries `machine: <peer id>`; for this
+ * computer the key is absent, exactly as before.
+ *
  * WHAT CHANGED: the dialog is 880px, hosts <FolderBrowser/>, and the bypass
  * control now reads "Bypass inherited from folder" when the selected folder is a
  * saved location that carries bypass — presentation only, identical behaviour.
@@ -72,6 +80,7 @@ import {
 } from "../modelCatalog";
 import { normPath, baseName, parentOf } from "./folderPath";
 import { computeSelectPlacement, PANEL_MAX } from "./selectPlacement";
+import { peersApi, peerChoiceOptions } from "../utils/peers";
 
 const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
 
@@ -354,9 +363,15 @@ export default function NewSessionDialog({
   defaultPermissionMode,
   defaultEffort,
   defaultHarness,
+  // Paired machines: [{ id, label }]. Empty hides the Machine select.
+  machines = [],
   onConfirm,
   onCancel,
 }) {
+  const [machineSel, setMachineSel] = useState("");
+  const machine = machines.find((m) => m.id === machineSel) || null;
+  // { state: "idle"|"loading"|"ready"|"error", catalog, workdirs, roots, error }
+  const [peerInfo, setPeerInfo] = useState({ state: "idle" });
   const initialDir = recentLocations[0] || "C:\\Code";
   const [workdir, setWorkdir] = useState(initialDir);
   const [browsePath, setBrowsePath] = useState(() => parentOf(initialDir) || initialDir);
@@ -387,7 +402,7 @@ export default function NewSessionDialog({
   // so the two surfaces cannot drift into offering different model lists for
   // one harness. Flattened because ConfigSelect is a flat listbox; a group's
   // `note` rides down onto each of its rows so the reason survives flattening.
-  const modelOptions = groupsForHarness(catalog?.groups, harnessSel).flatMap((g) =>
+  const localModelOptions = groupsForHarness(catalog?.groups, harnessSel).flatMap((g) =>
     (g?.models || []).map((m) => ({
       id: m.id,
       label: m.label || m.id,
@@ -395,6 +410,15 @@ export default function NewSessionDialog({
       reason: m.unavailableReason || g?.note,
     }))
   );
+  const peerChoices = machine && peerInfo.state === "ready"
+    ? peerChoiceOptions(peerInfo.catalog, harnessSel, {
+        harnesses: HARNESS_OPTIONS,
+        permissionModes: PERMISSION_OPTIONS,
+        efforts: EFFORT_OPTIONS,
+        machineLabel: machine.label || machine.id,
+      })
+    : null;
+  const modelOptions = machine ? (peerChoices?.modelOptions || []) : localModelOptions;
 
   /**
    * Switching harness resets the model ONLY when the current one cannot run on
@@ -409,6 +433,15 @@ export default function NewSessionDialog({
    */
   const changeHarness = (next) => {
     setHarnessSel(next);
+    if (machine) {
+      // A peer's catalog names its own default per harness; take it only when the
+      // current model is not one that harness offers there.
+      const opts = peerChoiceOptions(peerInfo.catalog, next, {
+        harnesses: HARNESS_OPTIONS, permissionModes: PERMISSION_OPTIONS, efforts: EFFORT_OPTIONS,
+      });
+      if (!opts.modelOptions.some((m) => m.id === modelSel) && opts.defaultModel) setModelSel(opts.defaultModel);
+      return;
+    }
     // Plexar Harness is not in the shared catalog's harness vocabulary —
     // reconcileModelForHarness only knows claude-code/codex/any, so skip it
     // rather than have it "fix" the model to something meaningless for a
@@ -417,8 +450,21 @@ export default function NewSessionDialog({
     const { model: fixed, changed } = reconcileModelForHarness(modelSel, next);
     if (changed) setModelSel(fixed);
   };
-  const isPlexarHarness = harnessSel === PLEXAR_HARNESS_ID;
+  const isPlexarHarness = harnessSel === PLEXAR_HARNESS_ID && !machine;
   const [validation, setValidation] = useState({ state: "unknown", error: "" });
+  const [peerSubmitError, setPeerSubmitError] = useState("");
+  useEffect(() => { setPeerSubmitError(""); }, [machineSel, harnessSel, modelSel, permissionSel, effortSel]);
+  // Why a peer session cannot be created as chosen, or "". A choice the peer does
+  // not offer is refused here with its reason rather than sent and 400'd.
+  const peerBlockReason = !machineSel ? ""
+    : peerInfo.state === "loading" || peerInfo.state === "idle" ? "Still loading that machine's catalog."
+    : peerInfo.state !== "ready" ? `Could not read that machine's catalog: ${peerInfo.error || "no answer"}.`
+    : !peerChoices?.harnessOffered ? "That machine does not offer this harness."
+    : !modelSel ? "Pick a model."
+    : !modelOptions.some((m) => m.id === modelSel) ? "That machine does not offer this model for this harness."
+    : peerChoices.permissionOptions.find((o) => o.id === permissionSel)?.disabled ? "That machine does not offer this permission mode."
+    : peerChoices.effortOptions.find((o) => o.id === effortSel)?.disabled ? "That machine does not offer this effort level."
+    : "";
   const [git, setGit] = useState(null);
   const pathInputRef = useRef(null);
   const valReqRef = useRef(0);
@@ -450,6 +496,16 @@ export default function NewSessionDialog({
     }
     const req = ++valReqRef.current;
     const timer = setTimeout(async () => {
+      if (machineSel) {
+        // A peer folder is checked through its own browse route; no git read there.
+        const r = await peersApi.browse(machineSel, target);
+        if (valReqRef.current !== req) return;
+        setValidation(r.ok && !r.data?.error
+          ? { state: "valid", error: "" }
+          : { state: "invalid", error: "That folder can't be read on that machine." });
+        setGit(null);
+        return;
+      }
       try {
         const res = await fetch(`/api/browse?path=${encodeURIComponent(target)}`);
         if (valReqRef.current !== req) return;
@@ -474,7 +530,55 @@ export default function NewSessionDialog({
       }
     }, 180);
     return () => clearTimeout(timer);
-  }, [workdir]);
+  }, [workdir, machineSel]);
+
+  // Load the chosen peer's catalog and folders.
+  useEffect(() => {
+    if (!machineSel) { setPeerInfo({ state: "idle" }); return undefined; }
+    let cancelled = false;
+    setPeerInfo({ state: "loading" });
+    (async () => {
+      const [cat, wd] = await Promise.all([peersApi.catalog(machineSel), peersApi.workdirs(machineSel)]);
+      if (cancelled) return;
+      if (!cat.ok) { setPeerInfo({ state: "error", error: cat.error }); return; }
+      const workdirs = wd.ok && Array.isArray(wd.data?.workdirs) ? wd.data.workdirs : [];
+      const roots = wd.ok && Array.isArray(wd.data?.roots) ? wd.data.roots : [];
+      setPeerInfo({ state: "ready", catalog: cat.data, workdirs, roots, error: wd.ok ? "" : wd.error });
+      const first = workdirs[0]?.path || roots[0] || "";
+      setWorkdir(first);
+      setBrowsePath(first ? (parentOf(first) || first) : "");
+    })();
+    return () => { cancelled = true; };
+  }, [machineSel]);
+
+  const changeMachine = (next) => {
+    setMachineSel(next);
+    setManualBypassOverride(false);
+    if (!next) {
+      // Back to this computer: the local starting point, as the dialog opened.
+      setWorkdir(initialDir);
+      setBrowsePath(parentOf(initialDir) || initialDir);
+      setModelSel(defaultModel || "");
+      setHarnessSel(defaultHarness || DEFAULT_HARNESS);
+    }
+  };
+
+  // Once a peer catalog arrives, move the model onto that peer's default for the
+  // current harness when the current one is not offered there.
+  useEffect(() => {
+    if (peerInfo.state !== "ready") return;
+    const opts = peerChoiceOptions(peerInfo.catalog, harnessSel, {
+      harnesses: HARNESS_OPTIONS, permissionModes: PERMISSION_OPTIONS, efforts: EFFORT_OPTIONS,
+    });
+    if (!opts.modelOptions.some((m) => m.id === modelSel) && opts.defaultModel) setModelSel(opts.defaultModel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when a catalog arrives
+  }, [peerInfo]);
+
+  const fetchPeerListing = useCallback(async (p) => {
+    const r = await peersApi.browse(machineSel, p);
+    if (!r.ok) throw new Error(r.error);
+    return r.data;
+  }, [machineSel]);
 
   const handleSubmit = useCallback(
     (e) => {
@@ -482,14 +586,16 @@ export default function NewSessionDialog({
       // The 4th argument is per-session OVERRIDES. The first three are byte-for
       // -byte what they always were, so any caller that ignores the 4th keeps
       // working — but App.jsx reads it, which is what makes these selects real.
+      if (peerBlockReason) { setPeerSubmitError(peerBlockReason); return; }
       onConfirm(name.trim(), workdir.trim(), bypassPermissions, {
         model: modelSel,
         permissionMode: permissionSel,
         effort: effortSel,
         harness: harnessSel,
+        ...(machineSel ? { machine: machineSel } : {}),
       });
     },
-    [bypassPermissions, effortSel, harnessSel, modelSel, name, onConfirm, permissionSel, workdir]
+    [bypassPermissions, effortSel, harnessSel, modelSel, name, onConfirm, permissionSel, workdir, machineSel, peerBlockReason]
   );
 
   const handleKeyDown = (e) => {
@@ -513,6 +619,9 @@ export default function NewSessionDialog({
     pathInputRef.current?.select();
   };
 
+  const peerWorkdirs = peerInfo.state === "ready" ? peerInfo.workdirs : [];
+  const peerSaved = peerWorkdirs.filter((w) => w.source === "saved").map((w) => ({ path: w.path, bypassPermissions: false }));
+  const peerRecents = peerWorkdirs.filter((w) => w.source !== "saved").map((w) => w.path);
   const ok = validation.state === "valid";
   const isRepo = git?.git === true;
   // dirty === null is UNKNOWN (timed out / failed), never "clean".
@@ -570,10 +679,11 @@ export default function NewSessionDialog({
             selectedPath={workdir}
             onSelectPath={setWorkdir}
             onCreateHere={handleSubmit}
-            recentLocations={recentLocations}
-            savedLocations={savedLocations}
+            recentLocations={machine ? peerRecents : recentLocations}
+            savedLocations={machine ? peerSaved : savedLocations}
             selectedGit={git}
             onPastePath={focusPathInput}
+            fetchListing={machine ? fetchPeerListing : null}
           />
 
           {/* ── confirm block ── */}
@@ -735,10 +845,18 @@ export default function NewSessionDialog({
               {/* Harness sits LEFT of Model, matching the TopBar's ordering:
                   it decides which CLI runs, and therefore which models the next
                   select may offer. */}
+              {machines.length > 0 && (
+                <ConfigSelect
+                  label="Machine"
+                  value={machineSel}
+                  options={[{ id: "", label: "This computer" }, ...machines.map((m) => ({ id: m.id, label: m.label || m.id }))]}
+                  onChange={changeMachine}
+                />
+              )}
               <ConfigSelect
                 label="Harness"
                 value={harnessSel}
-                options={HARNESS_OPTIONS}
+                options={peerChoices ? peerChoices.harnessOptions : HARNESS_OPTIONS}
                 onChange={changeHarness}
               />
               <ConfigSelect
@@ -752,18 +870,23 @@ export default function NewSessionDialog({
               <ConfigSelect
                 label="Permission"
                 value={permissionSel}
-                options={PERMISSION_OPTIONS}
+                options={peerChoices ? peerChoices.permissionOptions : PERMISSION_OPTIONS}
                 onChange={setPermissionSel}
               />
               <ConfigSelect
                 label="Effort"
                 value={effortSel}
-                options={EFFORT_OPTIONS}
+                options={peerChoices ? peerChoices.effortOptions : EFFORT_OPTIONS}
                 onChange={setEffortSel}
                 disabled={isPlexarHarness}
                 disabledReason={PLEXAR_HARNESS_CONFIG_REASON}
               />
             </div>
+            {machine && (peerSubmitError || peerBlockReason || peerInfo.error) && (
+              <span role="note" data-testid="peer-dialog-note" style={{ fontSize: 10, color: peerSubmitError ? "var(--cc-error)" : "var(--cc-muted)", lineHeight: 1.4 }}>
+                {peerSubmitError || peerBlockReason || `Folder list unavailable: ${peerInfo.error}`}
+              </span>
+            )}
             {isPlexarHarness && (
               <span role="note" data-testid="plexar-harness-config-reason" style={{ fontSize: 10, color: "var(--cc-muted)", lineHeight: 1.4 }}>
                 {PLEXAR_HARNESS_CONFIG_REASON}

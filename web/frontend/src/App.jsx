@@ -49,6 +49,11 @@ import {
 } from "./utils/paneLayout";
 import FamilyPullDialog from "./components/FamilyPullDialog";
 import AgentApprovalDialog from "./components/AgentApprovalDialog";
+import usePeers, { usePeersPoller } from "./hooks/usePeers";
+import {
+  peersApi, peerCreateBody, peerSessionRecord, reconcilePeerSessions,
+  dropUnpairedPeerSessions, parsePeerDragData, describePeerStatus,
+} from "./utils/peers";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -250,9 +255,11 @@ function saveSessions(sessions, activeIds = []) {
   const toSave = sessions
     .filter((s) => s.status !== "history")
     .map(({ name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone, id }) => ({
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone, id,
+      machine, machineLabel, remoteId }) => ({
       inGrid: shown.has(id), name, model, workdir, terminalId, harness, codex_session_id,
       claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName, parentTerminalId, fromPhone,
+      machine, machineLabel, remoteId,
     }));
   lsSave(SESSIONS_KEY, toSave);
 }
@@ -808,8 +815,46 @@ export default function App() {
     return () => clearTimeout(remoteLocationsTimerRef.current);
   }, [savedLocations]);
 
+  // Paired machines (Studio peers). One poller app-wide; Settings, the sidebar
+  // and the New session dialog all read the same store.
+  const { peers, live: peerLive, loaded: peersLoaded } = usePeers();
+  usePeersPoller(backendReady);
+  const peersRef = useRef(peers);
+  peersRef.current = peers;
+  const peerLiveRef = useRef(peerLive);
+  peerLiveRef.current = peerLive;
+
+  /** A session created on another machine: POST /api/peers/{id}/sessions, then
+   *  an ordinary pane attached through /ws/peer. */
+  const createPeerSession = useCallback(async (name, workdir, sessionModel, options) => {
+    const localId = nextLocalId++;
+    const sessionName = name || `Session ${localId}`;
+    const peer = peersRef.current.find((p) => p.id === options.machine) || { id: options.machine };
+    setSessions((prev) => [...prev, {
+      ...peerSessionRecord(peer, { id: null, name: sessionName, model: sessionModel, harness: options.harness, working_dir: workdir }, localId),
+      status: "starting",
+      permissionMode: options.permissionMode,
+      effort: options.effort,
+      bypassPermissions: !!options.bypassPermissions,
+    }]);
+    jumpToRef.current = localId;
+    setActiveIds((prev) => placeInView(prev, localId, pagingRef.current.pageStart));
+    const r = await peersApi.createSession(options.machine, peerCreateBody({
+      name: sessionName, workdir, harness: options.harness, model: sessionModel,
+      permissionMode: options.permissionMode, effort: options.effort, bypassPermissions: options.bypassPermissions,
+    }));
+    if (!r.ok || !r.data?.session?.id) {
+      toast(r.reason ? `${peer.label || peer.id}: ${describePeerStatus({ reason: r.reason }).label}` : r.error || "Failed to create session", "error");
+      setSessions((prev) => prev.map((s) => (s.id === localId ? { ...s, status: "error" } : s)));
+      return;
+    }
+    setSessions((prev) => prev.map((s) => (s.id === localId
+      ? { ...s, remoteId: r.data.session.id, status: "running", adoptedAt: Date.now() } : s)));
+  }, [toast]);
+
   // Create a new terminal session
   const createSession = useCallback(async (name, workdir, sessionModel, options = {}) => {
+    if (options.machine) return createPeerSession(name, workdir, sessionModel, options);
     const localId = nextLocalId++;
     const sessionName = name || `Session ${localId}`;
     const dir = workdir || "C:\\Code";
@@ -930,7 +975,7 @@ export default function App() {
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, harness, permissionMode, effort, fast, addLocations, toast]);
+  }, [model, harness, permissionMode, effort, fast, addLocations, toast, createPeerSession]);
 
   // Remove a session (kills terminal on server) with 12s undo window.
   // Codex undo requires its exact chat identity; Claude retains its established
@@ -938,6 +983,18 @@ export default function App() {
   const removeSession = useCallback(async (localId) => {
     const session = sessions.find((s) => s.id === localId);
     if (!session) return;
+
+    // A session on another machine is ended through the peer route. There is no
+    // quick-resume undo for it: that path resumes a LOCAL conversation.
+    if (session.machine) {
+      setSessions((prev) => prev.filter((s) => s.id !== localId));
+      setActiveIds((prev) => prev.map((id) => id === localId ? null : id));
+      if (session.remoteId) {
+        const r = await peersApi.endSession(session.machine, session.remoteId);
+        if (!r.ok && r.status !== 404) toast(`Could not end "${session.name}" on ${session.machineLabel || session.machine}: ${r.error}`, "error");
+      }
+      return;
+    }
 
     // Kill backend terminal (best-effort — same behavior as before)
     if (session.terminalId) {
@@ -1222,6 +1279,12 @@ export default function App() {
         const reattached = [];
         const toResume = [];
         for (const s of saved) {
+          // A session on another machine reattaches by its peer id and remote id;
+          // the peer poll drops it if that machine no longer has it.
+          if (s.machine) {
+            if (s.remoteId) reattached.push({ ...s, id: nextLocalId++, terminalId: null, status: "running" });
+            continue;
+          }
           const available = backendTerminals.filter((t) => t.alive && !claimed.has(t.id));
           let match = available.find((t) => t.id === s.terminalId);
           if (!match && s.codex_session_id) {
@@ -1276,7 +1339,7 @@ export default function App() {
           setSessions(reattached);
           // No slot ceiling: panes beyond `layout` simply land on later pages.
           setActiveIds(restoredGrid(reattached));
-          addLocations(reattached.map((s) => s.workdir).filter(Boolean));
+          addLocations(reattached.filter((s) => !s.machine).map((s) => s.workdir).filter(Boolean));
         } else {
           setSessions([]);
           setActiveIds([]);
@@ -1412,11 +1475,39 @@ export default function App() {
   const savedLocationsRef = useRef(savedLocations);
   savedLocationsRef.current = savedLocations;
 
+  /** The local record for a session on a paired machine, created on first use.
+   *  Returns its local id; placing it is the caller's choice. */
+  const adoptPeerSession = useCallback((peerId, remote) => {
+    const existing = sessionsRef.current.find((s) => s.machine === peerId && s.remoteId === remote.id);
+    if (existing) return existing.id;
+    const peer = peersRef.current.find((p) => p.id === peerId) || { id: peerId };
+    const id = nextLocalId++;
+    const record = peerSessionRecord(peer, remote, id);
+    sessionsRef.current = [...sessionsRef.current, record];
+    setSessions((prev) => [...prev, record]);
+    return id;
+  }, []);
+  const openPeerSession = useCallback((peerId, remote) => {
+    selectSession(adoptPeerSession(peerId, remote));
+  }, [adoptPeerSession, selectSession]);
+
+  // Each successful peer poll updates that machine's records; an unpaired
+  // machine's records go. An unreachable peer keeps its panes.
+  useEffect(() => {
+    setSessions((prev) => {
+      let next = peersLoaded ? dropUnpairedPeerSessions(prev, peers.map((p) => p.id)) : prev;
+      for (const [id, l] of Object.entries(peerLive)) {
+        if (Array.isArray(l.sessions) && l.status && !l.status.reason) next = reconcilePeerSessions(next, id, l.sessions);
+      }
+      return next;
+    });
+  }, [peerLive, peers, peersLoaded]);
+
   useEffect(() => {
     if (!backendReady) return;
     const fetchGit = async () => {
       const dirs = new Set([
-        ...sessionsRef.current.map((s) => s.workdir).filter(Boolean),
+        ...sessionsRef.current.filter((s) => !s.machine).map((s) => s.workdir).filter(Boolean),
         ...savedLocationsRef.current.map((l) => l.path),
       ]);
       if (dirs.size === 0) return;
@@ -1945,7 +2036,7 @@ export default function App() {
       name,
       layout,
       sessions: sessions
-        .filter((s) => s.status === "running")
+        .filter((s) => s.status === "running" && !s.machine)
         .map(({ name, model, workdir }) => ({ name, model, workdir })),
       activeIds: activeIds.slice(0, layout).map((id) => {
         if (id == null) return null;
@@ -2191,6 +2282,13 @@ export default function App() {
       .map((m) => ({ value: m.id, label: m.label })),
     [harness],
   );
+
+  const sidebarPeers = useMemo(() => peers.map((p) => ({
+    ...p,
+    status: peerLive[p.id]?.status,
+    sessions: peerLive[p.id]?.sessions ?? null,
+    error: peerLive[p.id]?.error || null,
+  })), [peers, peerLive]);
 
   const activeWorkspaceName = useMemo(() => {
     const active = workspacePresets.find((w) => w?.active);
@@ -2580,7 +2678,12 @@ export default function App() {
                   setDragOverSlot(null);
                   setDragSource(null);
                   const data = e.dataTransfer.getData("text/plain");
-                  if (data.startsWith("session:")) {
+                  const peerDrop = parsePeerDragData(data);
+                  if (peerDrop) {
+                    const remote = peerLiveRef.current[peerDrop.peerId]?.sessions?.find((r) => r.id === peerDrop.remoteId)
+                      || { id: peerDrop.remoteId };
+                    placeSession(adoptPeerSession(peerDrop.peerId, remote), idx, { insert: scrollMode });
+                  } else if (data.startsWith("session:")) {
                     const droppedId = parseInt(data.slice(8), 10);
                     placeSession(droppedId, idx, { insert: scrollMode });
                     // A parent dropped on screen offers to bring its workers
@@ -2757,12 +2860,14 @@ export default function App() {
                         onDragSourceChange={layout > 1 ? setDragSource : undefined}
                         terminalZoom={terminalZoom}
                         toast={toast}
-                        onFork={() => forkSession(session.id)}
-                        onOpenBridge={() => handleOpenBridge(session.id)}
+                        // Fork, bridge and rename are LOCAL terminal acts; a pane on
+                        // another machine does not offer them.
+                        onFork={session.machine ? undefined : () => forkSession(session.id)}
+                        onOpenBridge={session.machine ? undefined : () => handleOpenBridge(session.id)}
                         onPopout={session.terminalId ? handlePopout : undefined}
                         workflowSummary={workflowsByTerminal[session.terminalId] || null}
                         usage={usageByTerminal[session.terminalId] || null}
-                        onRenameSession={(newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
+                        onRenameSession={session.machine ? undefined : (newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
                         taskDone={taskDoneTerminalIds.has(session.terminalId)}
                       />
                     )}
@@ -2912,6 +3017,8 @@ export default function App() {
                   onSaveWorkspace={saveWorkspace}
                   onLoadWorkspace={loadWorkspace}
                   onDeleteWorkspace={deleteWorkspace}
+                  peers={sidebarPeers}
+                  onSelectPeerSession={openPeerSession}
                 />
                 <div
                   onMouseDown={startSidebarResize}
@@ -3241,6 +3348,7 @@ export default function App() {
             defaultPermissionMode={permissionMode}
             defaultEffort={effort}
             defaultHarness={harness}
+            machines={peers}
             onConfirm={(name, workdir, bypassPermissions, overrides) => {
               setShowNewDialog(false);
               // The dialog's Model/Permission/Effort/Harness selects used to be

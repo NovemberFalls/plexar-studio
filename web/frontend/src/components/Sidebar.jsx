@@ -1,6 +1,7 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search, Monitor } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { groupWorkers } from "../subsessions.js";
+import { describePeerStatus, peerDragData } from "../utils/peers";
 
 /** Open a URL in the system's default browser (Tauri-safe), falling back to a new tab. */
 function openExternal(url) {
@@ -464,6 +465,92 @@ function LocationNode({ node, depth = 0, sessionsByDir, workersOf = {}, agentsOf
   );
 }
 
+/** One session on another machine. Module-scope like SessionItem; a click or a
+ *  drag places it in the grid exactly like a local row. */
+function PeerSessionItem({ peerId, remote, isActive, onSelect }) {
+  const state = remote.activity_state || (remote.alive === false ? "error" : "idle");
+  const color = getStateColor(state);
+  return (
+    <button
+      data-testid="peer-session-row"
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", peerDragData(peerId, remote.id));
+      }}
+      onClick={() => onSelect(peerId, remote)}
+      className={`flex items-center gap-1.5 w-full text-left ${!isActive ? "hover-bg-surface" : ""}`}
+      title={remote.working_dir || remote.name}
+      style={{
+        height: "24px",
+        paddingLeft: "6px",
+        borderRadius: "6px",
+        backgroundColor: isActive ? "color-mix(in srgb, var(--cc-accent) 10%, transparent)" : "transparent",
+        borderLeft: isActive ? "2px solid var(--cc-accent)" : "2px solid transparent",
+      }}
+    >
+      <span
+        data-glowdot
+        style={{
+          width: "6px", height: "6px", borderRadius: "999px", backgroundColor: color, boxShadow: `0 0 6px ${color}`,
+          flexShrink: 0, animation: isPulseState(state) ? "cc-pulse 1.5s infinite" : "none",
+        }}
+      />
+      <span className="text-xs truncate flex-1" style={{ color: isActive ? "var(--cc-fg)" : "var(--cc-dim)", fontWeight: isActive ? 700 : 400 }}>
+        {remote.name || remote.id}
+      </span>
+      {remote.working_dir && (
+        <span className="text-[9px] truncate flex-shrink-0 mr-1" style={{ color: "var(--cc-muted)", maxWidth: "40%" }}>
+          {shortPath(remote.working_dir)}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** A paired machine's group. An error renders its reason and remedy, never an
+ *  empty list that would read as "no sessions there". */
+function PeerGroup({ peer, activeKeys, filter, onSelect }) {
+  const [expanded, setExpanded] = useState(true);
+  const d = describePeerStatus(peer.status);
+  const failed = peer.status && !d.ok;
+  const sessions = (peer.sessions || []).filter((r) => r.alive !== false && !r.parent_id
+    && (!filter || (r.name || "").toLowerCase().includes(filter) || (r.working_dir || "").toLowerCase().includes(filter)));
+  return (
+    <div data-testid={`peer-group-${peer.id}`}>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 w-full text-left rounded-md hover-bg-surface"
+        style={{ height: "23px", paddingLeft: "6px", color: "var(--cc-dim)" }}
+        aria-expanded={expanded}
+        title={peer.url || peer.label}
+      >
+        {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        <Monitor size={12} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
+        <span className="text-xs truncate flex-1" style={{ color: "var(--cc-fg)", fontWeight: 700 }}>{peer.label || peer.id}</span>
+        <span className="text-[9px] flex-shrink-0 mr-1" style={{ color: d.token }}>{failed ? d.label : sessions.length || ""}</span>
+      </button>
+      {expanded && (
+        <div style={{ paddingLeft: "20px", display: "flex", flexDirection: "column", gap: "1px" }}>
+          {failed ? (
+            <p role="note" data-testid="peer-group-reason" data-reason={d.reason} className="text-[10px]" style={{ color: "var(--cc-dim)", padding: "2px 6px", lineHeight: 1.4 }}>
+              {d.remedy}
+            </p>
+          ) : !peer.status || peer.sessions == null ? (
+            <p className="text-[10px]" style={{ color: "var(--cc-muted)", padding: "2px 6px" }}>Checking…</p>
+          ) : sessions.length === 0 ? (
+            <p className="text-[10px]" style={{ color: "var(--cc-muted)", padding: "2px 6px" }}>No sessions on this machine</p>
+          ) : (
+            sessions.map((r) => (
+              <PeerSessionItem key={r.id} peerId={peer.id} remote={r} isActive={activeKeys.has(`${peer.id}/${r.id}`)} onSelect={onSelect} />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Sidebar — main export
 // ---------------------------------------------------------------------------
@@ -492,6 +579,10 @@ export default function Sidebar({
   onSaveWorkspace,
   onLoadWorkspace,
   onDeleteWorkspace,
+  // Paired machines: [{ id, label, url, status, sessions, error }] (hooks/usePeers).
+  peers = [],
+  // (peerId, remoteSession) => void -- place that machine's session in the grid.
+  onSelectPeerSession,
 }) {
   // Context menu state (location tree)
   const [ctxMenu, setCtxMenu] = useState(null);
@@ -505,10 +596,13 @@ export default function Sidebar({
   const agentsOf = subagentsByTerminal;
 
   // Filter sessions by search term
+  // Sessions on another machine are listed under that machine's group, never in
+  // this computer's folder tree (their workdir is a path over there).
   const filteredSessions = useMemo(() => {
-    if (!sessionFilter.trim()) return sessions;
+    const local = sessions.filter((s) => !s.machine);
+    if (!sessionFilter.trim()) return local;
     const q = sessionFilter.toLowerCase();
-    return sessions.filter((s) =>
+    return local.filter((s) =>
       s.name.toLowerCase().includes(q) || (s.workdir || "").toLowerCase().includes(q)
     );
   }, [sessions, sessionFilter]);
@@ -539,6 +633,10 @@ export default function Sidebar({
       // silently fail
     }
   }, [onAddLocations]);
+
+  const activePeerKeys = useMemo(() => new Set(
+    sessions.filter((s) => s.machine && s.remoteId && activeIds.includes(s.id)).map((s) => `${s.machine}/${s.remoteId}`),
+  ), [sessions, activeIds]);
 
   const handleContextMenu = useCallback((e, path) => {
     const loc = savedLocations.find((l) => l.path === path);
@@ -724,6 +822,21 @@ export default function Sidebar({
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {locationTree.map((node) => (
                 <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} workersOf={workersOf} agentsOf={agentsOf} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Other machines (Studio peers) */}
+        {peers.length > 0 && (
+          <>
+            <div className="flex items-center justify-between" style={{ padding: "10px 6px 4px" }}>
+              <span className="cc-label">Other machines</span>
+              <span style={{ fontSize: "9px", color: "var(--cc-muted)" }}>{peers.length}</span>
+            </div>
+            <div className="flex flex-col" style={{ gap: "1px" }}>
+              {peers.map((p) => (
+                <PeerGroup key={p.id} peer={p} activeKeys={activePeerKeys} filter={sessionFilter.trim().toLowerCase()} onSelect={onSelectPeerSession || (() => {})} />
               ))}
             </div>
           </>
