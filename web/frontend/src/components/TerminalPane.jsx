@@ -13,7 +13,7 @@ import CodexTranscript from "./CodexTranscript";
 import { createTerminalClipboard } from "../utils/terminalClipboard";
 import PaneActionsMenu from "./PaneActionsMenu";
 import { useModelCatalog, getModelHarness, harnessModelServedName } from "../modelCatalog";
-import { createReplayCursor, replayQuery, consumeReplayFrame, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
+import { createReplayCursor, replayQuery, consumeReplayFrame, createReplayHold, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
 import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
 import { buildXtermTheme, withAlpha } from "../utils/xtermTheme";
@@ -92,6 +92,24 @@ const TerminalPane = forwardRef(function TerminalPane({
   const originRefused = useRef(false);
   const pendingDataRef = useRef("");  // Batched WS data for xterm
   const writeRafRef = useRef(null);   // rAF handle for batched writes
+  // Hides the pane while a full history replay is buffered, then shows it already
+  // at the bottom (see createReplayHold). Built lazily; it only reads refs.
+  const replayHoldRef = useRef(null);
+  if (!replayHoldRef.current) {
+    replayHoldRef.current = createReplayHold({
+      hide: () => { if (termRef.current) termRef.current.style.visibility = "hidden"; },
+      show: () => { if (termRef.current) termRef.current.style.visibility = ""; },
+      takePending: () => {
+        const data = pendingDataRef.current;
+        pendingDataRef.current = "";
+        return data;
+      },
+      write: (data, done) => {
+        if (xtermRef.current) xtermRef.current.write(data, done); else done();
+      },
+      scrollToBottom: () => { xtermRef.current?.scrollToBottom(); },
+    });
+  }
   const searchRef = useRef(null);       // SearchAddon instance
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -238,9 +256,14 @@ const TerminalPane = forwardRef(function TerminalPane({
           pendingDataRef.current = "";
           xtermRef.current?.write("\x1bc");
         },
+        begin: ({ full }) => { if (full) replayHoldRef.current.begin(); },
+        end: () => replayHoldRef.current.release(),
       })) enqueue(evt.data);
+      // A held replay is written once, on release, not frame by frame.
+      if (replayHoldRef.current.active) return;
       if (!writeRafRef.current) {
         writeRafRef.current = requestAnimationFrame(() => {
+          if (replayHoldRef.current.active) { writeRafRef.current = null; return; }
           if (xtermRef.current && pendingDataRef.current) {
             xtermRef.current.write(pendingDataRef.current);
           }
@@ -252,6 +275,8 @@ const TerminalPane = forwardRef(function TerminalPane({
 
     ws.onclose = (evt) => {
       if (wsRef.current !== ws) return;
+      // A socket that dies mid-replay must not leave the pane hidden.
+      replayHoldRef.current.release();
       // Don't reconnect if intentionally closed or terminal not found on server
       if (evt.code === 1000 || evt.code === 4004) {
         if (evt.code === 4004 && xtermRef.current) {
@@ -511,6 +536,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         debouncedFit.cancel();
         clearTimeout(reconnectTimer.current);
         cancelAnimationFrame(writeRafRef.current);
+        replayHoldRef.current.cancel();
         resizeObserver.current?.disconnect();
         const socket = wsRef.current;
         wsRef.current = null;
@@ -608,6 +634,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       wsRef.current = null;
       socket?.close();
       cancelAnimationFrame(writeRafRef.current);
+      replayHoldRef.current.cancel();
       pendingDataRef.current = "";
       writeRafRef.current = null;
       replayCursorRef.current = createReplayCursor();
