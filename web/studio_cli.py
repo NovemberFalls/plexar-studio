@@ -162,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--effort")
     sp.add_argument("--cwd")
     sp.add_argument("--worktree", help="branch for a fresh git worktree (created if missing)")
+    sp.add_argument("--orch-run", help="plexar orch run id to stamp on the worker pane")
+    sp.add_argument("--orch-node", help="plexar orch node id")
+    sp.add_argument("--brief-sha256", help="sha256 of the card the worker was handed")
     sp.add_argument("--prompt", help="initial prompt; '-' reads it from stdin")
     pp = sub.add_parser("prompt")
     pp.add_argument("worker")
@@ -227,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "spawn":
         body = {k: v for k, v in {"name": a.name, "harness": a.harness, "model": a.model,
                                    "effort": a.effort, "cwd": a.cwd, "worktree": a.worktree,
+                                   "orch_run": a.orch_run, "orch_node": a.orch_node,
+                                   "brief_sha256": a.brief_sha256,
                                    "prompt": stdin_or(a.prompt) if a.prompt else None}.items()
                 if v is not None}
         code, out = _call("POST", "/api/agent/spawn", body, timeout=180)

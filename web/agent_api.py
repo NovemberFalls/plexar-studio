@@ -309,8 +309,12 @@ async def spawn(request: Request):
     }
     if same and caller.provider not in ("anthropic", ""):
         spawn_body["provider"] = caller.provider
+    orch = _orch_env(body)
     try:
-        result = await _deps["create"](spawn_body, parent_id=caller.id)
+        if orch:
+            result = await _deps["create"](spawn_body, parent_id=caller.id, orch=orch)
+        else:
+            result = await _deps["create"](spawn_body, parent_id=caller.id)
     except Exception as exc:  # _CreateTerminalRefused or ValueError from the one spawn path
         status = getattr(exc, "status", 400)
         payload = getattr(exc, "payload", None) or {"error": str(exc)}
@@ -321,7 +325,11 @@ async def spawn(request: Request):
         asyncio.create_task(_deliver_when_ready(child_id, prompt))
     child = _deps["pty"].sessions.get(child_id)
     return JSONResponse({"worker": _summary(child) if child else result,
-                         "prompt_queued": bool(prompt)}, status_code=201)
+                         "prompt_queued": bool(prompt),
+                         # What the pane was actually stamped with, so a caller can see
+                         # a value that was refused instead of assuming it was applied.
+                         "orch": {v: orch[k] for k, v in _ORCH_FIELDS.items() if k in orch}},
+                        status_code=201)
 
 
 @router.post("/api/agent/{ref}/prompt")
@@ -525,6 +533,25 @@ _CLEAR_CONFIRM_S = 15.0
 # expected to repaint from scratch (erase-display or a full reset). Claude Code does NOT
 # (measured 2026-10-31), which is why it is confirmed by its transcript instead.
 _CLEAR_SCREEN_RE = re.compile(r"\x1b\[[23]J|\x1bc")
+# Orchestration identity a parent may stamp on a worker pane (spawn body field ->
+# env var). A value that fails validation is left ABSENT, never truncated: a cut
+# run id would join this pane's reads to a different run's dispatch.
+_ORCH_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_ORCH_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_ORCH_FIELDS = {"PLEXAR_ORCH_RUN": "orch_run", "PLEXAR_ORCH_NODE": "orch_node",
+                "PLEXAR_BRIEF_SHA256": "brief_sha256"}
+
+
+def _orch_env(body: dict) -> dict:
+    out = {}
+    for env_key, field in _ORCH_FIELDS.items():
+        v = body.get(field)
+        pattern = _ORCH_HASH_RE if field == "brief_sha256" else _ORCH_ID_RE
+        if isinstance(v, str) and pattern.match(v):
+            out[env_key] = v
+    return out
+
+
 _CLEAR_RECORD = "<command-name>/clear</command-name>"
 
 

@@ -1212,7 +1212,8 @@ class _CreateTerminalRefused(Exception):
         self.payload = payload
 
 
-async def _create_terminal_from_body(body: dict, parent_id: str | None = None) -> dict:
+async def _create_terminal_from_body(body: dict, parent_id: str | None = None,
+                                     orch: dict | None = None) -> dict:
     """Spawn a session from a POST /api/terminals body. THE single spawn path.
 
     Raises ValueError for input pty_manager rejects (bad harness/provider combo)
@@ -1266,6 +1267,8 @@ async def _create_terminal_from_body(body: dict, parent_id: str | None = None) -
             # NEVER read from the body: only agent_api, which has authenticated the
             # parent by its spawn token, may set lineage.
             parent_id=parent_id,
+            # Same rule as lineage: validated by agent_api, never read from the body.
+            orch=orch,
         )
         # Post-spawn health check: give Claude CLI time to initialize Node.js.
         # The 1.5s wait also ensures the fast-mode --settings file has been read

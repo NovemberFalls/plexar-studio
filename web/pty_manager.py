@@ -1125,6 +1125,7 @@ class PtyManager:
         cols: int = 120,
         rows: int = 30,
         parent_id: Optional[str] = None,
+        orch: Optional[dict] = None,
     ) -> TerminalSession:
         """Spawn a new interactive Claude CLI session in a PTY.
 
@@ -1434,6 +1435,14 @@ class PtyManager:
         # it back so the "task done" toast can mark that pane. Always overwritten:
         # a Studio launched from inside another session inherits that session's id.
         env["PLEXAR_SESSION_ID"] = terminal_id
+        # Orchestration identity (plexar orch): which run and node this pane works
+        # for, and the hash of the card it was handed. The framework's read log joins
+        # on these. Only agent_api sets `orch`, already validated; every other pane
+        # has them REMOVED, because a Studio launched from inside a worker pane would
+        # otherwise hand that worker's identity to every session it starts.
+        for _k in ("PLEXAR_ORCH_RUN", "PLEXAR_ORCH_NODE", "PLEXAR_BRIEF_SHA256"):
+            env.pop(_k, None)
+        env.update(orch or {})
         # Agent sub-session API (agent_api.py): the token proves "I am this pane" to
         # /api/agent/*. Always overwritten, for the same inherited-env reason as above.
         spawn_token = secrets.token_urlsafe(24)
