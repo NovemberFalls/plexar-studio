@@ -44,10 +44,12 @@ The desktop app bundles the server and starts it automatically; no browser neede
 
 ### Plexar Mobile (Android)
 
-Use your Studio sessions from your phone. The same release carries the Android app:
+Use your Studio sessions from your phone. Download the current Android app:
 
-- **`Plexar-Mobile_<version>_android-arm64.apk`** for almost every current Android phone
-- **`Plexar-Mobile_<version>_android-armv7.apk`** for older 32-bit phones
+- **[Plexar-Mobile_android-arm64.apk](https://downloads.plexar.tech/mobile/Plexar-Mobile_android-arm64.apk)** for almost every current Android phone
+- **[Plexar-Mobile_android-armv7.apk](https://downloads.plexar.tech/mobile/Plexar-Mobile_android-armv7.apk)** for older 32-bit phones
+
+These links always serve the latest release; it is not attached to Studio's GitHub releases.
 
 Install the APK (allow installs from your browser when Android asks), then turn on **Settings ▸ Remote** in Studio and scan the pairing code with the app. Remote access is off until you enable it.
 
