@@ -2154,6 +2154,20 @@ async def get_framework_events(since: str | None = None):
     return JSONResponse(await asyncio.to_thread(framework_client.fetch_events, base, since))
 
 
+@app.get("/api/framework/orch-events")
+async def get_framework_orch_events(since: int | None = None):
+    """The framework's orch run feed (refusals, gate results, halts), for toasts.
+
+    ALWAYS 200; read-only. No `since` seeds: the reply carries no events and the
+    cursor to poll from, so history is never toasted. A framework that predates
+    the feed answers `up: false`, which the page treats as silence.
+    """
+    base = _framework_base_url()
+    if since is not None and since < 0:
+        since = 0
+    return JSONResponse(await asyncio.to_thread(framework_client.fetch_orch_events, base, since))
+
+
 # ── Plexar Harness: key, status and the model catalog ──────────────────────
 #
 # `plexar-harness` sessions are PTY terminals (POST /api/terminals, like codex);

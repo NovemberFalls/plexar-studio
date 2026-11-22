@@ -56,7 +56,9 @@ async function runProbe() {
     if (!res.ok || !data || data.up !== true) {
       return { up: false, base: data?.base || null, reason: data?.reason || "unreachable" };
     }
-    return { up: true, base: data.base, buckets: data.buckets || {} };
+    // `orch` is true for a framework that serves the orch run view, whose /app
+    // takes ?session= and ?run=. An older framework is never sent either.
+    return { up: true, base: data.base, buckets: data.buckets || {}, orch: data.orch === true };
   } catch {
     return { up: false, base: null, reason: "unreachable" };
   }
@@ -123,7 +125,24 @@ export function resolveBucket(activeLocationFolder, buckets) {
   return best;
 }
 
-export default function TasksView({ activeLocationFolder = null, forcedBucket = null, onError }) {
+/** The page TASKS opens. A run named by a toast wins; otherwise the bucket match
+ *  (older framework) and, on an orch framework, the focused pane's session id so
+ *  the page opens on that pane's runs. Null while the framework is not up. */
+export function buildTasksUrl(probe, { bucket = null, sessionId = null, runId = null } = {}) {
+  if (!probe?.up || !probe.base) return null;
+  const params = new URLSearchParams();
+  if (probe.orch && runId) {
+    params.set("run", runId);
+  } else {
+    if (bucket) params.set("bucket", bucket);
+    if (probe.orch && sessionId) params.set("session", sessionId);
+  }
+  const qs = params.toString();
+  return `${probe.base}/app${qs ? `?${qs}` : ""}`;
+}
+
+export default function TasksView({ activeLocationFolder = null, forcedBucket = null,
+  sessionId = null, runId = null, onError }) {
   const hostRef = useRef(null);
   const viewRef = useRef(null);
   const [isTauri] = useState(
@@ -150,9 +169,7 @@ export default function TasksView({ activeLocationFolder = null, forcedBucket = 
         ? forcedBucket
         : resolveBucket(activeLocationFolder, probe.buckets))
     : null;
-  const url = probe?.up
-    ? `${probe.base}/app${bucket ? `?bucket=${encodeURIComponent(bucket)}` : ""}`
-    : null;
+  const url = buildTasksUrl(probe, { bucket, sessionId, runId });
 
   /** Push the measured rect of our placeholder onto the webview. Identical
    *  to ChatView.jsx's `sync` — see there for why the DOM node is the single

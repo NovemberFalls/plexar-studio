@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import sys
+import urllib.error
+import urllib.parse
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -76,11 +78,15 @@ def test_summary_up_merges_daemon_cwd_into_buckets(monkeypatch):
                 "config": {},
                 "buckets": {"pilot": {"cwd": "C:\\Code\\Personal\\plexar-pilot", "runnable": True, "why_not": None}},
             }
+        if url.endswith("/api/orch/runs"):
+            # A framework from before the orch surface existed.
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
         raise AssertionError(f"unexpected url {url}")
 
     monkeypatch.setattr(framework_client, "_get_json", fake_get_json)
     result = framework_client.fetch_summary("http://127.0.0.1:8430")
     assert result["up"] is True
+    assert result["orch"] is False
     assert result["base"] == "http://127.0.0.1:8430"
     assert result["pending_approvals"] == 1
     assert result["running"] == 1
@@ -293,3 +299,125 @@ def test_unreachable_is_logged_once_until_it_answers(monkeypatch):
     for _ in range(5):
         assert fc.fetch_summary("http://127.0.0.1:8430")["up"] is False
     assert sum("unreachable" in m for m in seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# The orch-era framework (2026-11-22): /api/orch/runs is the probe, the old
+# summary/daemon routes are shims, and /api/orch/events feeds the toasts.
+# ---------------------------------------------------------------------------
+
+BASE = "http://127.0.0.1:8430"
+
+
+def _http(url, code):
+    return urllib.error.HTTPError(url, code, "x", None, None)
+
+
+def test_orch_framework_is_up_even_when_the_old_routes_are_gone(monkeypatch):
+    def fake(url):
+        if url.endswith("/api/orch/runs"):
+            return {"runs": [{"run_id": "a"}, {"run_id": "b"}]}
+        raise _http(url, 404)
+
+    monkeypatch.setattr(framework_client, "_get_json", fake)
+    result = framework_client.fetch_summary(BASE)
+    assert result == {"up": True, "base": BASE, "orch": True, "pending_approvals": 0,
+                      "running": 2, "buckets": {}}
+
+
+def test_orch_framework_keeps_buckets_while_the_shims_answer(monkeypatch):
+    def fake(url):
+        if url.endswith("/api/orch/runs"):
+            return {"runs": []}
+        if url.endswith("/api/summary"):
+            return {"pending_approvals": 0, "running": 0, "buckets": {}}
+        return {"buckets": {"p": {"cwd": "C:/p"}}}
+
+    monkeypatch.setattr(framework_client, "_get_json", fake)
+    result = framework_client.fetch_summary(BASE)
+    assert result["orch"] is True and result["running"] == 0
+    assert result["buckets"] == {"p": {"cwd": "C:/p", "pending_approvals": 0}}
+
+
+def test_a_wrong_shaped_orch_reply_falls_back_to_the_old_probe(monkeypatch):
+    def fake(url):
+        if url.endswith("/api/orch/runs"):
+            return {"runs": "nope"}
+        raise urllib.error.URLError("refused")
+
+    monkeypatch.setattr(framework_client, "_get_json", fake)
+    monkeypatch.setattr(framework_client, "_unreachable_logged", set())
+    assert framework_client.fetch_summary(BASE) == {"up": False, "base": BASE, "reason": "unreachable"}
+
+
+def _feed(n):
+    return [{"id": i, "ts": "t", "run_id": "r", "session_id": "" if i % 3 else "term-1",
+             "step": "s", "ok": False, "worker": None, "rule": None, "detail": f"d{i}",
+             "kind": "refusal" if i % 2 else None, "extra": "dropped"} for i in range(1, n + 1)]
+
+
+def _serve(feed, calls):
+    def fake(url):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        since, limit = int(q["since"][0]), int(q["limit"][0])
+        calls.append((since, limit))
+        page = [e for e in feed if e["id"] > since][:limit]
+        return {"events": page, "cursor": page[-1]["id"] if page else since}
+    return fake
+
+
+def test_seeding_pages_to_the_end_and_returns_nothing_to_toast(monkeypatch):
+    calls = []
+    monkeypatch.setattr(framework_client, "_get_json", _serve(_feed(1200), calls))
+    result = framework_client.fetch_orch_events(BASE, None)
+    assert result["up"] is True and result["seeded"] is True
+    assert result["events"] == [] and result["cursor"] == 1200
+    assert calls == [(0, 500), (500, 500), (1000, 500), (1200, 500)]
+
+
+def test_seeding_an_empty_feed_starts_at_zero(monkeypatch):
+    monkeypatch.setattr(framework_client, "_get_json", _serve([], []))
+    result = framework_client.fetch_orch_events(BASE, None)
+    assert result["events"] == [] and result["cursor"] == 0
+
+
+def test_polling_returns_only_events_with_a_kind_and_only_the_agreed_fields(monkeypatch):
+    monkeypatch.setattr(framework_client, "_get_json", _serve(_feed(12), []))
+    result = framework_client.fetch_orch_events(BASE, 6)
+    assert [e["id"] for e in result["events"]] == [7, 9, 11]
+    assert result["cursor"] == 12 and result["seeded"] is False
+    assert set(result["events"][0]) == set(framework_client._ORCH_EVENT_FIELDS)
+    assert result["events"][0]["session_id"] is None      # "" normalised
+    assert result["events"][1]["session_id"] == "term-1"
+
+
+def test_polling_an_idle_feed_keeps_the_cursor(monkeypatch):
+    monkeypatch.setattr(framework_client, "_get_json", _serve(_feed(4), []))
+    result = framework_client.fetch_orch_events(BASE, 4)
+    assert result["events"] == [] and result["cursor"] == 4
+
+
+def test_a_framework_without_the_feed_is_silence_not_an_error(monkeypatch):
+    def fake(url):
+        raise _http(url, 404)
+
+    monkeypatch.setattr(framework_client, "_get_json", fake)
+    assert framework_client.fetch_orch_events(BASE, 3) == {"up": False, "base": BASE, "reason": "http 404"}
+    assert framework_client.fetch_orch_events("ftp://x", 3)["reason"] == "bad url"
+
+
+@pytest.mark.asyncio
+async def test_orch_events_route_is_always_200_and_passes_the_cursor(client, monkeypatch):
+    seen = []
+
+    def fake(base, since):
+        seen.append(since)
+        return {"up": False, "base": base, "reason": "unreachable"}
+
+    monkeypatch.setattr(framework_client, "fetch_orch_events", fake)
+    r1 = await client.get("/api/framework/orch-events")
+    r2 = await client.get("/api/framework/orch-events?since=41")
+    r3 = await client.get("/api/framework/orch-events?since=-5")
+    assert (r1.status_code, r2.status_code, r3.status_code) == (200, 200, 200)
+    assert r1.json()["up"] is False
+    assert seen == [None, 41, 0]

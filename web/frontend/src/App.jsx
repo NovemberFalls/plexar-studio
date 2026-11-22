@@ -39,6 +39,7 @@ import SettingsView from "./components/settings/SettingsView";
 import AppBackground from "./components/AppBackground";
 import ChatView from "./components/ChatView.jsx";
 import TasksView, { prefetchFrameworkProbe } from "./components/TasksView.jsx";
+import { orchEventToast, nextOrchCursor } from "./utils/orchEvents";
 import { reconcileWorkers, restoredGrid } from "./subsessions.js";
 import { DEFAULT_SETTINGS_SECTION } from "./components/settings/SettingsNav";
 import { laneStripFrom } from "./utils/laneMath";
@@ -2387,6 +2388,55 @@ export default function App() {
     return () => { cancelled = true; clearInterval(id); };
   }, [toast, sessions]);
 
+  // Orch run feed (the framework that enforces the orchestration skill): a
+  // refusal, a failed gate, a halt for the user's decision, a closed run. The
+  // backend seeds the cursor on the first call and returns nothing to toast, so
+  // history is never replayed; an older framework answers up:false, which is
+  // silence. Same ref-only cursor rule as the poll above.
+  const orchCursorRef = useRef(null);
+  const [tasksForcedRun, setTasksForcedRun] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const cursor = orchCursorRef.current;
+        const res = await fetch(`/api/framework/orch-events${cursor === null ? "" : `?since=${cursor}`}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || !data?.up) return;
+        for (const ev of Array.isArray(data.events) ? data.events : []) {
+          const shown = orchEventToast(ev);
+          if (shown) {
+            toast(shown.message, shown.type, 8000, ev.run_id ? {
+              label: "View",
+              onClick: () => {
+                setTasksForcedRun(ev.run_id);
+                setActiveSection("tasks");
+              },
+            } : null);
+          }
+          if (ev?.session_id) {
+            const match = sessions.find((s) => s.terminalId === ev.session_id);
+            if (match) {
+              setTaskDoneTerminalIds((prev) => {
+                if (prev.has(match.terminalId)) return prev;
+                const next = new Set(prev);
+                next.add(match.terminalId);
+                return next;
+              });
+            }
+          }
+        }
+        orchCursorRef.current = nextOrchCursor(cursor, data);
+      } catch {
+        /* best-effort; the cursor is simply not advanced this tick */
+      }
+    };
+    poll();
+    const id = setInterval(poll, 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [toast, sessions]);
+
   // A pane's "task done" dot stands until the pane is FOCUSED, never cleared
   // by the poll itself (D56: never write into the terminal, and clearing on
   // arrival would mean the user never gets to notice it).
@@ -2405,7 +2455,7 @@ export default function App() {
   // the normal active-Location match (B9) rather than silently re-opening
   // whatever a toast last pointed at.
   useEffect(() => {
-    if (activeSection !== "tasks") setTasksForcedBucket(null);
+    if (activeSection !== "tasks") { setTasksForcedBucket(null); setTasksForcedRun(null); }
   }, [activeSection]);
 
   // Track which slot each session last occupied so activating it from
@@ -3239,6 +3289,8 @@ export default function App() {
                 <TasksView
                   activeLocationFolder={focusedSession?.workdir || null}
                   forcedBucket={tasksForcedBucket}
+                  sessionId={focusedSession?.terminalId || null}
+                  runId={tasksForcedRun}
                   onError={(m) => toast(`Plexar-Framework: ${m}`, "error")}
                 />
               </ViewBoundary>
