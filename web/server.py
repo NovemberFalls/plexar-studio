@@ -7541,6 +7541,7 @@ remote_gateway.configure(
         get_session=pty_manager.get_terminal,
         create_session=_create_remote_terminal,
         submit=_paste_and_submit,
+        resize=pty_manager.resize_terminal,
         write_raw=pty_manager.write_pty_async,
         interrupt=lambda terminal_id: pty_manager.write_pty_async(terminal_id, "\x1b"),
         # The four below are wired to the EXACT callables the desktop's own

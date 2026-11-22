@@ -71,7 +71,7 @@ def _pair(env, label="Desk"):
 
 def test_pairing_success_stores_token_out_of_band(env):
     peer = _pair(env)
-    assert set(peer) == {"id", "label", "url", "added_at"}
+    assert set(peer) == {"id", "label", "url", "added_at", "access_token_set"}
     assert peer["url"] == PEER_URL
     call = env["http"].calls[-1]
     assert call["url"] == PEER_URL + "/remote/v1/pair"
@@ -279,6 +279,7 @@ def test_ws_frame_round_trip(env):
     opened = _with_ws(env, upstream)
     h = env["http"]
     h.routes[("POST", PEER_URL + "/remote/v1/sessions/s1/input")] = _json(200, {"accepted": True, "duplicate": False})
+    h.routes[("POST", PEER_URL + "/remote/v1/sessions/s1/resize")] = _json(200, {"resized": True})
     with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/s1?replay=1&after=2",
                                          headers={"origin": ORIGIN}) as ws:
         assert ws.receive_json() == {"type": "replay_start", "reset": True, "truncated": False}
@@ -287,16 +288,139 @@ def test_ws_frame_round_trip(env):
         # The resize frame is not a page frame; the next one is live output.
         assert ws.receive_json() == {"type": "output", "seq": 4, "data": "world"}
         ws.send_text('{"type":"resize","cols":80,"rows":24}')
-        assert ws.receive_text() == '{"type":"resize_failed"}'
         ws.send_text("ls\r")
         upstream.frames.put_nowait(json.dumps({"type": "ended"}))
+        # No resize_failed: the next thing the page sees is the end banner.
         assert "[Session ended]" in ws.receive_text()
     url, headers = opened[0]
     assert url == "wss://studio.example.com/remote/v1/sessions/s1/stream?after=2"
     assert headers == {"Authorization": f"Bearer {TOKEN}"}
-    inputs = [c for c in h.calls if c["url"].endswith("/input")]
-    assert inputs and inputs[0]["body"]["text"] == "ls\r" and inputs[0]["body"]["submit"] is False
+    sent = [c for c in h.calls if "/sessions/s1/" in c["url"]]
+    assert [c["url"].rsplit("/", 1)[1] for c in sent] == ["resize", "input"]
+    assert sent[0]["body"] == {"cols": 80, "rows": 24}
+    assert sent[1]["body"]["text"] == "ls\r" and sent[1]["body"]["submit"] is False
+    assert "CF-Access-Client-Id" not in sent[0]["headers"]
     assert upstream.closed
+
+
+def test_ws_resize_on_an_older_peer_degrades_to_resize_failed(env):
+    peer = _pair(env)
+    upstream = FakeUpstream([json.dumps({"type": "replay_start", "reset": True, "truncated": False}),
+                             json.dumps({"type": "replay_end", "seq": 0})])
+    _with_ws(env, upstream)
+    # No resize route registered: FakeHttp answers 404, as a pre-resize Studio does.
+    with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/s1?replay=1",
+                                         headers={"origin": ORIGIN}) as ws:
+        ws.receive_json()
+        ws.receive_json()
+        ws.send_text('{"type":"resize","cols":80,"rows":24}')
+        assert ws.receive_text() == '{"type":"resize_failed"}'
+        upstream.frames.put_nowait(json.dumps({"type": "ended"}))
+        assert "[Session ended]" in ws.receive_text()
+    assert any(c["url"].endswith("/sessions/s1/resize") for c in env["http"].calls)
+
+
+# -- Cloudflare Access service token ----------------------------------------
+
+CF_ID = "cfid-1234.access"
+CF_SECRET = "cfsecret-SHOULD-NEVER-LEAK-987"
+
+
+def _pair_with_access(env):
+    env["http"].routes[("POST", PEER_URL + "/remote/v1/pair")] = _json(
+        200, {"device_id": "dev-1", "token": TOKEN, "protocol": 1, "app_version": "x"})
+    r = env["client"].post("/api/peers", json={"url": PEER_URL, "code": "ABCD2345", "label": "Desk",
+                                               "cf_client_id": CF_ID, "cf_client_secret": CF_SECRET})
+    assert r.status_code == 200, r.text
+    return r.json()["peer"]
+
+
+@pytest.mark.parametrize("extra", [
+    {"cf_client_id": CF_ID}, {"cf_client_secret": CF_SECRET},
+    {"cf_client_id": CF_ID, "cf_client_secret": ""}, {"cf_client_id": CF_ID, "cf_client_secret": 5},
+    {"cf_client_id": CF_ID, "cf_client_secret": "a\r\nX-Evil: 1"},
+])
+def test_half_access_token_is_400_and_sends_nothing(env, extra):
+    r = env["client"].post("/api/peers", json={"url": PEER_URL, "code": "ABCD2345", **extra})
+    assert r.status_code == 400
+    assert env["http"].calls == []
+
+
+def test_access_headers_on_pairing_http_and_ws(env):
+    peer = _pair_with_access(env)
+    assert peer["access_token_set"] is True
+    pair_call = env["http"].calls[-1]
+    assert pair_call["headers"]["CF-Access-Client-Id"] == CF_ID
+    assert pair_call["headers"]["CF-Access-Client-Secret"] == CF_SECRET
+    env["http"].routes[("GET", PEER_URL + "/remote/v1/sessions")] = _json(200, {"sessions": []})
+    env["client"].get(f"/api/peers/{peer['id']}/sessions")
+    call = env["http"].calls[-1]
+    assert call["headers"]["CF-Access-Client-Secret"] == CF_SECRET
+    assert call["headers"]["Authorization"] == f"Bearer {TOKEN}"
+    upstream = FakeUpstream([json.dumps({"type": "ended"})])
+    opened = _with_ws(env, upstream)
+    with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/s1?replay=1",
+                                         headers={"origin": ORIGIN}) as ws:
+        assert "[Session ended]" in ws.receive_text()
+    assert opened[0][1] == {"Authorization": f"Bearer {TOKEN}",
+                            "CF-Access-Client-Id": CF_ID, "CF-Access-Client-Secret": CF_SECRET}
+
+
+def test_access_headers_absent_when_unset(env):
+    peer = _pair(env)
+    assert peer["access_token_set"] is False
+    assert not any(k.startswith("CF-Access") for k in env["http"].calls[-1]["headers"])
+    upstream = FakeUpstream([json.dumps({"type": "ended"})])
+    opened = _with_ws(env, upstream)
+    with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/s1?replay=1",
+                                         headers={"origin": ORIGIN}) as ws:
+        assert "[Session ended]" in ws.receive_text()
+    assert opened[0][1] == {"Authorization": f"Bearer {TOKEN}"}
+
+
+def test_put_access_sets_and_clears(env):
+    peer = _pair(env)
+    c = env["client"]
+    assert c.put(f"/api/peers/{peer['id']}/access", json={"cf_client_id": CF_ID}).status_code == 400
+    assert c.put("/api/peers/nope/access", json={}).status_code == 404
+    r = c.put(f"/api/peers/{peer['id']}/access", json={"cf_client_id": CF_ID, "cf_client_secret": CF_SECRET})
+    assert r.status_code == 200 and r.json()["peer"]["access_token_set"] is True
+    assert c.get("/api/peers").json()["peers"][0]["access_token_set"] is True
+    assert env["secrets"]["remote_peer_access"][peer["id"]]["client_secret"] == CF_SECRET
+    r = c.put(f"/api/peers/{peer['id']}/access", json={"cf_client_id": None, "cf_client_secret": None})
+    assert r.json()["peer"]["access_token_set"] is False
+    assert peer["id"] not in env["secrets"]["remote_peer_access"]
+
+
+def test_access_refused_is_distinct(env):
+    peer = _pair_with_access(env)
+    url = PEER_URL + "/remote/v1/hello"
+    env["http"].routes[("GET", url)] = UpstreamResponse(403, {"Content-Type": "text/html"}, b"<html>Forbidden")
+    assert env["client"].get(f"/api/peers/{peer['id']}/status").json() == {
+        "reachable": True, "authorized": False, "reason": "access_refused"}
+    env["http"].routes[("GET", url)] = _json(401, {"detail": "unauthorized"})
+    assert env["client"].get(f"/api/peers/{peer['id']}/status").json()["reason"] == "unauthorized"
+    # Without a service token the same challenge stays access_required.
+    plain = _pair(env)
+    env["http"].routes[("GET", url)] = UpstreamResponse(
+        302, {"Location": "https://team.cloudflareaccess.com/cdn-cgi/access/login"}, b"")
+    assert env["client"].get(f"/api/peers/{plain['id']}/status").json()["reason"] == "access_required"
+
+
+def test_access_secret_never_in_any_response_or_log(env, caplog):
+    caplog.set_level(logging.DEBUG)
+    peer = _pair_with_access(env)
+    c = env["client"]
+    env["http"].routes[("GET", PEER_URL + "/remote/v1/hello")] = _json(200, {"protocol": 1})
+    bodies = [c.get("/api/peers").text, c.get(f"/api/peers/{peer['id']}/status").text,
+              c.put(f"/api/peers/{peer['id']}/access",
+                    json={"cf_client_id": CF_ID, "cf_client_secret": CF_SECRET}).text]
+    for body in bodies:
+        assert CF_SECRET not in body and CF_ID not in body and TOKEN not in body
+    assert CF_SECRET not in (env["tmp"] / "remote_peers.json").read_text()
+    for record in caplog.records:
+        msg = record.getMessage()
+        assert CF_SECRET not in msg and TOKEN not in msg
 
 
 def test_input_retry_reuses_request_id(env, monkeypatch):

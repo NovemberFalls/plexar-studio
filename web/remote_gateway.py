@@ -160,6 +160,9 @@ class RemoteBackend:
     # test fake) means `branch` is always null, never a 500 -- same defaulting
     # rule as every other Stage 1c+ field above.
     git_branch: Callable[[str], str | None] | None = None
+    # Peer PTY resize. Wired to `pty_manager.resize_terminal`, the SAME call the
+    # desktop's /ws/terminal resize makes. Absent means the route answers 503.
+    resize: Callable[[str, int, int], bool] | None = None
 
 
 class StreamRegistry:
@@ -1012,6 +1015,37 @@ async def interrupt(terminal_id: str, device: Device = Depends(require_device)):
         return _error(404, "unknown session")
     accepted = await backend.interrupt(terminal_id)
     return {"accepted": bool(accepted)}
+
+
+RESIZE_COLS = (20, 500)
+RESIZE_ROWS = (5, 200)
+
+
+@router.post("/sessions/{terminal_id}/resize")
+async def resize(terminal_id: str, request: Request, device: Device = Depends(require_device)):
+    """Resize a session's PTY. Used by a peer Studio's pane (docs/studio-peers-v1.md).
+
+    Same path as the desktop's /ws/terminal resize: `backend.resize`, then every
+    remote listener is woken so other streams send their own `resize` frame.
+    """
+    backend, _store_ = _require_configured()
+    session = backend.get_session(terminal_id)
+    alive = session.get("alive", True) if isinstance(session, dict) else getattr(session, "alive", True)
+    if session is None or alive is False:
+        return _error(404, "unknown session")
+    if backend.resize is None:
+        return _error(503, "resizing sessions is not available")
+    body = await _read_json(request)
+    cols, rows = body.get("cols"), body.get("rows")
+    for value, (low, high) in ((cols, RESIZE_COLS), (rows, RESIZE_ROWS)):
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            return _error(400, f"cols must be {RESIZE_COLS[0]}..{RESIZE_COLS[1]} and "
+                               f"rows {RESIZE_ROWS[0]}..{RESIZE_ROWS[1]}")
+    resized = bool(backend.resize(terminal_id, cols, rows))
+    if resized:
+        for listener in list(getattr(session, "remote_listeners", ()) or ()):
+            listener.set()
+    return {"resized": resized}
 
 
 # ---------------------------------------------------------------------------

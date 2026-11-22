@@ -65,6 +65,10 @@ _upstream_ws_logger.setLevel(logging.WARNING)
 
 REMOTE_PREFIX = "/remote/v1"
 _TOKEN_FIELD = "remote_peer_tokens"
+# Cloudflare Access service tokens, per peer, beside the device tokens. Access
+# gets a request past the tunnel and no further; the bearer is still the identity
+# (same two-layer shape as plexar_client.auth_headers).
+_ACCESS_FIELD = "remote_peer_access"
 _USER_AGENT = "PlexarStudio-peer/1"
 _HTTP_TIMEOUT = 10.0
 _DEFAULT_DEVICE_NAME = "Plexar Studio"
@@ -177,9 +181,10 @@ class Peer:
     added_at: str
     device_id: str | None = None
 
-    def public(self) -> dict:
-        """The ONLY shape a route returns. No token, no device id."""
-        return {"id": self.id, "label": self.label, "url": self.url, "added_at": self.added_at}
+    def public(self, access_token_set: bool = False) -> dict:
+        """The ONLY shape a route returns. No token, no device id, no Access secret."""
+        return {"id": self.id, "label": self.label, "url": self.url, "added_at": self.added_at,
+                "access_token_set": bool(access_token_set)}
 
 
 class PeerStore:
@@ -254,7 +259,40 @@ class PeerStore:
         value = tokens.get(peer_id) if isinstance(tokens, dict) else None
         return value if isinstance(value, str) and value else None
 
-    def add(self, label: str, url: str, token: str, device_id: str | None) -> Peer:
+    def access(self, peer_id: str) -> tuple[str, str] | None:
+        """The peer's (CF client id, secret), or None. Both or neither, always."""
+        with self._lock:
+            entries = self._read_secrets().get(_ACCESS_FIELD)
+        entry = entries.get(peer_id) if isinstance(entries, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        cid, secret = entry.get("client_id"), entry.get("client_secret")
+        if isinstance(cid, str) and cid and isinstance(secret, str) and secret:
+            return cid, secret
+        return None
+
+    @staticmethod
+    def _put_access(data: dict, peer_id: str, access: tuple[str, str] | None) -> None:
+        entries = data.get(_ACCESS_FIELD)
+        entries = dict(entries) if isinstance(entries, dict) else {}
+        if access is None:
+            entries.pop(peer_id, None)
+        else:
+            entries[peer_id] = {"client_id": access[0], "client_secret": access[1]}
+        data[_ACCESS_FIELD] = entries
+
+    def set_access(self, peer_id: str, access: tuple[str, str] | None) -> bool:
+        """Set or clear (None) a peer's Access service token. False for an unknown peer."""
+        if self.get(peer_id) is None:
+            return False
+        with self._lock:
+            data = self._read_secrets()
+            self._put_access(data, peer_id, access)
+            self._write_secrets(data)
+        return True
+
+    def add(self, label: str, url: str, token: str, device_id: str | None,
+            access: tuple[str, str] | None = None) -> Peer:
         peer = Peer(id=uuid.uuid4().hex[:12], label=label, url=url, added_at=_now_iso(),
                     device_id=device_id)
         with self._lock:
@@ -265,6 +303,8 @@ class PeerStore:
             tokens = dict(tokens) if isinstance(tokens, dict) else {}
             tokens[peer.id] = token
             data[_TOKEN_FIELD] = tokens
+            if access is not None:
+                self._put_access(data, peer.id, access)
             self._write_secrets(data)
             rows = self._read_meta()
             rows.append({"id": peer.id, "label": peer.label, "url": peer.url,
@@ -280,11 +320,15 @@ class PeerStore:
             if found:
                 self._write_meta(kept)
             data = self._read_secrets()
-            tokens = data.get(_TOKEN_FIELD)
-            if isinstance(tokens, dict) and peer_id in tokens:
-                tokens = dict(tokens)
-                tokens.pop(peer_id, None)
-                data[_TOKEN_FIELD] = tokens
+            dirty = False
+            for field in (_TOKEN_FIELD, _ACCESS_FIELD):
+                entries = data.get(field)
+                if isinstance(entries, dict) and peer_id in entries:
+                    entries = dict(entries)
+                    entries.pop(peer_id, None)
+                    data[field] = entries
+                    dirty = True
+            if dirty:
                 self._write_secrets(data)
                 found = True
         return found
@@ -400,15 +444,21 @@ def _header(headers: dict, name: str) -> str:
     return ""
 
 
-def classify(resp: UpstreamResponse) -> str | None:
+def classify(resp: UpstreamResponse, access_set: bool = False) -> str | None:
     """None for a usable answer, else the reason the peer could not serve it.
 
     `unreachable`, `access_required` and `unauthorized` are the three that must
-    never collapse. `remote_disabled` and `unexpected` are named too, rather than
+    never collapse; `access_refused` (a service token Access rejected) is a
+    fourth. `remote_disabled` and `unexpected` are named too, rather than
     folded into one of those three and sending the user to the wrong fix.
     """
     if resp.status is None:
         return "unreachable"
+    # Studio never answers 403 on /remote/v1 (the path is origin-exempt), so with a
+    # service token presented a 403 is Access refusing THAT token. Without one, a
+    # challenge still reads as access_required below.
+    if access_set and resp.status == 403:
+        return "access_refused"
     if 300 <= resp.status < 400:
         if "cloudflareaccess.com" in _header(resp.headers, "Location"):
             return "access_required"
@@ -433,8 +483,33 @@ def classify(resp: UpstreamResponse) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def access_headers(access: tuple[str, str] | None) -> dict:
+    """Cloudflare Access service-token headers, or none. Never half a token."""
+    if not access:
+        return {}
+    return {"CF-Access-Client-Id": access[0], "CF-Access-Client-Secret": access[1]}
+
+
+def parse_access(body: dict) -> tuple[bool, tuple[str, str] | None]:
+    """(ok, value) from `cf_client_id` / `cf_client_secret`. Half a token is not ok.
+
+    Absent, null or empty on BOTH means none. A CR or LF would split a header.
+    """
+    cid, secret = body.get("cf_client_id"), body.get("cf_client_secret")
+    present = [v not in (None, "") for v in (cid, secret)]
+    if not any(present):
+        return True, None
+    if not all(present) or not isinstance(cid, str) or not isinstance(secret, str):
+        return False, None
+    cid, secret = cid.strip(), secret.strip()
+    if not cid or not secret or any(ch in v for v in (cid, secret) for ch in "\r\n"):
+        return False, None
+    return True, (cid, secret)
+
+
 async def _call(peer: Peer, method: str, path: str, body: Any = None,
-                query: dict | None = None, token: str | None = None) -> UpstreamResponse:
+                query: dict | None = None, token: str | None = None,
+                access: tuple[str, str] | None = None) -> UpstreamResponse:
     """One request to `<peer.url>/remote/v1<path>`, off the loop."""
     url = peer.url + REMOTE_PREFIX + path
     if query:
@@ -442,6 +517,7 @@ async def _call(peer: Peer, method: str, path: str, body: Any = None,
     headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    headers.update(access_headers(access))
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
@@ -456,14 +532,14 @@ def _error(status: int, message: str, reason: str | None = None) -> JSONResponse
     return JSONResponse(body, status_code=status)
 
 
-def _relay(resp: UpstreamResponse) -> JSONResponse:
+def _relay(resp: UpstreamResponse, access_set: bool = False) -> JSONResponse:
     """Hand an upstream answer to the page, with failures kept distinct.
 
     401 stays 401 (the token is no longer valid there: re-pair). A peer that
     could not answer is 502 with its reason. Any other answer, including the
     peer's own 400/404/409, is passed through with its status and JSON body.
     """
-    reason = classify(resp)
+    reason = classify(resp, access_set)
     if reason == "unauthorized":
         return _error(401, "peer refused this Studio's token; pair again", reason)
     if reason is not None:
@@ -474,22 +550,24 @@ def _relay(resp: UpstreamResponse) -> JSONResponse:
     return JSONResponse(data, status_code=resp.status or 502)
 
 
-async def _peer_and_token(peer_id: str) -> tuple[Peer | None, str | None]:
+async def _peer_and_token(peer_id: str) -> tuple[Peer | None, str | None, tuple[str, str] | None]:
     store = _get_store()
     peer = await asyncio.to_thread(store.get, peer_id)
     if peer is None:
-        return None, None
-    return peer, await asyncio.to_thread(store.token, peer_id)
+        return None, None, None
+    token = await asyncio.to_thread(store.token, peer_id)
+    return peer, token, await asyncio.to_thread(store.access, peer_id)
 
 
 async def _proxy(peer_id: str, method: str, path: str, body: Any = None,
                  query: dict | None = None) -> JSONResponse:
-    peer, token = await _peer_and_token(peer_id)
+    peer, token, access = await _peer_and_token(peer_id)
     if peer is None:
         return _error(404, "unknown peer")
     if token is None:
         return _error(401, "no token stored for this peer; pair again", "unauthorized")
-    return _relay(await _call(peer, method, path, body=body, query=query, token=token))
+    resp = await _call(peer, method, path, body=body, query=query, token=token, access=access)
+    return _relay(resp, access is not None)
 
 
 async def _read_json(request: Request) -> dict | None:
@@ -509,8 +587,12 @@ router = APIRouter()
 
 @router.get("/api/peers")
 async def list_peers():
-    peers = await asyncio.to_thread(_get_store().list)
-    return {"peers": [p.public() for p in peers]}
+    store = _get_store()
+
+    def rows() -> list[dict]:
+        return [p.public(store.access(p.id) is not None) for p in store.list()]
+
+    return {"peers": await asyncio.to_thread(rows)}
 
 
 @router.post("/api/peers")
@@ -524,13 +606,17 @@ async def add_peer(request: Request):
     code = body.get("code")
     if not isinstance(code, str) or not code.strip():
         return _error(400, "code must not be empty")
+    ok, access = parse_access(body)
+    if not ok:
+        return _error(400, "cf_client_id and cf_client_secret must be given together")
     label = body.get("label")
     label = label.strip() if isinstance(label, str) and label.strip() else urllib.parse.urlsplit(url).hostname or url
 
     candidate = Peer(id="", label=label, url=url, added_at="")
     resp = await _call(candidate, "POST", "/pair",
-                       body={"code": code.strip(), "device_name": f"{_DEFAULT_DEVICE_NAME} ({label})"[:80]})
-    reason = classify(resp)
+                       body={"code": code.strip(), "device_name": f"{_DEFAULT_DEVICE_NAME} ({label})"[:80]},
+                       access=access)
+    reason = classify(resp, access is not None)
     if reason is not None:
         logger.info("Peer pairing at %s did not reach Studio: %s", urllib.parse.urlsplit(url).netloc, reason)
         return _error(502, f"peer could not be paired: {reason}", reason)
@@ -541,9 +627,26 @@ async def add_peer(request: Request):
     if resp.status != 200 or not isinstance(token, str) or not token:
         return _error(502, "peer answered the pairing with an unexpected shape", "unexpected")
     device_id = data.get("device_id") if isinstance(data.get("device_id"), str) else None
-    peer = await asyncio.to_thread(_get_store().add, label, url, token, device_id)
+    peer = await asyncio.to_thread(_get_store().add, label, url, token, device_id, access)
     logger.info("Paired with peer %s at %s", peer.id, urllib.parse.urlsplit(url).netloc)
-    return {"peer": peer.public()}
+    return {"peer": peer.public(access is not None)}
+
+
+@router.put("/api/peers/{peer_id}/access")
+async def put_peer_access(peer_id: str, request: Request):
+    """Set (both fields) or clear (neither) the peer's Access service token."""
+    body = await _read_json(request)
+    if body is None:
+        return _error(400, "body must be a JSON object")
+    ok, access = parse_access(body)
+    if not ok:
+        return _error(400, "cf_client_id and cf_client_secret must be given together")
+    store = _get_store()
+    if not await asyncio.to_thread(store.set_access, peer_id, access):
+        return _error(404, "unknown peer")
+    peer = await asyncio.to_thread(store.get, peer_id)
+    logger.info("Access service token %s for peer %s", "set" if access else "cleared", peer_id)
+    return {"peer": peer.public(access is not None)}
 
 
 @router.delete("/api/peers/{peer_id}")
@@ -558,17 +661,18 @@ async def delete_peer(peer_id: str):
 @router.get("/api/peers/{peer_id}/status")
 async def peer_status(peer_id: str):
     """Always 200. `reason` names why, never collapsing the three failure shapes."""
-    peer, token = await _peer_and_token(peer_id)
+    peer, token, access = await _peer_and_token(peer_id)
     if peer is None:
         return {"reachable": False, "authorized": None, "reason": "unknown_peer"}
     if token is None:
         return {"reachable": None, "authorized": False, "reason": "unauthorized"}
-    resp = await _call(peer, "GET", "/hello", token=token)
-    reason = classify(resp)
+    resp = await _call(peer, "GET", "/hello", token=token, access=access)
+    reason = classify(resp, access is not None)
     if reason == "unreachable":
         return {"reachable": False, "authorized": None, "reason": reason}
     if reason is not None:
-        return {"reachable": True, "authorized": False if reason in ("unauthorized", "access_required") else None,
+        return {"reachable": True, "authorized": False if reason in ("unauthorized", "access_required", "access_refused")
+                else None,
                 "reason": reason}
     data = resp.json()
     if resp.status != 200 or not isinstance(data, dict):
@@ -624,7 +728,8 @@ def _ws_url(peer: Peer, session_id: str, after: int | None) -> str:
 
 
 async def send_input(peer: Peer, token: str, session_id: str, text: str,
-                     request_id: str | None = None) -> bool:
+                     request_id: str | None = None,
+                     access: tuple[str, str] | None = None) -> bool:
     """Raw input to the peer's PTY, retried with ONE request_id.
 
     Only a peer that could not answer is retried. A 401 or a 4xx is an answer:
@@ -633,8 +738,9 @@ async def send_input(peer: Peer, token: str, session_id: str, text: str,
     request_id = request_id or secrets.token_hex(12)
     body = {"text": text, "submit": False, "request_id": request_id}
     for attempt in range(_INPUT_ATTEMPTS):
-        resp = await _call(peer, "POST", f"/sessions/{_seg(session_id)}/input", body=body, token=token)
-        reason = classify(resp)
+        resp = await _call(peer, "POST", f"/sessions/{_seg(session_id)}/input", body=body,
+                           token=token, access=access)
+        reason = classify(resp, access is not None)
         if reason is None:
             data = resp.json()
             return bool(isinstance(data, dict) and data.get("accepted"))
@@ -648,6 +754,22 @@ async def send_input(peer: Peer, token: str, session_id: str, text: str,
     return False
 
 
+async def send_resize(peer: Peer, token: str, session_id: str, cols: Any, rows: Any,
+                      access: tuple[str, str] | None = None) -> bool:
+    """POST the peer's `/sessions/{id}/resize`. False on anything but resized:true.
+
+    A Studio older than that route answers 404, which lands here as False and the
+    pane keeps its old behaviour (resize_failed, the peer's desktop owns the size).
+    """
+    resp = await _call(peer, "POST", f"/sessions/{_seg(session_id)}/resize",
+                       body={"cols": cols, "rows": rows}, token=token, access=access)
+    if classify(resp, access is not None) is not None or resp.status != 200:
+        logger.debug("Peer %s resize for %s not applied (status %s)", peer.id, session_id, resp.status)
+        return False
+    data = resp.json()
+    return bool(isinstance(data, dict) and data.get("resized"))
+
+
 @router.websocket("/ws/peer/{peer_id}/{session_id}")
 async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
     """Bridge a desktop pane to a session on a peer Studio."""
@@ -658,7 +780,7 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
         logger.warning("Refused WS /ws/peer: %s", reason)
         await websocket.close(code=_WS_REFUSAL_CODE, reason=_WS_REFUSAL_REASON)
         return
-    peer, token = await _peer_and_token(peer_id)
+    peer, token, access = await _peer_and_token(peer_id)
     if peer is None or token is None:
         # Same close as a refused origin: no peer-id oracle.
         await websocket.close(code=_WS_REFUSAL_CODE, reason=_WS_REFUSAL_REASON)
@@ -675,7 +797,7 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
     await websocket.accept()
     try:
         upstream = await _ws_connect(_ws_url(peer, session_id, after),
-                                     {"Authorization": f"Bearer {token}"})
+                                     {"Authorization": f"Bearer {token}", **access_headers(access)})
     except Exception as exc:  # noqa: BLE001 - any connect failure is the same outcome
         # The exception text can name the url but never the header.
         logger.warning("Peer %s stream for %s could not open: %s", peer.id, session_id,
@@ -724,19 +846,23 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
                 except json.JSONDecodeError:
                     ctrl = None
                 if isinstance(ctrl, dict) and ctrl.get("type") == "resize":
-                    # Remote v1 has no resize route: the peer's own desktop owns
-                    # the PTY size. Say so with the existing failure frame.
-                    await websocket.send_text('{"type":"resize_failed"}')
+                    # Queued with the input so it lands in order with keystrokes.
+                    inputs.put_nowait(("resize", ctrl.get("cols"), ctrl.get("rows")))
                     continue
                 if isinstance(ctrl, dict) and ctrl.get("type") == "pong":
                     continue
-            inputs.put_nowait(text)
+            inputs.put_nowait(("input", text))
 
     async def drain_inputs():
         # One writer, in order: keystrokes must reach the peer in the order typed.
         while True:
-            text = await inputs.get()
-            await send_input(peer, token, session_id, text)
+            item = await inputs.get()
+            if item[0] == "input":
+                await send_input(peer, token, session_id, item[1], access=access)
+            elif not await send_resize(peer, token, session_id, item[1], item[2], access=access):
+                # An older peer without the route (404), a refused size or a
+                # failed call: the desktop's own failure frame, as before.
+                await websocket.send_text('{"type":"resize_failed"}')
 
     async def heartbeat():
         while True:

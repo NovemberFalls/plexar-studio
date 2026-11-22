@@ -502,6 +502,100 @@ def test_interrupt(rig):
     assert backend.interrupts == ["t1"]
 
 
+# -- resize (a peer Studio's pane, docs/studio-peers-v1.md) ------------------
+
+
+@pytest.fixture
+def resize_rig(rig):
+    import asyncio
+    from dataclasses import replace
+
+    backend, store, client = rig
+    calls = []
+
+    def fake_resize(terminal_id, cols, rows):
+        calls.append((terminal_id, cols, rows))
+        return True
+
+    remote_gateway.configure(replace(backend.as_remote_backend(), resize=fake_resize), store)
+    return backend, store, client, calls, asyncio
+
+
+def test_resize_resizes_through_the_backend(resize_rig):
+    _backend, store, client, calls, _ = resize_rig
+    headers = auth(pair(client, store)["token"])
+    resp = client.post("/remote/v1/sessions/t1/resize", json={"cols": 100, "rows": 30}, headers=headers)
+    assert resp.status_code == 200 and resp.json() == {"resized": True}
+    assert calls == [("t1", 100, 30)]
+
+
+def test_resize_wakes_remote_listeners(resize_rig):
+    backend, store, client, _calls, asyncio = resize_rig
+    headers = auth(pair(client, store)["token"])
+    event = asyncio.Event()
+
+    class Live:
+        alive = True
+        remote_listeners = {event}
+
+    remote_gateway.configure(replace_get(backend, store, lambda _id: Live()), store)
+    assert client.post("/remote/v1/sessions/t1/resize", json={"cols": 80, "rows": 24},
+                       headers=headers).status_code == 200
+    assert event.is_set()
+
+
+def replace_get(backend, store, get_session):
+    from dataclasses import replace
+
+    return replace(backend.as_remote_backend(), get_session=get_session, resize=lambda *_: True)
+
+
+@pytest.mark.parametrize("body", [
+    {"cols": 19, "rows": 30}, {"cols": 501, "rows": 30}, {"cols": 100, "rows": 4},
+    {"cols": 100, "rows": 201}, {"cols": "100", "rows": 30}, {"cols": True, "rows": 30}, {},
+])
+def test_resize_bounds_are_400(resize_rig, body):
+    _backend, store, client, calls, _ = resize_rig
+    headers = auth(pair(client, store)["token"])
+    assert client.post("/remote/v1/sessions/t1/resize", json=body, headers=headers).status_code == 400
+    assert calls == []
+
+
+def test_resize_edges_are_accepted(resize_rig):
+    _backend, store, client, calls, _ = resize_rig
+    headers = auth(pair(client, store)["token"])
+    for cols, rows in ((20, 5), (500, 200)):
+        assert client.post("/remote/v1/sessions/t1/resize", json={"cols": cols, "rows": rows},
+                           headers=headers).status_code == 200
+    assert calls == [("t1", 20, 5), ("t1", 500, 200)]
+
+
+def test_resize_needs_a_device_token(resize_rig):
+    _backend, _store, client, calls, _ = resize_rig
+    assert client.post("/remote/v1/sessions/t1/resize", json={"cols": 80, "rows": 24}).status_code == 401
+    assert client.post("/remote/v1/sessions/t1/resize", json={"cols": 80, "rows": 24},
+                       headers=auth("bogus")).status_code == 401
+    assert calls == []
+
+
+def test_resize_404_on_unknown_or_dead_session(resize_rig):
+    backend, store, client, calls, _ = resize_rig
+    headers = auth(pair(client, store)["token"])
+    assert client.post("/remote/v1/sessions/nope/resize", json={"cols": 80, "rows": 24},
+                       headers=headers).status_code == 404
+    backend.sessions[0]["alive"] = False
+    assert client.post("/remote/v1/sessions/t1/resize", json={"cols": 80, "rows": 24},
+                       headers=headers).status_code == 404
+    assert calls == []
+
+
+def test_resize_503_when_not_wired(rig):
+    _backend, store, client = rig
+    headers = auth(pair(client, store)["token"])
+    assert client.post("/remote/v1/sessions/t1/resize", json={"cols": 80, "rows": 24},
+                       headers=headers).status_code == 503
+
+
 # -- registry --------------------------------------------------------------
 
 
