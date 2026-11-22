@@ -446,8 +446,9 @@ def test_orch_runs_keep_only_the_agreed_fields(monkeypatch):
     assert result["up"] is True and result["base"] == BASE
     first, second = result["runs"]
     assert set(first) == {"run_id", "state", "stage", "loop", "task", "cwd", "orchestrator_session_id",
-                          "started_at", "updated_at", "gate_exit", "workers"}
-    assert first["gate_exit"] == 0 and first["workers"] == [{"worker": "W1", "lane": "sonnet", "status": "DISPATCHED"}]
+                          "orchestrator_session_name", "started_at", "updated_at", "gate_exit", "workers"}
+    assert first["gate_exit"] == 0 and first["workers"] == [
+        {"worker": "W1", "lane": "sonnet", "status": "DISPATCHED", "session_id": None, "session_name": None}]
     assert second["orchestrator_session_id"] is None and second["gate_exit"] is None
     assert "studio" not in result
 

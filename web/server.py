@@ -7618,6 +7618,9 @@ remote_gateway.configure(
         create_session=_create_remote_terminal,
         submit=_paste_and_submit,
         resize=pty_manager.resize_terminal,
+        # The same framework reads the desktop's own orch routes make.
+        orch_runs=lambda: framework_client.fetch_orch_runs(_framework_base_url()),
+        orch_events=lambda since: framework_client.fetch_orch_events(_framework_base_url(), since),
         write_raw=pty_manager.write_pty_async,
         interrupt=lambda terminal_id: pty_manager.write_pty_async(terminal_id, "\x1b"),
         # The four below are wired to the EXACT callables the desktop's own

@@ -1624,3 +1624,122 @@ def test_chat_routes_need_a_device_token(rig):
     assert client.get("/remote/v1/sessions/t1/messages").status_code == 401
     assert client.get("/remote/v1/files", params={"path": "C:/x.png"}).status_code == 401
     assert client.post("/remote/v1/sessions/t1/upload").status_code == 401
+
+
+# -- orchestration runs and events (read-only, for the phone) ----------------
+
+
+@pytest.fixture
+def orch_rig(rig):
+    from dataclasses import replace
+
+    backend, store, client = rig
+    state = {"runs": {"up": True, "runs": []}, "events": {"up": True, "events": [], "cursor": 0},
+             "since": []}
+
+    def runs():
+        return state["runs"]
+
+    def events(since):
+        state["since"].append(since)
+        return state["events"]
+
+    remote_gateway.configure(
+        replace(backend.as_remote_backend(), orch_runs=runs, orch_events=events), store)
+    return store, client, state
+
+
+def test_orch_routes_need_a_device(orch_rig):
+    _store, client, _state = orch_rig
+    assert client.get("/remote/v1/orch/runs").status_code == 401
+    assert client.get("/remote/v1/orch/events").status_code == 401
+
+
+def test_orch_runs_shape_order_and_names(orch_rig):
+    store, client, state = orch_rig
+    headers = auth(pair(client, store)["token"])
+    state["runs"] = {"up": True, "runs": [
+        {"run_id": "r-old", "state": "FROZEN", "stage": "workers", "task": "older",
+         "started_at": "2026-11-22T10:00:00-05:00", "updated_at": "2026-11-22T10:05:00-05:00",
+         "orchestrator_session_id": "zz99", "orchestrator_session_name": None, "gate_exit": None,
+         "workers": [{"worker": "W1", "lane": "sonnet", "status": "DISPATCHED", "session_id": None,
+                      "session_name": None}], "cwd": "C:/secret/path"},
+        {"run_id": "r-new", "state": "GATED", "stage": "gate", "task": "t" * 900,
+         "started_at": "2026-11-22T11:00:00-05:00", "updated_at": "2026-11-22T11:30:00-05:00",
+         "orchestrator_session_id": "ab12", "orchestrator_session_name": "studio", "gate_exit": 1,
+         "workers": []},
+        {"state": "FROZEN"},
+    ]}
+    body = client.get("/remote/v1/orch/runs", headers=headers).json()
+    assert body["available"] is True and body["poll_seconds"] == 10
+    assert [r["run_id"] for r in body["runs"]] == ["r-new", "r-old"]
+    new, old = body["runs"]
+    assert new["session"] == {"id": "ab12", "name": "studio"}
+    assert new["gate"] == {"status": "failed", "detail": "exit 1"}
+    assert len(new["task"]) == 300
+    assert old["session"] == {"id": "zz99", "name": None} and old["gate"] is None
+    assert old["workers"] == [{"id": "W1", "lane": "sonnet", "status": "DISPATCHED", "session_id": None}]
+    assert "cwd" not in old and "secret" not in json.dumps(body)
+
+
+def test_orch_runs_unavailable_is_200_with_a_reason(orch_rig):
+    store, client, state = orch_rig
+    headers = auth(pair(client, store)["token"])
+    state["runs"] = {"up": False, "reason": "unreachable"}
+    resp = client.get("/remote/v1/orch/runs", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["available"] is False and resp.json()["reason"] == "unreachable"
+    assert resp.json()["runs"] == []
+
+
+def test_orch_events_seed_then_page(orch_rig):
+    store, client, state = orch_rig
+    headers = auth(pair(client, store)["token"])
+    state["events"] = {"up": True, "events": [], "cursor": 41, "seeded": True}
+    seed = client.get("/remote/v1/orch/events", headers=headers).json()
+    assert seed["events"] == [] and seed["cursor"] == "41" and state["since"] == [None]
+
+    state["events"] = {"up": True, "cursor": 45, "events": [
+        {"id": 42, "ts": "t1", "kind": "refusal", "run_id": "r1", "session_id": "ab12",
+         "session_name": "studio", "worker": "W2", "rule": "scope", "detail": "x" * 400},
+        {"id": 43, "ts": "t2", "kind": "gate_pass", "run_id": "r1", "session_id": "ab12"},
+        {"id": 44, "ts": "t3", "kind": "run_closed", "close_status": "ABANDONED", "run_id": "r1",
+         "session_id": None, "detail": "closed ABANDONED"},
+        {"id": 45, "ts": "t4", "kind": "something_new", "run_id": "r1"},
+    ]}
+    page = client.get("/remote/v1/orch/events?since=41", headers=headers).json()
+    assert state["since"][-1] == 41 and page["cursor"] == "45" and page["dropped"] == 0
+    assert [e["kind"] for e in page["events"]] == ["refused", "closed"]
+    first, second = page["events"]
+    assert first["session"] == {"id": "ab12", "name": "studio"}
+    assert first["text"].startswith("studio \u00b7 Move refused \u00b7 W2 \u00b7 ") and len(first["text"]) < 200
+    assert second["session"] is None and second["close_status"] == "ABANDONED"
+    assert second["text"] == "Run closed \u00b7 closed ABANDONED"
+
+
+def test_orch_events_caps_a_reply_and_says_what_it_dropped(orch_rig):
+    store, client, state = orch_rig
+    headers = auth(pair(client, store)["token"])
+    state["events"] = {"up": True, "cursor": 200, "events": [
+        {"id": i, "ts": "t", "kind": "gate_fail", "run_id": "r"} for i in range(1, 121)]}
+    page = client.get("/remote/v1/orch/events?since=0", headers=headers).json()
+    assert len(page["events"]) == 50 and page["dropped"] == 70
+    assert page["events"][-1]["id"] == 120 and page["cursor"] == "200"
+
+
+def test_orch_events_refuses_a_made_up_cursor_and_survives_no_framework(orch_rig):
+    store, client, state = orch_rig
+    headers = auth(pair(client, store)["token"])
+    assert client.get("/remote/v1/orch/events?since=abc", headers=headers).status_code == 400
+    assert client.get("/remote/v1/orch/events?since=-1", headers=headers).status_code == 400
+    state["events"] = {"up": False, "reason": "http 404"}
+    resp = client.get("/remote/v1/orch/events?since=7", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["available"] is False and resp.json()["cursor"] == "7"
+
+
+def test_orch_routes_report_unsupported_when_not_wired(rig):
+    backend, store, client = rig
+    headers = auth(pair(client, store)["token"])
+    assert client.get("/remote/v1/orch/runs", headers=headers).json()["available"] is False
+    assert client.get("/remote/v1/orch/events", headers=headers).json()["available"] is False

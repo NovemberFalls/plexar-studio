@@ -163,6 +163,12 @@ class RemoteBackend:
     # Peer PTY resize. Wired to `pty_manager.resize_terminal`, the SAME call the
     # desktop's /ws/terminal resize makes. Absent means the route answers 503.
     resize: Callable[[str, int, int], bool] | None = None
+    # Orchestration runs and their toast-worthy events, read from the
+    # Plexar-Framework server side. Both are BLOCKING reads returning the
+    # `framework_client` envelopes (`up`, `reason`, ...). Absent means the phone
+    # is told the feature is unavailable, never a 5xx.
+    orch_runs: Callable[[], dict] | None = None
+    orch_events: Callable[[int | None], dict] | None = None
 
 
 class StreamRegistry:
@@ -1185,6 +1191,129 @@ def _configured_session_model() -> str:
     sessions = settings.get("sessions")
     model = sessions.get("model") if isinstance(sessions, dict) else None
     return model.strip() if isinstance(model, str) else ""
+
+
+# ---------------------------------------------------------------------------
+# Orchestration (read-only). The phone draws its own list and run screen from
+# these; the framework's own page is never proxied to it.
+# ---------------------------------------------------------------------------
+
+ORCH_STAGES = ("prompt", "build", "workers", "gate", "validate", "final", "ship")
+ORCH_RUNS_POLL_SECONDS = 10
+ORCH_EVENTS_POLL_SECONDS = 15
+_ORCH_EVENTS_MAX = 50
+_ORCH_TEXT_MAX = 160
+# Framework kind -> (phone kind, lead-in). A passing gate is not an event worth
+# a toast: the run's close follows it.
+_ORCH_KINDS = {
+    "refusal": ("refused", "Move refused"),
+    "gate_fail": ("gate_failed", "Gate failed"),
+    "halted_for_decision": ("halted", "Waiting on your decision"),
+    "run_closed": ("closed", "Run closed"),
+}
+
+
+def _clip(text: Any, limit: int) -> str:
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "\u2026"
+
+
+def _orch_session(backend: RemoteBackend, session_id: Any, name: Any) -> dict | None:
+    """`{id, name}` for a run's pane. The framework's own name wins; otherwise the
+    live session's; otherwise null, so the phone can fall back to the short id."""
+    if not session_id:
+        return None
+    if not name:
+        live = backend.get_session(str(session_id))
+        name = getattr(live, "name", None) if live is not None else None
+    return {"id": str(session_id), "name": _clip(name, 100) if name else None}
+
+
+@router.get("/orch/runs")
+async def orch_runs(device: Device = Depends(require_device)):
+    """Open orchestration runs, newest first. An empty list is a normal answer.
+
+    ALWAYS 200 for an authenticated device: with no framework running the body is
+    `available: false` plus a one-line reason and an empty list.
+    """
+    backend, _store_ = _require_configured()
+    if backend.orch_runs is None:
+        return {"available": False, "reason": "not supported by this Studio", "runs": [],
+                "stages": list(ORCH_STAGES), "poll_seconds": ORCH_RUNS_POLL_SECONDS}
+    data = _as_dict(await asyncio.to_thread(backend.orch_runs))
+    if not data.get("up"):
+        return {"available": False, "reason": str(data.get("reason") or "unreachable"), "runs": [],
+                "stages": list(ORCH_STAGES), "poll_seconds": ORCH_RUNS_POLL_SECONDS}
+    runs = []
+    for run in data.get("runs") or []:
+        if not isinstance(run, dict) or not run.get("run_id"):
+            continue
+        gate_exit = run.get("gate_exit")
+        runs.append({
+            "run_id": str(run["run_id"]),
+            "state": run.get("state"),
+            "stage": run.get("stage"),
+            "task": _clip(run.get("task"), 300),
+            "started_at": run.get("started_at"),
+            "updated_at": run.get("updated_at"),
+            "session": _orch_session(backend, run.get("orchestrator_session_id"),
+                                     run.get("orchestrator_session_name")),
+            "gate": None if gate_exit is None else {
+                "status": "passed" if gate_exit == 0 else "failed", "detail": f"exit {gate_exit}"},
+            "workers": [
+                {"id": w.get("worker"), "lane": w.get("lane"), "status": w.get("status"),
+                 "session_id": w.get("session_id") or None}
+                for w in (run.get("workers") or []) if isinstance(w, dict)
+            ],
+        })
+    runs.sort(key=lambda r: str(r.get("updated_at") or r.get("started_at") or ""), reverse=True)
+    return {"available": True, "reason": None, "runs": runs,
+            "stages": list(ORCH_STAGES), "poll_seconds": ORCH_RUNS_POLL_SECONDS}
+
+
+@router.get("/orch/events")
+async def orch_events(since: str | None = None, device: Device = Depends(require_device)):
+    """Toast-worthy orchestration events after `since`, oldest first.
+
+    `cursor` is opaque to the phone: pass back exactly what the last reply gave.
+    With no `since` the reply carries NO events and the cursor to start from, so a
+    phone that was off does not replay a day of toasts. At most 50 events per
+    reply; `dropped` says how many older ones were left out.
+    """
+    backend, _store_ = _require_configured()
+    after: int | None = None
+    if since is not None and since != "":
+        if not since.isdigit() or len(since) > 18:
+            return JSONResponse({"error": "since must be a cursor from a previous reply"}, status_code=400)
+        after = int(since)
+    empty = {"events": [], "cursor": since or "", "dropped": 0, "poll_seconds": ORCH_EVENTS_POLL_SECONDS}
+    if backend.orch_events is None:
+        return {"available": False, "reason": "not supported by this Studio", **empty}
+    data = _as_dict(await asyncio.to_thread(backend.orch_events, after))
+    if not data.get("up"):
+        return {"available": False, "reason": str(data.get("reason") or "unreachable"), **empty}
+    events = []
+    for ev in data.get("events") or []:
+        spec = _ORCH_KINDS.get(ev.get("kind")) if isinstance(ev, dict) else None
+        if spec is None:
+            continue
+        session = _orch_session(backend, ev.get("session_id"), ev.get("session_name"))
+        bits = [session["name"]] if session and session["name"] else []
+        bits.append(spec[1])
+        if ev.get("worker"):
+            bits.append(str(ev["worker"]))
+        if ev.get("detail"):
+            bits.append(_clip(ev["detail"], _ORCH_TEXT_MAX))
+        events.append({
+            "id": ev.get("id"), "at": ev.get("ts"), "kind": spec[0],
+            "close_status": ev.get("close_status") or None,
+            "run_id": ev.get("run_id"), "session": session, "text": " \u00b7 ".join(bits),
+        })
+    dropped = max(0, len(events) - _ORCH_EVENTS_MAX)
+    cursor = data.get("cursor")
+    return {"available": True, "reason": None, "events": events[-_ORCH_EVENTS_MAX:],
+            "cursor": str(cursor) if isinstance(cursor, int) else (since or ""),
+            "dropped": dropped, "poll_seconds": ORCH_EVENTS_POLL_SECONDS}
 
 
 @router.get("/catalog")

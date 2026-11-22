@@ -322,9 +322,11 @@ def _shape_run(run: dict) -> dict:
     gate_exit = gate.get("exit") if isinstance(gate, dict) else None
     row = {k: run.get(k) for k in _RUN_FIELDS}
     row["orchestrator_session_id"] = run.get("orchestrator_session_id") or None
+    row["orchestrator_session_name"] = run.get("orchestrator_session_name") or None
     row["gate_exit"] = gate_exit
     row["workers"] = [
-        {"worker": w.get("worker"), "lane": w.get("lane"), "status": w.get("status")}
+        {"worker": w.get("worker"), "lane": w.get("lane"), "status": w.get("status"),
+         "session_id": w.get("session_id") or None, "session_name": w.get("session_name") or None}
         for w in (run.get("workers") or []) if isinstance(w, dict)
     ]
     return row
