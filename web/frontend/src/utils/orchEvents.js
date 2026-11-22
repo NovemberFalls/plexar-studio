@@ -20,10 +20,13 @@ function clip(text) {
 }
 
 /** `{type, message}` for an orch event worth a toast, or null for one that is not. */
-export function orchEventToast(ev) {
+export function orchEventToast(ev, sessionName) {
   const spec = ev && typeof ev === "object" && Object.hasOwn(KINDS, ev.kind) ? KINDS[ev.kind] : null;
   if (!spec) return null;
-  const bits = [spec[1]];
+  // Lead with the session's own name when Studio knows it; otherwise a short id
+  // so the toast still says whose run this is.
+  const who = sessionName || (ev.session_id ? `session ${String(ev.session_id).slice(0, 8)}` : null);
+  const bits = who ? [clip(who), spec[1]] : [spec[1]];
   if (ev.worker) bits.push(String(ev.worker));
   if (ev.rule) bits.push(`[${ev.rule}]`);
   if (ev.detail) bits.push(clip(ev.detail));

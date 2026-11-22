@@ -2432,7 +2432,10 @@ export default function App() {
         const data = await res.json();
         if (cancelled || !data?.up) return;
         for (const ev of Array.isArray(data.events) ? data.events : []) {
-          const shown = orchEventToast(ev);
+          // Name the pane the run belongs to. The feed only carries its id, and
+          // an id on its own cannot be traced back to a session by eye.
+          const owner = ev?.session_id ? sessions.find((s) => s.terminalId === ev.session_id) : null;
+          const shown = orchEventToast(ev, owner?.name);
           if (shown) {
             toast(shown.message, shown.type, 8000, ev.run_id ? {
               label: "View",
@@ -2442,16 +2445,13 @@ export default function App() {
               },
             } : null);
           }
-          if (ev?.session_id) {
-            const match = sessions.find((s) => s.terminalId === ev.session_id);
-            if (match) {
-              setTaskDoneTerminalIds((prev) => {
-                if (prev.has(match.terminalId)) return prev;
-                const next = new Set(prev);
-                next.add(match.terminalId);
-                return next;
-              });
-            }
+          if (owner) {
+            setTaskDoneTerminalIds((prev) => {
+              if (prev.has(owner.terminalId)) return prev;
+              const next = new Set(prev);
+              next.add(owner.terminalId);
+              return next;
+            });
           }
         }
         orchCursorRef.current = nextOrchCursor(cursor, data);

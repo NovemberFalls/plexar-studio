@@ -21,6 +21,14 @@ describe("orchEventToast", () => {
       .toBe("Move refused · [the gate is not answerable to the implementation] · the gate script changed after the plan froze");
   });
 
+  it("names the session the run belongs to", () => {
+    expect(orchEventToast({ kind: "run_closed", close_status: "COMPLETED", session_id: "02a5e5ba" }, "studio").message)
+      .toBe("studio · Run closed");
+    expect(orchEventToast({ kind: "gate_fail", session_id: "02a5e5ba1234", detail: "exit 1" }).message)
+      .toBe("session 02a5e5ba · Gate failed · exit 1");
+    expect(orchEventToast({ kind: "gate_fail", session_id: null, detail: "exit 1" }).message).toBe("Gate failed · exit 1");
+  });
+
   it("stays quiet for a passing gate, an ordinary transition and junk", () => {
     expect(orchEventToast({ kind: "gate_pass" })).toBeNull();
     expect(orchEventToast({ kind: null, step: "dispatch" })).toBeNull();

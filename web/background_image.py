@@ -2,7 +2,7 @@
 
 The stored filename is fixed by the server (``background.<ext>``); nothing from
 the upload's name or declared type is trusted. The format is decided by magic
-bytes and limited to PNG, JPEG and WebP. SVG is refused because it can carry
+bytes and limited to PNG, JPEG, WebP and GIF. SVG is refused because it can carry
 script, and no image library is used.
 """
 
@@ -27,7 +27,7 @@ MAX_BYTES = 15 * 1024 * 1024
 _CHUNK = 64 * 1024
 
 # ext -> content type
-_TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+_TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}
 
 # Tests point this at a tmp dir; None means the real data directory.
 _data_dir_override: Path | None = None
@@ -43,13 +43,15 @@ def _dir() -> Path:
 
 
 def sniff(head: bytes) -> str | None:
-    """Return 'png' | 'jpg' | 'webp' from leading magic bytes, else None."""
+    """Return 'png' | 'jpg' | 'webp' | 'gif' from leading magic bytes, else None."""
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
     if head.startswith(b"\xff\xd8\xff"):
         return "jpg"
     if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "webp"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
     return None
 
 
@@ -142,7 +144,7 @@ async def put_background(file: UploadFile):
     data = b"".join(chunks)
     ext = sniff(data[:16])
     if ext is None:
-        return JSONResponse({"error": "only PNG, JPEG or WebP images are accepted"}, status_code=400)
+        return JSONResponse({"error": "only PNG, JPEG, WebP or GIF images are accepted"}, status_code=400)
     await asyncio.to_thread(_store, data, ext)
     return JSONResponse(await asyncio.to_thread(_meta))
 

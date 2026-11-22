@@ -22,19 +22,23 @@ import { isPeerSession, sessionSocketPath, PEER_UNAVAILABLE } from "../utils/pee
 import "@xterm/xterm/css/xterm.css";
 
 /**
- * xterm theme for a pane. With the app background showing, only the canvas
- * BACKGROUND turns translucent; text colours stay fully opaque. The solid
- * source is the override or the theme value, because the computed --cc-term is
- * already a translucent mix by then.
+ * xterm theme for a pane. With the app background showing, the canvas
+ * BACKGROUND is fully transparent and text colours stay fully opaque: the pane
+ * container behind it already paints --cc-term at the user's panel opacity, and
+ * that must be the ONLY tinted layer. Owner QA, 2.1.59: the canvas, xterm's
+ * scrollable element and the container each carried the same translucent
+ * colour, and xterm's own stylesheet paints `.xterm-viewport` solid #000, so
+ * the panes stayed black whatever the slider said. The `term-see-through`
+ * class on the container (index.css) clears xterm's own backgrounds.
  */
-function buildPaneXtermTheme({ theme, accent, tokenOverrides, backgroundActive, backgroundPaneOpacity }) {
+function buildPaneXtermTheme({ theme, accent, tokenOverrides, backgroundActive }) {
   const base = buildXtermTheme(theme, { accent, tokenOverrides });
   if (!backgroundActive) return base;
   const solid = (tokenOverrides && tokenOverrides["--cc-term"]) || theme?.term || theme?.bg;
   if (!solid) return base;
   return {
     ...base,
-    background: withAlpha(solid, backgroundPaneOpacity, typeof document !== "undefined" ? document : undefined),
+    background: withAlpha(solid, 0, typeof document !== "undefined" ? document : undefined),
     cursorAccent: solid,
   };
 }
@@ -1242,7 +1246,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           subtracted — a small but constant resize-accuracy bug. */}
       {historyWarning && <div role="status" style={{ flexShrink: 0, padding: "4px 8px", fontSize: 11, color: "var(--cc-waiting)" }}>{historyWarning}</div>}
       <div
-        className="flex-1 min-h-0"
+        className={backgroundActive ? "flex-1 min-h-0 term-see-through" : "flex-1 min-h-0"}
         style={{
           position: "relative",
           padding: "4px 8px",

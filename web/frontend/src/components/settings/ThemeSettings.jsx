@@ -655,7 +655,7 @@ export default function ThemeSettings({ get, setField, isDirty }) {
           <input
             ref={bgFileRef}
             type="file"
-            accept="image/png,image/jpeg,image/webp"
+            accept="image/png,image/jpeg,image/webp,image/gif"
             onChange={handleBgFile}
             aria-label="Choose background image"
             data-testid="background-file"
@@ -681,7 +681,7 @@ export default function ThemeSettings({ get, setField, isDirty }) {
           >
             Remove image
           </button>
-          <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>PNG, JPEG or WebP, up to 15 MB</span>
+          <span style={{ fontSize: 11, color: "var(--cc-muted)" }}>PNG, JPEG, WebP or GIF (animated GIFs play), up to 15 MB</span>
         </div>
         {bgError && (
           <div role="alert" data-testid="background-error" style={{ fontSize: 11, color: "var(--cc-error)", marginBottom: 12 }}>

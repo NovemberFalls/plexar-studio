@@ -525,3 +525,14 @@ body {
 }
 .pane-group-head:hover .pane-group-grip { color: var(--cc-accent, var(--accent)); }
 .pane-group-head:active { cursor: grabbing; }
+
+/* App background image: a terminal's own layers go clear so the pane container's
+   --cc-term (already at the user's panel opacity) is the one tinted layer. xterm
+   ships `.xterm .xterm-viewport { background-color: #000 }` and sets an inline
+   background on its scrollable element, hence !important. */
+.term-see-through .xterm,
+.term-see-through .xterm .xterm-viewport,
+.term-see-through .xterm .xterm-scrollable-element,
+.term-see-through .xterm .xterm-screen {
+  background-color: transparent !important;
+}

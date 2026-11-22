@@ -32,7 +32,8 @@ def _stored(tmp_path):
 
 @pytest.mark.parametrize(
     "data,ext,ctype",
-    [(PNG, "png", "image/png"), (JPG, "jpg", "image/jpeg"), (WEBP, "webp", "image/webp")],
+    [(PNG, "png", "image/png"), (JPG, "jpg", "image/jpeg"), (WEBP, "webp", "image/webp"),
+     (b"GIF89a" + b"\x00" * 32, "gif", "image/gif"), (b"GIF87a" + b"\x00" * 32, "gif", "image/gif")],
 )
 def test_each_type_accepted(client, data, ext, ctype):
     c, tmp = client
