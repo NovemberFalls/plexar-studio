@@ -532,7 +532,8 @@ def _transcript_dir(s) -> Optional[str]:
     """~/.claude/projects/<project-id>, derived exactly as pty_manager._get_jsonl_path."""
     if not s.working_dir:
         return None
-    project_id = s.working_dir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+    from jsonl_watcher import claude_project_id
+    project_id = claude_project_id(s.working_dir)
     return os.path.join(os.path.expanduser("~"), ".claude", "projects", project_id)
 
 

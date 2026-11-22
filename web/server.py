@@ -2753,7 +2753,8 @@ def _get_memory(workdir: str) -> dict:
         return {"index": None, "files": []}
 
     # Derive project ID from workdir
-    project_id = workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+    from jsonl_watcher import claude_project_id
+    project_id = claude_project_id(workdir)
     memory_dir = claude_projects / project_id / "memory"
 
     if not memory_dir.is_dir():
@@ -2816,9 +2817,10 @@ _history_cache: dict[str, tuple[float, list[dict]]] = {}
 def _derive_project_id(workdir: str) -> str:
     """Derive the Claude Code project ID from a working directory path.
 
-    Must match the logic in pty_manager.py (line 562).
+    One rule, owned by jsonl_watcher.claude_project_id.
     """
-    return workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+    from jsonl_watcher import claude_project_id
+    return claude_project_id(workdir)
 
 
 def _read_last_line(filepath: Path) -> str:

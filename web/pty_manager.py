@@ -1610,7 +1610,8 @@ class PtyManager:
         pre_spawn_files: Optional[set] = None
         if harness == "claude-code":
             home = os.path.expanduser("~")
-            project_id = workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+            from jsonl_watcher import claude_project_id
+            project_id = claude_project_id(workdir)
             jsonl_dir = os.path.join(home, ".claude", "projects", project_id)
             pre_spawn_files = set()
             if os.path.isdir(jsonl_dir):
@@ -2057,7 +2058,8 @@ class PtyManager:
             return None
 
         home = os.path.expanduser("~")
-        project_id = session.working_dir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+        from jsonl_watcher import claude_project_id
+        project_id = claude_project_id(session.working_dir)
         jsonl_dir = os.path.join(home, ".claude", "projects", project_id)
 
         # Strategy 1: known session ID. Locked while fresh, but an in-terminal

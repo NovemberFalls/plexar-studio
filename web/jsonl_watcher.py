@@ -259,6 +259,19 @@ async def tail_jsonl(
         await asyncio.sleep(poll_interval)
 
 
+def claude_project_id(workdir: str) -> str:
+    """The folder name Claude Code uses under ~/.claude/projects for a working dir.
+
+    Claude Code replaces EVERY character that is not a letter or digit with "-",
+    not only path separators. Measured 2026-11-22: "C:/Code/Personal/project NC"
+    is stored as "C--Code-Personal-project-NC", and ".claude" as "-claude". Mapping
+    only separators and the colon left a folder with a space or a dot in its
+    path pointing at a directory that does not exist, so the session had no transcript: no phone chat,
+    no usage, no history. This is the ONE place that rule lives.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", workdir).lstrip("-")
+
+
 def read_all_messages(filepath: str) -> list[dict]:
     """Synchronously read all messages from a JSONL file. Returns a list of parsed messages."""
     path = Path(filepath)
