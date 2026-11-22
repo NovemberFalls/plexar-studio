@@ -157,7 +157,9 @@ describe("RunDock", () => {
     rerender(<RunDock base={BASE} runId="r1" run={null} onClose={() => {}} />);
     expect(screen.getByText("Run closed at Workers")).toBeInTheDocument();
     expect(screen.getByTitle("Orchestration run")).toBeInTheDocument();
-    expect(screen.getByText("task r1")).toBeInTheDocument();
+    // The frame shows the task line; the header keeps it only as a tooltip.
+    expect(screen.getByTitle("task r1")).toBeInTheDocument();
+    expect(screen.queryByText("task r1")).toBeNull();
   });
 
   it("reloads only when base changes", () => {

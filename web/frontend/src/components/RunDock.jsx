@@ -72,7 +72,9 @@ export default function RunDock({ base, runId, run, onClose }) {
         style={{ height: 30, padding: "0 8px", borderBottom: "1px solid var(--cc-line)" }}
       >
         <span className="truncate flex-1 min-w-0" style={{ fontSize: 12, color: "var(--cc-fg)" }} title={shown?.task || ""}>
-          {shown?.task || runId}
+          {/* The frame shows the live task line itself; repeating it here read as a
+              duplicate. Without a frame this header is the only place it appears. */}
+          {src ? "Orchestration run" : (shown?.task || runId)}
         </span>
         <span style={{ fontSize: 10, color: "var(--cc-accent)" }}>
           {closed ? `Run closed${stage ? ` at ${stageLabel(stage)}` : ""}` : stageLabel(stage)}
