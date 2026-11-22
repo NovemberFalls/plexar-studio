@@ -27,7 +27,7 @@ import ProviderPicker from "./components/ProviderPicker";
 import EngineView from "./components/engine/EngineView";
 import ReportsView from "./components/reports/ReportsView";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM, DEFAULT_SPAWN_COLS, DEFAULT_SPAWN_ROWS } from "./utils/terminalFit";
-import { computeEndEvents, computePauseEvents, formatEndEventToast, buildBusyTerminalIds, isTerminalState, BRIDGE_KIND, CHANNEL_KIND, MAILBOX_KIND } from "./utils/bridgeEvents";
+import { computeEndEvents, computePauseEvents, formatEndEventToast, buildBusyTerminalIds, isTerminalState, MAILBOX_KIND } from "./utils/bridgeEvents";
 import MailboxOverlay from "./components/MailboxOverlay";
 // Redesigned shell chrome (design handoff "Workspace — the approved shell").
 import Rail from "./components/shell/Rail";
@@ -437,8 +437,6 @@ export default function App() {
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [gitStatuses, setGitStatuses] = useState({});
   const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
-  const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
-  const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
   const [mailboxes, setMailboxes] = useState([]); // array of V4 mailbox-bridge dicts from /api/bridge/mb
   // Set of TERMINAL IDs (backend strings), NOT local session ids. The comment
   // here used to say "session IDs", which is how a consumer came to call
@@ -630,14 +628,10 @@ export default function App() {
   const [workspacePresets, setWorkspacePresets] = useState(() => lsLoad(WORKSPACES_KEY, []));
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
-  // Bridge/channel end-event tracking (see utils/bridgeEvents.js) — last-seen
-  // record per id + a permanent "already toasted" set, so a bridge/channel
+  // Bridge end-event tracking (see utils/bridgeEvents.js) — last-seen
+  // record per id + a permanent "already toasted" set, so a bridge
   // ending fires exactly one Toast regardless of how many more polls observe
   // its terminal state before the backend's TTL prunes it.
-  const prevBridgeStatesRef = useRef(new Map());
-  const seenBridgeIdsRef = useRef(new Set());
-  const prevChannelStatesRef = useRef(new Map());
-  const seenChannelIdsRef = useRef(new Set());
   const prevMailboxStatesRef = useRef(new Map());
   const seenMailboxIdsRef = useRef(new Set());
   // Mailbox pauses announce once each, and re-announce after a resume — see
@@ -1463,32 +1457,6 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
-  // Poll /api/bridge every 3s to track active bridges for the indicator overlay.
-  // Also detects active -> ended transitions (or TTL-prune vanish) and toasts
-  // the reason — see utils/bridgeEvents.js.
-  useEffect(() => {
-    if (!backendReady) return;
-    const fetchBridges = async () => {
-      try {
-        const res = await fetch("/api/bridge");
-        if (!res.ok) return;
-        const data = await res.json();
-        const bridges = data.bridges || [];
-        setActiveBridges(bridges);
-        const events = computeEndEvents(BRIDGE_KIND, bridges, prevBridgeStatesRef.current, seenBridgeIdsRef.current);
-        events.forEach((evt) => {
-          const { message, type } = formatEndEventToast(evt);
-          toast(message, type);
-        });
-      } catch (_) {
-        // soft-fail — stale bridge state is not critical
-      }
-    };
-    fetchBridges();
-    const id = setInterval(fetchBridges, 3000);
-    return () => clearInterval(id);
-  }, [backendReady, toast]);
-
   // Poll /api/bridge/mb every 3s for V4 mailbox bridges. Two signals come out
   // of this: the usual end events, and PAUSE events — a bridge that hit its
   // round cap is waiting on the user and nothing resumes until they answer, so
@@ -1522,31 +1490,6 @@ export default function App() {
     };
     fetchMailboxes();
     const id = setInterval(fetchMailboxes, 3000);
-    return () => clearInterval(id);
-  }, [backendReady, toast]);
-
-  // Poll /api/bridge/channel every 3s to track active channels. Also detects
-  // active -> ended transitions (or TTL-prune vanish) and toasts the reason.
-  useEffect(() => {
-    if (!backendReady) return;
-    const fetchChannels = async () => {
-      try {
-        const res = await fetch("/api/bridge/channel");
-        if (!res.ok) return;
-        const data = await res.json();
-        const channelList = data.channels || [];
-        setChannels(channelList);
-        const events = computeEndEvents(CHANNEL_KIND, channelList, prevChannelStatesRef.current, seenChannelIdsRef.current);
-        events.forEach((evt) => {
-          const { message, type } = formatEndEventToast(evt);
-          toast(message, type);
-        });
-      } catch (_) {
-        // soft-fail — stale channel state is not critical
-      }
-    };
-    fetchChannels();
-    const id = setInterval(fetchChannels, 3000);
     return () => clearInterval(id);
   }, [backendReady, toast]);
 
@@ -1787,28 +1730,6 @@ export default function App() {
     handleCloseBridge();
   }, [sessions, bridgeModal.fromSessionId, toast, handleCloseBridge]);
 
-  const handleEndBridge = useCallback(async (bridgeId) => {
-    try {
-      await fetch(`/api/bridge/${bridgeId}`, { method: "DELETE" });
-      toast("Bridge ended", "info");
-      // Optimistically remove; next poll will reconcile
-      setActiveBridges((prev) => prev.filter((b) => b.bridge_id !== bridgeId));
-    } catch (err) {
-      toast(`Failed to end bridge: ${err.message}`, "error");
-    }
-  }, [toast]);
-
-  const handleEndChannel = useCallback(async (channelId) => {
-    try {
-      await fetch(`/api/bridge/channel/${channelId}`, { method: "DELETE" });
-      toast("Channel ended", "info");
-      // Optimistically remove; next poll will reconcile
-      setChannels((prev) => prev.filter((c) => c.channel_id !== channelId));
-    } catch (err) {
-      toast(`Failed to end channel: ${err.message}`, "error");
-    }
-  }, [toast]);
-
   // ---- V4 mailbox bridge ----
 
   const handleStartMailbox = useCallback(async ({ leadId, workerIds, topic, maxRounds }) => {
@@ -1905,30 +1826,14 @@ export default function App() {
     return null;
   }, [mailboxes]);
 
-  /** Given a terminalId, find whether it is in an active channel.
-   *  Returns { channel_id, isLead, turns_used, max_turns } or null. */
-  const getChannelForTerminal = useCallback((terminalId) => {
-    if (!terminalId) return null;
-    for (const ch of channels) {
-      if (ch.state !== "active") continue;
-      if (ch.lead_id === terminalId) {
-        return { channel_id: ch.channel_id, isLead: true, turns_used: ch.turns_used, max_turns: ch.max_turns };
-      }
-      if (ch.worker_ids && ch.worker_ids.includes(terminalId)) {
-        return { channel_id: ch.channel_id, isLead: false, turns_used: ch.turns_used, max_turns: ch.max_turns };
-      }
-    }
-    return null;
-  }, [channels]);
-
-  /** Map of terminalId -> "bridge" | "channel" for every session taking part in
-   *  an active bridge or channel. Passed to BridgeModal so its session pickers
+  /** Map of terminalId -> "mailbox" for every session taking part in
+   *  a live bridge. Passed to BridgeModal so its session pickers
    *  can disable already-busy sessions instead of letting the user hit a 409 on
    *  Send. Built by the shared helper (which documents why it must be a Map and
    *  not a Set) so App and its tests exercise the same code. */
   const busyTerminalIds = useMemo(
-    () => buildBusyTerminalIds(activeBridges, channels, mailboxes),
-    [activeBridges, channels, mailboxes],
+    () => buildBusyTerminalIds(mailboxes),
+    [mailboxes],
   );
 
   // BroadcastChannel: receive CLOSED from popout windows to clear their placeholder
@@ -2456,54 +2361,12 @@ export default function App() {
     return "serving";
   }, [localEnabled, localStatus]);
 
+  // A paused bridge counts: it is live and it is the one that most needs the
+  // user's attention, so hiding it from the count would be backwards.
   const bridgeCount = useMemo(
-    () => activeBridges.filter((b) => b?.state === "active").length
-      + channels.filter((c) => c?.state === "active").length
-      // A paused mailbox bridge counts: it is live and it is the one that most
-      // needs the user's attention, so hiding it from the count would be
-      // backwards.
-      + mailboxes.filter((m) => m?.state && !isTerminalState(m.state)).length,
-    [activeBridges, channels, mailboxes],
+    () => mailboxes.filter((m) => m?.state && !isTerminalState(m.state)).length,
+    [mailboxes],
   );
-
-  /** The focused session's bridge/channel role, for the Inspector card. */
-  const inspectorBridge = useMemo(() => {
-    if (!focusedSession) return null;
-    const tid = focusedSession.terminalId;
-    const b = activeBridges.find((x) => x?.state === "active" && (x.from_id === tid || x.to_id === tid));
-    if (b) {
-      const isSender = b.from_id === tid;
-      return {
-        role: isSender ? "sender" : "receiver",
-        kind: "bridge",
-        peerName: isSender ? b.to_name : b.from_name,
-        turn: b.turns_used,
-        maxTurns: b.max_turns,
-        id: b.bridge_id,
-      };
-    }
-    const ch = channels.find(
-      (x) => x?.state === "active" && (x.lead_id === tid || (Array.isArray(x.worker_ids) && x.worker_ids.includes(tid))),
-    );
-    if (ch) {
-      const isLead = ch.lead_id === tid;
-      return {
-        role: isLead ? "lead" : "worker",
-        kind: "channel",
-        peerName: isLead ? `${(ch.worker_ids || []).length} workers` : ch.lead_name,
-        turn: ch.turns_used,
-        maxTurns: ch.max_turns,
-        id: ch.channel_id,
-      };
-    }
-    return null;
-  }, [focusedSession, activeBridges, channels]);
-
-  const endFocusedBridge = useCallback(() => {
-    if (!inspectorBridge?.id) return;
-    if (inspectorBridge.kind === "channel") handleEndChannel(inspectorBridge.id);
-    else handleEndBridge(inspectorBridge.id);
-  }, [inspectorBridge, handleEndChannel, handleEndBridge]);
 
   /** Today's total tokens for the status strip. Keys pinned to
    *  usage_tracker.daily_summary(): input_tokens / output_tokens /
@@ -2801,17 +2664,6 @@ export default function App() {
               if (session) {
                 const isPopped = poppedOutIds.has(session.terminalId);
 
-                // Find an active bridge involving this session's terminalId
-                const activeBridge = session.terminalId
-                  ? activeBridges.find(
-                      (b) =>
-                        b.state === "active" &&
-                        (b.from_id === session.terminalId || b.to_id === session.terminalId)
-                    ) || null
-                  : null;
-
-                // Find an active channel involving this session's terminalId
-                const activeChannel = getChannelForTerminal(session.terminalId);
                 const activeMailbox = getMailboxForTerminal(session.terminalId);
 
                 // Glow state lives on the SLOT wrapper, not inside TerminalPane:
@@ -2906,8 +2758,6 @@ export default function App() {
                         toast={toast}
                         onFork={() => forkSession(session.id)}
                         onOpenBridge={() => handleOpenBridge(session.id)}
-                        activeBridge={activeBridge}
-                        onEndBridge={handleEndBridge}
                         onPopout={session.terminalId ? handlePopout : undefined}
                         workflowSummary={workflowsByTerminal[session.terminalId] || null}
                         usage={usageByTerminal[session.terminalId] || null}
@@ -2922,55 +2772,6 @@ export default function App() {
                       onExtend={handleExtendMailbox}
                       onStop={handleEndMailbox}
                     />
-                    {/* Channel overlay — shown when pane is part of an active channel */}
-                    {activeChannel && (
-                      <div
-                        className="channel-active-glow"
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          right: 0,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          padding: "4px 10px",
-                          backgroundColor: "rgba(255, 140, 0, 0.12)",
-                          borderBottom: "1px solid rgba(255, 140, 0, 0.5)",
-                          zIndex: 5,
-                          pointerEvents: "none",
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontSize: "10px",
-                            fontWeight: 700,
-                            letterSpacing: "0.06em",
-                            color: "#ff8c00",
-                            textShadow: "0 0 8px rgba(255,140,0,0.7)",
-                          }}
-                        >
-                          {activeChannel.isLead ? "CHANNEL LEAD" : "CHANNEL WORKER"} &middot; turn {activeChannel.turns_used}/{activeChannel.max_turns}
-                        </span>
-                        <button
-                          type="button"
-                          style={{
-                            pointerEvents: "all",
-                            fontSize: "10px",
-                            fontWeight: 600,
-                            color: "#ff8c00",
-                            border: "1px solid rgba(255,140,0,0.6)",
-                            borderRadius: 4,
-                            padding: "1px 7px",
-                            backgroundColor: "rgba(255,140,0,0.15)",
-                            cursor: "pointer",
-                          }}
-                          onClick={() => handleEndChannel(activeChannel.channel_id)}
-                        >
-                          Stop
-                        </button>
-                      </div>
-                    )}
                   </div>
                 );
               }
@@ -3362,7 +3163,6 @@ export default function App() {
                 session={focusedSession}
                 git={inspectorGit}
                 usage={inspectorUsage}
-                bridge={inspectorBridge}
                 workflows={inspectorWorkflows}
                 overrides={{ model, permissionMode, effort, fast }}
                 onOverrideChange={applySessionOverride}
@@ -3371,7 +3171,6 @@ export default function App() {
                 onFork={() => focusedSession && forkSession(focusedSession.id)}
                 onBridge={() => focusedSession && setBridgeModal({ open: true, fromSessionId: focusedSession.id })}
                 onPopOut={() => focusedSession && popOutSession(focusedSession.id)}
-                onEndBridge={endFocusedBridge}
                 onOpenTranscript={null}
                 onCollapse={() => setInspectorOpen(false)}
               />

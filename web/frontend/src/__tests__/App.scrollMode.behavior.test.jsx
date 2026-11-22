@@ -40,9 +40,7 @@ beforeEach(() => {
   vi.stubGlobal("WebSocket", class { static OPEN = 1; readyState = 1; close() {} send() {} addEventListener() {} removeEventListener() {} });
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     const body = url === "/api/terminals" ? { terminals: sessions.map((s, i) => ({ ...s, id: `term-${i}`, working_dir: s.workdir, alive: true })) }
-      : url === "/api/bridge" ? { bridges: [] }
-        : url === "/api/bridge/channel" ? { channels: [] }
-          : { ok: true };
+      : { ok: true };
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
   }));
   scrollPosition = 0;

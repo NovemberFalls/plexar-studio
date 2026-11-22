@@ -169,8 +169,6 @@ function makeFetchStub() {
     if (u === "/api/me") return jsonResponse({ name: "Test User" });
     if (u === "/api/terminals") return jsonResponse({ terminals: [] });
     if (u === "/api/system") return jsonResponse({ cpu: 10, ramUsed: 4, ramTotal: 32 });
-    if (u === "/api/bridge") return jsonResponse({ bridges: [] });
-    if (u === "/api/bridge/channel") return jsonResponse({ channels: [] });
     if (u === "/api/usage/daily") return jsonResponse({});
     if (u.startsWith("/api/local/")) return jsonResponse({ reachable: false });
     // Generic fallback for anything else polled during mount.

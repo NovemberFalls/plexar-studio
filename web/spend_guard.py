@@ -7,8 +7,8 @@ block switches, enforcement scope) since the Settings page shipped, and NOTHING
 read it. A user could set a $20 cap, press Save, and be enforced by exactly
 nothing. For a spend cap that is worse than having no feature at all: the
 control invites the unattended overspend it appears to prevent. This module is
-the single decision point that closes that gap, and ``server.py`` /
-``bridge_manager.py`` are the only callers.
+the single decision point that closes that gap, and ``server.py`` is the
+only caller.
 
 Three refusals are the POINT of this module, not incidental hardening:
 
@@ -47,7 +47,7 @@ Cost classes
 * **local** -- ``local_runs`` rows. $0, and counted toward NEITHER class.
 
 Stdlib only. Every DB read is synchronous sqlite; async callers must hop a
-thread (``asyncio.to_thread``) -- see ``server.py`` and ``bridge_manager.py``.
+thread (``asyncio.to_thread``) -- see ``server.py``.
 """
 
 from __future__ import annotations
@@ -78,8 +78,8 @@ _EXACT_SHARE_FLOOR = 0.5
 # ---------------------------------------------------------------------------
 # usage_tracker and pricing_store both open sqlite files at import time. They
 # are imported INSIDE the functions so that importing spend_guard (which
-# bridge_manager does) never creates a DB as a side effect -- tests import
-# bridge_manager without wanting ~/.claude-cockpit touched.
+# server.py does) never creates a DB as a side effect -- tests import
+# server without wanting ~/.claude-cockpit touched.
 
 
 def _default_tracker():
@@ -674,12 +674,3 @@ def check_start(scope: str, now: datetime | None = None) -> dict | None:
     except Exception:
         logger.error("Spend guard check failed for scope=%s -- allowing", scope, exc_info=True)
         return None
-
-
-def block_reason(scope: str, now: datetime | None = None) -> str | None:
-    """A one-line reason string if *scope* is blocked, else None."""
-    result = check_start(scope, now=now)
-    if result is None:
-        return None
-    reasons = result.get("reasons") or []
-    return "; ".join(str(r) for r in reasons) or "spend cap reached"

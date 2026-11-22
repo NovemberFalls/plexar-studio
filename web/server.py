@@ -48,7 +48,7 @@ logger = logging.getLogger("cockpit.server")
 import pty_manager as pty_manager_module  # noqa: E402 -- module handle for resolve_claude_cli(); see /api/cli
 from pty_manager import ClaudeCliNotFound, CodexCliNotFound, PlexarHarnessCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 import bridge_manager as bridge_manager_module  # noqa: E402 -- module handle for _RELAY_DIR; the startup temp sweep must exclude it by path identity
-from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
+from bridge_manager import bridge_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
 from mailbox_bridge import mailbox_manager, cleanup_mailbox_root, read_mailbox  # noqa: E402 -- V4 bridge; imports bridge_manager, so it must follow that line
 import mailbox_bridge  # noqa: E402 -- module handle for _MAILBOX_ROOT; same reason as bridge_manager_module, and must follow the line above
 # _wait_for_idle_simple / _paste_and_submit are underscore-prefixed (bridge_manager treats
@@ -63,7 +63,6 @@ import framework_client  # noqa: E402 -- grouped with the other local-module imp
 from harness_manager import harness_manager  # noqa: E402 -- Plexar Harness key/status/model catalog
 import harness_manager as harness_manager_module  # noqa: E402
 import plexar_client  # noqa: E402 -- grouped with the other local-module imports above
-import voice_service  # noqa: E402 -- free to import: every ML dependency inside it is lazy
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
 from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other local-module imports above
 import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the other local-module imports above
@@ -1407,7 +1406,7 @@ _ALLOWED_COMMAND_PREFIXES = ("/compact", "/clear", "/rename", "/model", "/fast")
 
 # How long POST /command waits (typing-quiet + idle) before giving up with a
 # 409. Short because this is a synchronous user-triggered action — the caller
-# is waiting on the HTTP response, unlike the V2/V3 bridge's 5-minute patience.
+# is waiting on the HTTP response, unlike a long unattended wait.
 _COMMAND_GATE_TIMEOUT = 5.0
 
 
@@ -2219,15 +2218,12 @@ async def bridge_manual(request: Request):
             {"ok": False, "error": "Cannot bridge a session to itself"},
             status_code=400,
         )
-    # Guard: refuse if either session is already enrolled in an active auto
-    # bridge or channel. A manual relay writing into a session whose PTY is
-    # already being driven by an active V2/V3 relay task would interleave
-    # writes to the same input buffer and produce corrupt, unpredictable
-    # output — same rationale as the guard on /api/bridge/auto.
+    # Guard: refuse if either session is already enrolled in a live mailbox
+    # bridge, whose conversation a manual relay would cut across.
     busy_ids = _bridge_busy_ids()
     if from_id in busy_ids or to_id in busy_ids:
         return JSONResponse(
-            {"ok": False, "error": "One or both sessions already in an active bridge or channel"},
+            {"ok": False, "error": "One or both sessions already in an active bridge"},
             status_code=409,
         )
     result = await bridge_manager.start_manual(from_id, to_id, message, prefix)
@@ -2235,156 +2231,20 @@ async def bridge_manual(request: Request):
     return JSONResponse(result, status_code=status)
 
 
-@app.post("/api/bridge/auto")
-async def bridge_auto(request: Request):
-    """Start an autonomous two-session bridge with a shared kickoff prompt."""
-    body = await request.json()
-    from_id = body.get("from_terminal_id", "")
-    to_id = body.get("to_terminal_id", "")
-    kickoff = body.get("kickoff_prompt", "")
-    try:
-        max_turns = int(body.get("max_turns", 4))
-    except (TypeError, ValueError):
-        return JSONResponse(
-            {"ok": False, "error": "max_turns must be an integer"},
-            status_code=400,
-        )
-    if not from_id or not to_id or not kickoff:
-        return JSONResponse(
-            {"ok": False, "error": "from_terminal_id, to_terminal_id, kickoff_prompt required"},
-            status_code=400,
-        )
-    if from_id == to_id:
-        return JSONResponse(
-            {"ok": False, "error": "Cannot bridge a session to itself"},
-            status_code=400,
-        )
-    if not 1 <= max_turns <= 10:
-        return JSONResponse(
-            {"ok": False, "error": "max_turns must be between 1 and 10"},
-            status_code=400,
-        )
-    # Guard: refuse if either session is already enrolled in an active bridge.
-    # Two active bridges on the same session would interleave writes to its PTY
-    # input buffer and produce corrupt, unpredictable output.
-    busy_ids = _bridge_busy_ids()
-    if from_id in busy_ids or to_id in busy_ids:
-        return JSONResponse(
-            {"ok": False, "error": "One or both sessions already in an active bridge or channel"},
-            status_code=409,
-        )
-    # Spend guardrail: an autonomous bridge runs unattended and max_turns bounds
-    # turns, not dollars. Refuse with the same 409 conflict idiom the guards above
-    # use, and hand back the whole evaluate() payload so the UI can name the exact
-    # cap that tripped instead of guessing.
-    spend = await _spend_refusal("bridges")
-    if spend is not None:
-        return JSONResponse(
-            {"ok": False, "error": _spend_error_text(spend), "spend": spend},
-            status_code=409,
-        )
-    result = await bridge_manager.start_auto(from_id, to_id, kickoff, max_turns)
-    status = 200 if result.get("ok") else 400
-    return JSONResponse(result, status_code=status)
-
-
-@app.delete("/api/bridge/{bridge_id}")
-async def bridge_stop(bridge_id: str):
-    """Stop an active auto bridge by bridge_id."""
-    ok = bridge_manager.stop(bridge_id)
-    if not ok:
-        return JSONResponse({"ok": False, "error": "Bridge not found"}, status_code=404)
-    return JSONResponse({"ok": True})
-
-
-@app.get("/api/bridge")
-async def bridge_list():
-    """List all known bridges (active and recently ended)."""
-    return JSONResponse({"bridges": bridge_manager.list_active()})
-
-
-@app.post("/api/bridge/channel")
-async def channel_start(request: Request):
-    """Start an N-session channel: one lead coordinating N workers."""
-    body = await request.json()
-    lead_id = body.get("lead_id", "")
-    worker_ids = body.get("worker_ids", [])
-    kickoff = body.get("kickoff_prompt", "")
-    try:
-        max_turns = int(body.get("max_turns", 6))
-    except (TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "max_turns must be an integer"}, status_code=400)
-
-    # Validation
-    if not lead_id or not worker_ids or not kickoff:
-        return JSONResponse(
-            {"ok": False, "error": "lead_id, worker_ids, kickoff_prompt required"},
-            status_code=400,
-        )
-    if not isinstance(worker_ids, list) or not all(isinstance(w, str) for w in worker_ids):
-        return JSONResponse({"ok": False, "error": "worker_ids must be a list of strings"}, status_code=400)
-    if len(worker_ids) > 7:  # lead + 7 workers = 8 total, matches MAX_SESSIONS default
-        return JSONResponse({"ok": False, "error": "Maximum 7 workers per channel"}, status_code=400)
-    if not 1 <= max_turns <= 20:
-        return JSONResponse({"ok": False, "error": "max_turns must be between 1 and 20"}, status_code=400)
-
-    # Conflict guard: reject if any session is in an active 2-session bridge OR active channel
-    all_requested = {lead_id} | set(worker_ids)
-    overlap = all_requested & _bridge_busy_ids()
-    if overlap:
-        return JSONResponse(
-            {"ok": False, "error": f"Sessions already in an active bridge or channel: {sorted(overlap)}"},
-            status_code=409,
-        )
-
-    # Spend guardrail — same refusal as /api/bridge/auto (see there).
-    spend = await _spend_refusal("bridges")
-    if spend is not None:
-        return JSONResponse(
-            {"ok": False, "error": _spend_error_text(spend), "spend": spend},
-            status_code=409,
-        )
-
-    result = await channel_manager.start(lead_id, worker_ids, kickoff, max_turns)
-    status = 200 if result.get("ok") else 400
-    return JSONResponse(result, status_code=status)
-
-
-@app.delete("/api/bridge/channel/{channel_id}")
-async def channel_stop(channel_id: str):
-    """Stop an active channel by channel_id."""
-    ok = channel_manager.stop(channel_id)
-    if not ok:
-        return JSONResponse({"ok": False, "error": "Channel not found"}, status_code=404)
-    return JSONResponse({"ok": True})
-
-
-@app.get("/api/bridge/channel")
-async def channel_list():
-    """List all known channels (active and recently ended)."""
-    return JSONResponse({"channels": channel_manager.list_active()})
-
-
 # ── Mailbox bridge (V4) ──────────────────────────────────
 #
 # The self-driving protocol: sessions watch a shared file with their own
 # Monitor tool and POST here to speak. See mailbox_bridge.py for why this
-# replaces the V2/V3 relay loops rather than sitting beside them.
+# replaced the V2/V3 relay loops (now removed).
 
 
 def _bridge_busy_ids() -> set[str]:
-    """Terminal IDs enrolled in ANY live bridge, of any generation.
+    """Terminal IDs enrolled in a live mailbox bridge.
 
-    Every start route consults this. A session driven by two bridges at once
-    has two writers on one PTY input buffer (V1/V2/V3) or two watchers on two
-    mailboxes (V4) — the first corrupts input, the second makes the session's
+    Every start route consults this. A session watching two mailboxes makes its
     replies ambiguous about which conversation they belong to.
     """
-    active = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
-    busy = {b["from_id"] for b in active} | {b["to_id"] for b in active}
-    busy |= channel_manager.member_ids()
-    busy |= mailbox_manager.member_ids()
-    return busy
+    return set(mailbox_manager.member_ids())
 
 
 @app.post("/api/bridge/mailbox")
@@ -2427,7 +2287,7 @@ async def mailbox_start(request: Request):
         )
 
     # Spend guardrail — a mailbox bridge runs unattended between human gates,
-    # so it is refused on the same terms as V2/V3 (see /api/bridge/auto).
+    # so it is refused on the spend terms below.
     spend = await _spend_refusal("bridges")
     if spend is not None:
         return JSONResponse(
@@ -6599,47 +6459,6 @@ async def get_provider_health(provider_id: str):
     return JSONResponse(body)
 
 
-# ── Voice (status · voices) ───────────────────────────────
-#
-# Voice is an OPTIONAL capability. Its ML dependencies are deliberately NOT
-# bundled — the sidecar is ~48 MB and torch alone would add ~2 GB — so on a
-# fresh install the engine is simply absent. `import voice_service` is free
-# (~0.05s, no heavy imports, no network, no disk), which is why it can sit at
-# module scope beside everything else.
-#
-# Both routes ALWAYS return 200. "Voice is not installed" is a normal state to
-# report, not an HTTP error: a 503 here would make an inline panel blank out
-# rather than explain itself, which is the same stance /api/spend/status and
-# /api/anthropic/usage already take.
-
-
-@app.get("/api/voice/status")
-async def get_voice_status():
-    """What voice can actually do on this machine, and why not, if not.
-
-    The `reason` is the whole point and the UI must switch on it — the four
-    values imply four DIFFERENT user actions:
-      not_installed -> pip install; model_missing -> download the weights;
-      unsupported   -> this desktop build has no interpreter to install into;
-      check_failed  -> we could not determine, which is NOT "it is broken".
-    Collapsing them into "voice unavailable" sends people to fix the wrong
-    thing.
-    """
-    return JSONResponse(await asyncio.to_thread(voice_service.availability))
-
-
-@app.get("/api/voice/voices")
-async def get_voice_voices():
-    """Available voices, or an empty list WITH the reason it is empty.
-
-    An empty picker with no explanation reads as "this model has no voices",
-    which is a different claim from "the voicepack is not downloaded" or "the
-    file is corrupt" — and a corrupt pack must not send the user to re-download
-    a file they already have.
-    """
-    return JSONResponse(await asyncio.to_thread(voice_service.list_voices))
-
-
 # ── Plexar reads (instances · reports · GPUs) ─────────────
 #
 # Plexar Studio KEEPS its own reporting. These are a SECOND source beside it, not a
@@ -7667,6 +7486,18 @@ app.include_router(slash_catalog.router)
 import remote_tunnel  # noqa: E402 -- grouped with the remote router wiring above
 
 app.include_router(remote_tunnel.router)
+
+# Studio-to-Studio peers: this Studio pairs with ANOTHER machine's Studio the way
+# the phone does and proxies its sessions. Ordinary origin-guarded /api and /ws
+# routes; the peer's token stays in config.json and never reaches the page.
+import remote_peers  # noqa: E402 -- grouped with the remote router wiring above
+
+app.include_router(remote_peers.router)
+
+# The app background image (Settings > Appearance).
+import background_image  # noqa: E402 -- router wiring, same grouping
+
+app.include_router(background_image.router)
 
 def _remote_claude_messages(session) -> list[dict]:
     """`RemoteBackend.messages_claude`: this session's JSONL, parsed, or [].

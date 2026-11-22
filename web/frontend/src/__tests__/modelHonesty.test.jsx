@@ -501,8 +501,6 @@ function appFetchStub() {
     if (u === "/api/me") return jsonResponse({ name: "Test User" });
     if (u === "/api/terminals") return jsonResponse({ terminals: [] });
     if (u === "/api/system") return jsonResponse({ cpu: 1, ramUsed: 1, ramTotal: 2 });
-    if (u === "/api/bridge") return jsonResponse({ bridges: [] });
-    if (u === "/api/bridge/channel") return jsonResponse({ channels: [] });
     if (u === "/api/usage/daily") return jsonResponse({});
     // Never let the OpenRouter-key sweep reset the model out from under a test
     // that is asserting the model was left alone.

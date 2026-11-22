@@ -186,32 +186,28 @@ describe("formatEndEventToast for mailbox bridges", () => {
 
 describe("buildBusyTerminalIds with mailbox bridges", () => {
   it("marks every participant of a running bridge", () => {
-    const busy = buildBusyTerminalIds([], [], [mbx()]);
+    const busy = buildBusyTerminalIds([mbx()]);
     expect(busy.get("t-lead")).toBe(MAILBOX_KIND);
     expect(busy.get("t-w1")).toBe(MAILBOX_KIND);
   });
 
   it("keeps a PAUSED bridge's sessions busy", () => {
-    const busy = buildBusyTerminalIds([], [], [mbx({ state: "awaiting_human" })]);
+    const busy = buildBusyTerminalIds([mbx({ state: "awaiting_human" })]);
     expect(busy.has("t-lead")).toBe(true);
     expect(busy.has("t-w1")).toBe(true);
   });
 
   it("releases them once the bridge is over", () => {
     for (const state of ["ended_agreed", "ended_user", "ended_capped", "errored"]) {
-      const busy = buildBusyTerminalIds([], [], [mbx({ state })]);
+      const busy = buildBusyTerminalIds([mbx({ state })]);
       expect(busy.size).toBe(0);
     }
   });
 
   it("still returns a Map (BridgeModal calls .get for the label)", () => {
-    expect(buildBusyTerminalIds([], [], [mbx()])).toBeInstanceOf(Map);
+    expect(buildBusyTerminalIds([mbx()])).toBeInstanceOf(Map);
   });
 
-  it("is backwards compatible with two arguments", () => {
-    expect(() => buildBusyTerminalIds([], [])).not.toThrow();
-    expect(buildBusyTerminalIds([], []).size).toBe(0);
-  });
 });
 
 // ---------------------------------------------------------------------------

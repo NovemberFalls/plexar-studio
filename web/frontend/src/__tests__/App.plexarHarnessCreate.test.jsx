@@ -43,8 +43,7 @@ beforeEach(() => {
         posts.push(JSON.parse(options.body));
         body = { id: "harness-pty" };
       } else body = { terminals: [] };
-    } else if (url === "/api/bridge") body = { bridges: [] };
-    else if (url === "/api/bridge/channel") body = { channels: [] };
+    }
     else if (url === "/api/harness/models") body = { source: "cache", models: [{ id: HARNESS_MODEL, label: "Plexar Qwen", efforts: ["", "off", "high"] }] };
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
   }));

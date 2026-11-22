@@ -34,8 +34,7 @@ beforeEach(() => {
         posts.push(JSON.parse(options.body));
         body = spawnError ? { error: spawnError } : { id: "new-pty", codex_session_id: "exact-chat" };
       } else body = { terminals };
-    } else if (url === "/api/bridge") body = { bridges: [] };
-    else if (url === "/api/bridge/channel") body = { channels: [] };
+    }
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
   }));
 });

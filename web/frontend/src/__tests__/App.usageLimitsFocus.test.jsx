@@ -33,8 +33,6 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     let body = { ok: true };
     if (url === "/api/terminals") body = { terminals: sessions.map((session) => ({ ...session, id: session.terminalId, working_dir: session.workdir, alive: true })) };
-    else if (url === "/api/bridge") body = { bridges: [] };
-    else if (url === "/api/bridge/channel") body = { channels: [] };
     else if (url.startsWith("/api/anthropic/usage")) body = { available: true, limits: [{ kind: "week", label: "Claude week", percent: 72 }] };
     else if (url === "/api/terminals/codex-one/usage") body = { subscription_limits: { available: true, limits: [{ kind: "codex:primary", label: "Codex week", percent: 28 }] } };
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };

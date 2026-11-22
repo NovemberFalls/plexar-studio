@@ -234,8 +234,6 @@ def test_freeform_leaf_must_be_a_dict(isolated_settings):
 
 
 @pytest.mark.parametrize("patch,needle", [
-    ({"providers": {"lane_broker": {"concurrency": 0}}}, "concurrency"),
-    ({"providers": {"lane_broker": {"concurrency": 9}}}, "concurrency"),
     ({"providers": {"vllm": {"gpu_util": 0.01}}}, "gpu_util"),
     ({"providers": {"vllm": {"gpu_util": 1.5}}}, "gpu_util"),
     ({"appearance": {"glow_size": -1}}, "glow_size"),
@@ -255,8 +253,6 @@ def test_out_of_range_numeric_rejected(isolated_settings, patch, needle):
 
 def test_range_boundaries_accepted(isolated_settings):
     # Boundary values on each bounded key must be accepted, not off-by-one rejected.
-    settings_store.update_settings({"providers": {"lane_broker": {"concurrency": 1}}})
-    settings_store.update_settings({"providers": {"lane_broker": {"concurrency": 8}}})
     settings_store.update_settings({"providers": {"vllm": {"gpu_util": 0.05}}})
     settings_store.update_settings({"providers": {"vllm": {"gpu_util": 1.0}}})
     settings_store.update_settings({"appearance": {"glow_size": 0}})
@@ -367,42 +363,51 @@ async def test_reveal_endpoint_returns_200_on_failure(client, isolated_settings,
 
 
 # ---------------------------------------------------------------------------
-# Voice — an OPTIONAL capability whose engine is not bundled
+# Removed sections survive on disk; background image settings are bounded
 # ---------------------------------------------------------------------------
 
-def test_voice_is_off_by_default():
-    """The ML deps are not shipped (the sidecar is 48 MB; torch is ~2 GB).
 
-    Defaulting to on would advertise a feature whose engine has to be
-    downloaded before it can do anything.
-    """
-    assert settings_store.DEFAULT_SETTINGS["voice"]["enabled"] is False
+def test_removed_voice_and_lane_broker_keys_survive_a_read_and_a_put(isolated_settings):
+    config_dir, settings_file = isolated_settings
+    config_dir.mkdir(parents=True)
+    settings_file.write_text(json.dumps({
+        "voice": {"enabled": True, "barge_in": False},
+        "providers": {"lane_broker": {"concurrency": 3}},
+    }), encoding="utf-8")
+
+    assert "voice" not in settings_store.DEFAULT_SETTINGS
+    assert "lane_broker" not in settings_store.DEFAULT_SETTINGS["providers"]
+
+    effective = settings_store.read_settings()
+    assert effective["voice"] == {"enabled": True, "barge_in": False}
+    assert effective["providers"]["lane_broker"] == {"concurrency": 3}
+
+    settings_store.update_settings({"appearance": {"glow_size": 12}})
+    on_disk = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert on_disk["voice"] == {"enabled": True, "barge_in": False}
+    assert on_disk["providers"]["lane_broker"] == {"concurrency": 3}
+
+    # A patch that still carries the old nested key is not rejected either.
+    settings_store.update_settings({"providers": {"lane_broker": {"concurrency": 99}}})
+    on_disk = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert on_disk["providers"]["lane_broker"]["concurrency"] == 99
 
 
-def test_no_voice_is_guessed_by_default():
-    """Naming a voicepack that may not be on disk would show the user a
-    selection the engine cannot honour. Empty means 'ask the engine'."""
-    assert settings_store.DEFAULT_SETTINGS["voice"]["voice_id"] == ""
+def test_background_defaults():
+    assert settings_store.DEFAULT_SETTINGS["appearance"]["background"] == {
+        "enabled": False, "dim": 0.55, "blur": 0, "pane_opacity": 0.85,
+    }
 
 
-def test_barge_in_defaults_on():
-    """Speaking over the assistant IS conversational voice; an install where
-    you cannot interrupt is the feature without its point."""
-    assert settings_store.DEFAULT_SETTINGS["voice"]["barge_in"] is True
-
-
-def test_the_continue_pause_is_five_seconds_and_bounded(isolated_settings):
-    assert settings_store.DEFAULT_SETTINGS["voice"]["silence_continue_seconds"] == 5.0
-
-    # Below ~0.5s a normal breath ends the turn; past 30s "listening" is
-    # indistinguishable from a hang.
-    with pytest.raises(ValueError):
-        settings_store.update_settings({"voice": {"silence_continue_seconds": 0.1}})
-    with pytest.raises(ValueError):
-        settings_store.update_settings({"voice": {"silence_continue_seconds": 120}})
-
-    effective = settings_store.update_settings(
-        {"voice": {"silence_continue_seconds": 2.5}}
-    )
-    assert effective["voice"]["silence_continue_seconds"] == 2.5
-    assert effective["voice"]["barge_in"] is True, "a bounded edit must not clobber siblings"
+@pytest.mark.parametrize("leaf,bad,good", [
+    ("dim", (-0.1, 0.96), (0, 0.95)),
+    ("blur", (-1, 41, 2.5), (0, 40)),
+    ("pane_opacity", (0.29, 1.01), (0.3, 1.0)),
+])
+def test_background_bounds(isolated_settings, leaf, bad, good):
+    for v in bad:
+        with pytest.raises(ValueError, match=leaf):
+            settings_store.update_settings({"appearance": {"background": {leaf: v}}})
+    for v in good:
+        out = settings_store.update_settings({"appearance": {"background": {leaf: v}}})
+        assert out["appearance"]["background"][leaf] == v

@@ -1,5 +1,4 @@
-"""Tests for the typing-quiet gate in bridge_manager._wait_for_idle_simple
-and bridge_manager._wait_for_idle.
+"""Tests for the typing-quiet gate in bridge_manager._wait_for_idle_simple.
 
 The gate prevents bridge injection while the user is actively typing:
   if (time.monotonic() - session.last_user_input_time) < _TYPING_QUIET_WINDOW:
@@ -10,8 +9,6 @@ Tests:
      (even when tracker state is idle — the typing gate is the only blocker).
   2. _wait_for_idle_simple returns True quickly when the typing window has
      already elapsed (last_user_input_time = now - 2.0).
-  3. _wait_for_idle (bridge-record variant) honors the same gate — returns
-     False when typing is recent, True when it has elapsed.
 """
 
 from __future__ import annotations
@@ -29,7 +26,7 @@ import logging_config
 logging_config.setup("WARNING")
 
 import bridge_manager as bm_module
-from bridge_manager import _wait_for_idle_simple, _wait_for_idle, _BridgeRecord
+from bridge_manager import _wait_for_idle_simple
 
 
 # ---------------------------------------------------------------------------
@@ -50,18 +47,6 @@ def _make_session(tracker_state="idle", last_input_offset=0.0) -> MagicMock:
     # Positive offset = in the past (quiet); negative/zero = right now (typing)
     s.last_user_input_time = time.monotonic() - last_input_offset
     return s
-
-
-def _make_bridge_record(bridge_id="bridge-test") -> _BridgeRecord:
-    """Minimal _BridgeRecord with an active (unset) stop event."""
-    return _BridgeRecord(
-        bridge_id=bridge_id,
-        from_id="from-001",
-        to_id="to-002",
-        from_name="Lead",
-        to_name="Worker",
-        max_turns=4,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -110,55 +95,4 @@ async def test_wait_for_idle_simple_passes_when_quiet(monkeypatch):
 
     assert result is True, "Expected True — typing window elapsed and session is idle"
     # Should resolve on the first poll iteration, not wait a full second
-    assert elapsed < 1.0, f"Expected fast resolution; took {elapsed:.3f}s"
-
-
-# ---------------------------------------------------------------------------
-# Test 3a — _wait_for_idle (bridge record): recent typing blocks
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_wait_for_idle_record_blocks_when_typing(monkeypatch):
-    """_wait_for_idle returns 'timeout' when last_user_input_time is recent.
-
-    Same logic as _wait_for_idle_simple but also checks the bridge record's
-    stop_event.  Stop event is NOT set — the typing gate is the sole blocker.
-
-    _wait_for_idle now returns a string sentinel ('idle' | 'dead' | 'stopped' |
-    'timeout') instead of a bool.  When the session is alive but the typing gate
-    never clears within _BUSY_WAIT_MAX, the result is 'timeout' (non-fatal).
-    """
-    session = _make_session(tracker_state="idle", last_input_offset=0.05)
-    record = _make_bridge_record()
-
-    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda _tid: session)
-
-    # Patch _BUSY_WAIT_MAX to keep the test fast (typing gate holds for >0.05s
-    # but we only wait 0.4s total; within that window typing never clears).
-    monkeypatch.setattr(bm_module, "_BUSY_WAIT_MAX", 0.4)
-
-    result = await _wait_for_idle("term-x", record)
-
-    assert result == "timeout", (
-        f"Expected 'timeout' — typing gate blocks injection but peer is alive; got {result!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 3b — _wait_for_idle (bridge record): elapsed window → "idle" quickly
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_wait_for_idle_record_passes_when_quiet(monkeypatch):
-    """_wait_for_idle returns 'idle' quickly when the quiet window has elapsed."""
-    session = _make_session(tracker_state="idle", last_input_offset=2.0)
-    record = _make_bridge_record()
-
-    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda _tid: session)
-
-    t0 = time.monotonic()
-    result = await _wait_for_idle("term-x", record)
-    elapsed = time.monotonic() - t0
-
-    assert result == "idle", f"Expected 'idle' — typing window elapsed and session is idle; got {result!r}"
     assert elapsed < 1.0, f"Expected fast resolution; took {elapsed:.3f}s"

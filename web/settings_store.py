@@ -258,19 +258,6 @@ def mask_key(key: str) -> str:
 DEFAULT_SETTINGS = {
     "general": {"autostart_broker": True, "minimize_to_tray": False, "check_updates": True},
     "providers": {
-        # base_url default was ":8431" until 2026-08-02 -- an address nothing in
-        # this program has ever listened on. The broker binds :1235
-        # (COCKPIT_BROKER_URL / _LOCAL_BROKER_URL), which the UI already carried
-        # in the field's PLACEHOLDER: the correct value was on screen the whole
-        # time, greyed out behind a wrong default.
-        #
-        # NOTE (S8): none of these three keys is read by the server. The truth
-        # for base_url is `GET /api/local/status` -> `url`; autostart is
-        # governed by COCKPIT_MANAGED_BROKER; concurrency by nothing at all.
-        # The card marks all three as not-enforced rather than implying they
-        # take effect. Wiring base_url to the EXISTING, working endpoint setter
-        # (POST /api/local/{id}/endpoint) is board row S11, not this default.
-        "lane_broker": {"base_url": "http://127.0.0.1:1235", "autostart": True, "concurrency": 1},
         "lmstudio": {"base_url": "http://127.0.0.1:1234", "cli_path": "", "models_dir": "", "default": True},
         "vllm": {"base_url": "http://127.0.0.1:8001", "managed": False, "launch_command": "", "gpu_util": 0.90},
         "ollama": {"base_url": "http://127.0.0.1:11434", "enabled": False},
@@ -315,6 +302,7 @@ DEFAULT_SETTINGS = {
     "appearance": {
         "theme": None, "accent": None, "glow_enabled": True, "glow_size": 30,
         "token_overrides": {}, "user_palettes": {},
+        "background": {"enabled": False, "dim": 0.55, "blur": 0, "pane_opacity": 0.85},
     },
     "data": {"retention_days": 90},
     # Spend guardrails. These paths are the contract the Settings UI
@@ -362,28 +350,6 @@ DEFAULT_SETTINGS = {
         "access_required": False,
         "tunnel": {"enabled": False, "autostart": True, "cloudflared_path": ""},
     },
-    # Voice mode. OFF by default and deliberately so: the ML dependencies are
-    # NOT bundled (the sidecar is 48 MB; torch would add ~2 GB), so on a fresh
-    # install voice is simply not present. A default of True would advertise a
-    # feature whose engine has to be downloaded first.
-    #
-    # `voice_id` is empty rather than a guessed default -- naming a Kokoro
-    # voicepack that may not be on disk would make the UI show a selection the
-    # engine cannot honour. Empty means "ask the engine what it has".
-    "voice": {
-        "enabled": False,
-        "voice_id": "",
-        # The brief's "pause for about 5 seconds to continue" cue. Tunable
-        # because conversational pace is personal: too short cuts people off
-        # mid-thought, too long feels unresponsive.
-        "silence_continue_seconds": 5.0,
-        # Barge-in -- speech while the assistant is talking stops it. This is
-        # the whole point of conversational voice, so it defaults ON whenever
-        # voice is on at all.
-        "barge_in": True,
-        "input_device": "",      # "" = system default
-        "output_device": "",
-    },
     # Terminal (xterm.js) options. These are Cockpit's own -- the `claude` CLI
     # neither sees nor restricts them. NOT yet read by TerminalPane, which still
     # hard-codes its values; the Settings page says so rather than implying they
@@ -412,24 +378,30 @@ _FREEFORM_LEAVES = frozenset({"token_overrides", "user_palettes", "keybindings"}
 
 # Dotted key -> (min, max) inclusive numeric bounds.
 _NUMERIC_BOUNDS = {
-    "providers.lane_broker.concurrency": (1, 8),
     "providers.vllm.gpu_util": (0.05, 1.0),
     "appearance.glow_size": (0, 48),
+    # Background image treatment. dim is capped below 1 so the image can never be
+    # fully hidden behind its own scrim; pane_opacity has a floor so terminal
+    # text stays legible over any picture.
+    "appearance.background.dim": (0.0, 0.95),
+    "appearance.background.blur": (0, 40),
+    "appearance.background.pane_opacity": (0.3, 1.0),
     # 0 means NO LIMIT (owner ruling 2026-10-06) and is the default; a positive
     # value is an opt-in ceiling. The grid's 8 panes per page is display only.
     "sessions.max_sessions": (0, 1024),
     "data.retention_days": (1, 3650),
     "spend.monthly_reset_day": (1, 28),
     "spend.alert_at_percent": (1, 100),
-    # Below ~0.5s a natural mid-sentence breath ends the turn; past 30s the
-    # "still listening" state is indistinguishable from a hang.
-    "voice.silence_continue_seconds": (0.5, 30.0),
     # 8 is the smallest legible mono size; past ~28 a pane holds too few columns
     # to be useful. Scrollback is per-pane and Cockpit runs up to 8 of them, so
     # the ceiling is a memory bound, not a preference.
     "terminal.font_size": (8, 28),
     "terminal.scrollback": (100, 100000),
 }
+
+# Bounded leaves that must be whole numbers (JSON has one number type, so 3.0 is
+# accepted and 3.5 is not).
+_INT_LEAVES = frozenset({"appearance.background.blur"})
 
 # Dotted key -> allowed values. A value outside the set is rejected rather than
 # stored: spend_guard branches on these strings, and an unknown mode would make
@@ -545,6 +517,10 @@ def _validate_patch(patch, defaults, prefix: str) -> None:
                     raise ValueError(
                         f"'{dotted}' must be greater than 0, or null for no cap"
                     )
+            if dotted in _INT_LEAVES and value is not None and (
+                isinstance(value, float) and not value.is_integer()
+            ):
+                raise ValueError(f"'{dotted}' must be a whole number")
             if dotted in _NUMERIC_BOUNDS and value is not None:
                 low, high = _NUMERIC_BOUNDS[dotted]
                 if not (low <= value <= high):

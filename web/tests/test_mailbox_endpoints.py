@@ -189,38 +189,6 @@ async def test_start_refuses_a_session_already_in_a_mailbox_bridge(client, mb):
 
 
 @pytest.mark.asyncio
-async def test_start_refuses_a_session_held_by_a_legacy_channel(client, mb, monkeypatch):
-    """The guard must see across bridge generations, not only its own."""
-    monkeypatch.setattr(
-        server_module.channel_manager, "member_ids", lambda: {"t1"}
-    )
-    async with client as c:
-        r = await c.post(
-            "/api/bridge/mailbox",
-            json={"lead_id": "t1", "worker_ids": ["t2"], "topic": "x"},
-        )
-    assert r.status_code == 409
-
-
-@pytest.mark.asyncio
-async def test_legacy_auto_bridge_refuses_a_session_held_by_a_mailbox(client, mb, monkeypatch):
-    """...and in the other direction, which is the half that gets forgotten."""
-    mb.busy = {"t2"}
-    monkeypatch.setattr(server_module.bridge_manager, "list_active", lambda: [])
-    monkeypatch.setattr(server_module.channel_manager, "member_ids", lambda: set())
-    async with client as c:
-        r = await c.post(
-            "/api/bridge/auto",
-            json={
-                "from_terminal_id": "t1",
-                "to_terminal_id": "t2",
-                "kickoff_prompt": "hi",
-            },
-        )
-    assert r.status_code == 409
-
-
-@pytest.mark.asyncio
 async def test_start_honours_the_spend_guard(client, mb, monkeypatch):
     monkeypatch.setattr(
         server_module,

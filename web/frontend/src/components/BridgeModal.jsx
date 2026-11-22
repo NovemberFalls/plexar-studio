@@ -382,7 +382,7 @@ export default function BridgeModal({
     const bridgeWorkerEligible = bridgeEligible.filter((s) => s.id !== bridgeLeadId);
 
     // ---- busy-session helper — true if the given local session id maps to a
-    // terminalId currently enrolled in another active bridge/channel. Used both
+    // terminalId currently enrolled in another live bridge. Used both
     // to disable picker rows and as a submit-time safety net in case busyness
     // changes (via polling) after a row was already selected. ----
     const sessionIsBusy = (sessionId) => {

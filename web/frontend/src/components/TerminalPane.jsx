@@ -32,8 +32,6 @@ const TerminalPane = forwardRef(function TerminalPane({
   toast,           // (msg, type) => void — optional toast notification
   onFork,          // () => void — fork session (new session, same workdir)
   onOpenBridge,    // () => void — open the bridge modal pre-selected to this pane
-  activeBridge,    // null | { bridge_id, from_name, to_name, turns_used, max_turns } — active bridge involving this pane
-  onEndBridge,     // (bridgeId: string) => void — terminate an active bridge
   onPopout,        // (session) => void — open terminal in separate window
   workflowSummary, // { count: number, inProgressCount: number, items: array } | null — recent workflows
   onRenameSession, // (newName: string, syncClaude: boolean) => Promise<void> — PATCH rename, owned by App.jsx (updates sidebar name)
@@ -684,7 +682,6 @@ const TerminalPane = forwardRef(function TerminalPane({
 
   const activityState = session.activityState || (session.status === "running" ? "idle" : session.status);
   const isBusy = activityState === "busy";
-  const isBridged = !!activeBridge;
   // Map the app's fine-grained activity states onto the shared glow-state
   // vocabulary (working|thinking|waiting|idle|error) consumed by the
   // [data-glowable][data-state] CSS contract (SPEC-FACELIFT §A/§D).
@@ -700,20 +697,10 @@ const TerminalPane = forwardRef(function TerminalPane({
     : "idle"; // idle, running, starting, history
   const stateWord = isShell ? "SHELL" : dataState.toUpperCase();
 
-  // Bridge overlays keep their own dedicated color (salmon/red) per spec,
-  // overriding the generic state glow via inline style precedence.
-  const wrapperStyle = isBridged
-    ? {
-        boxShadow: "inset 0 0 0 2px #ff0033, 0 0 18px rgba(255, 0, 51, 0.55)",
-        animation: "bridge-active-glow 2s ease-in-out infinite",
-        transition: "box-shadow 0.3s ease",
-      }
-    : { transition: "box-shadow 0.3s ease" };
-
   return (
     <div
       className="flex flex-col h-full min-w-0"
-      style={wrapperStyle}
+      style={{ transition: "box-shadow 0.3s ease" }}
     >
       {/* Pane header */}
       <div
@@ -1158,47 +1145,6 @@ const TerminalPane = forwardRef(function TerminalPane({
       >
         <div ref={termRef} className="w-full h-full" />
         {codexRef.current && showTranscript && <CodexTranscript key={session.terminalId} terminalId={session.terminalId} statusHost={transcriptStatusHost} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
-        {activeBridge && (
-          <div
-            style={{
-              position: "absolute",
-              top: 8,
-              right: 8,
-              zIndex: 30,
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "6px 10px",
-              borderRadius: 6,
-              backgroundColor: "rgba(255, 0, 51, 0.15)",
-              border: "1px solid #ff5577",
-              backdropFilter: "blur(4px)",
-              fontSize: 11,
-              fontWeight: 600,
-              color: "#ff5577",
-              pointerEvents: "auto",
-            }}
-          >
-            <span>BRIDGE · turn {activeBridge.turns_used}/{activeBridge.max_turns}</span>
-            <button
-              type="button"
-              onClick={() => onEndBridge?.(activeBridge.bridge_id)}
-              className="px-2 py-0.5 rounded"
-              style={{
-                background: "#ff0033",
-                color: "#fff",
-                border: "none",
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-              title="End the bridge immediately"
-              aria-label="End bridge"
-            >
-              Stop
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );

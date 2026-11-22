@@ -36,8 +36,6 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url, options) => {
     let body = { ok: true };
     if (url === "/api/terminals") body = { terminals: [] };
-    else if (url === "/api/bridge") body = { bridges: [] };
-    else if (url === "/api/bridge/channel") body = { channels: [] };
     else if (url === "/api/remote/locations" && options?.method === "PUT") {
       const parsed = JSON.parse(options.body);
       puts.push(parsed);

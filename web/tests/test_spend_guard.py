@@ -21,7 +21,6 @@ guard does with a frozen cost, not about ingest.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -35,7 +34,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import logging_config
 logging_config.setup("WARNING")
 
-import bridge_manager as bm_module
 import pricing_store as pricing_store_module
 import settings_store
 import spend_guard
@@ -604,13 +602,11 @@ def test_check_start_blocks_bridges_when_enforced(monkeypatch, tracker):
     payload = spend_guard.check_start("bridges", now=NOW)
     assert payload is not None
     assert payload["blocking"] is True
-    assert spend_guard.block_reason("bridges", now=NOW)
 
 
 def test_nothing_blocks_when_enforce_on_bridges_is_false(monkeypatch, tracker):
     _write_blocking_settings(monkeypatch, tracker, bridges=False)
     assert spend_guard.check_start("bridges", now=NOW) is None
-    assert spend_guard.block_reason("bridges", now=NOW) is None
     # The cap itself has still tripped — only enforcement is opted out of.
     assert spend_guard.evaluate(now=NOW)["blocking"] is True
 
@@ -653,179 +649,8 @@ _BLOCKING_PAYLOAD = {
 
 
 @pytest.mark.asyncio
-async def test_bridge_auto_refuses_with_409_and_spend_payload(client, monkeypatch):
-    monkeypatch.setattr(
-        spend_guard, "check_start",
-        lambda scope, now=None: _BLOCKING_PAYLOAD if scope == "bridges" else None,
-    )
-    async with client as c:
-        res = await c.post("/api/bridge/auto", json={
-            "from_terminal_id": "a", "to_terminal_id": "b", "kickoff_prompt": "hi",
-        })
-    assert res.status_code == 409
-    body = res.json()
-    assert body["ok"] is False
-    assert "Real spend" in body["error"]
-    assert body["spend"]["real"]["cap"] == 10.0
-
-
-@pytest.mark.asyncio
-async def test_channel_start_refuses_with_409_and_spend_payload(client, monkeypatch):
-    monkeypatch.setattr(
-        spend_guard, "check_start",
-        lambda scope, now=None: _BLOCKING_PAYLOAD if scope == "bridges" else None,
-    )
-    async with client as c:
-        res = await c.post("/api/bridge/channel", json={
-            "lead_id": "a", "worker_ids": ["b"], "kickoff_prompt": "hi",
-        })
-    assert res.status_code == 409
-    assert res.json()["spend"]["blocking"] is True
-
-
-@pytest.mark.asyncio
-async def test_bridge_auto_proceeds_when_not_blocking(client, monkeypatch):
-    monkeypatch.setattr(spend_guard, "check_start", lambda scope, now=None: None)
-    called = {"n": 0}
-
-    async def fake_start_auto(*args, **kwargs):
-        called["n"] += 1
-        return {"ok": True, "bridge_id": "abc"}
-
-    monkeypatch.setattr(bm_module.bridge_manager, "start_auto", fake_start_auto)
-    monkeypatch.setattr(bm_module.channel_manager, "member_ids", lambda: set())
-    async with client as c:
-        res = await c.post("/api/bridge/auto", json={
-            "from_terminal_id": "a", "to_terminal_id": "b", "kickoff_prompt": "hi",
-        })
-    assert res.status_code == 200
-    assert called["n"] == 1
-
-
-@pytest.mark.asyncio
 async def test_spend_status_endpoint_always_200(client):
     async with client as c:
         ok = await c.get("/api/spend/status")
     assert ok.status_code == 200
     assert "period" in ok.json() and "blocking" in ok.json()
-
-
-# ---------------------------------------------------------------------------
-# Turn-boundary enforcement inside a live bridge
-# ---------------------------------------------------------------------------
-
-
-def _mock_session(tid, name):
-    s = MagicMock()
-    s.id = tid
-    s.name = name
-    s.alive = True
-    s.tracker = MagicMock()
-    s.tracker.state = "idle"
-    s.claude_session_id = "claude-abc"
-    s.last_user_input_time = 0.0
-    return s
-
-
-@pytest.mark.asyncio
-async def test_bridge_in_flight_ends_via_existing_path_when_cap_trips(monkeypatch):
-    """A cap tripping mid-bridge must end it through _end_bridge (the same path
-    BRIDGE-DONE and the turn cap use), with the reason recorded — not a second
-    teardown, and never mid-write."""
-    a = _mock_session("from-1", "Lead")
-    b = _mock_session("to-1", "Worker")
-    sessions = {a.id: a, b.id: b}
-    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
-    monkeypatch.setattr(bm_module.pty_manager, "_get_jsonl_path", lambda s: "/tmp/fake.jsonl")
-
-    writes: list = []
-
-    async def fake_write(tid, data):
-        writes.append((tid, data))
-        return True
-
-    monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
-
-    counter = {"n": 0}
-
-    async def fake_tail(path, from_beginning=False, **kwargs):
-        counter["n"] += 1
-        if counter["n"] == 1:
-            yield {"type": "assistant", "content": [{"type": "text", "text": "working on it"}]}
-        await asyncio.sleep(10)
-
-    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-
-    async def blocked():
-        return "Real spend $25.00 has reached the $10.00 cap for today."
-
-    monkeypatch.setattr(bm_module, "_spend_stop_reason", blocked)
-
-    manager = bm_module.BridgeManager()
-    result = await manager.start_auto(a.id, b.id, "kickoff", max_turns=10)
-    assert result["ok"] is True
-    record = manager._bridges[result["bridge_id"]]
-
-    for _ in range(20):
-        if record.state != "active":
-            break
-        await asyncio.sleep(0.05)
-
-    assert record.state == "ended_capped"        # existing terminal state, not a new one
-    assert "spend cap" in (record.end_reason or "")
-    assert record._stop_event.is_set()
-    assert record.to_dict()["end_reason"].startswith("spend cap")
-    # The relay that was already in flight completed — a cap never kills a write.
-    assert any(b.id == tid for tid, _ in writes)
-
-
-@pytest.mark.asyncio
-async def test_bridge_in_flight_continues_when_not_blocking(monkeypatch):
-    a = _mock_session("from-2", "Lead")
-    b = _mock_session("to-2", "Worker")
-    sessions = {a.id: a, b.id: b}
-    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
-    monkeypatch.setattr(bm_module.pty_manager, "_get_jsonl_path", lambda s: "/tmp/fake.jsonl")
-
-    async def fake_write(tid, data):
-        return True
-
-    monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
-
-    counter = {"n": 0}
-
-    async def fake_tail(path, from_beginning=False, **kwargs):
-        counter["n"] += 1
-        if counter["n"] == 1:
-            yield {"type": "assistant", "content": [{"type": "text", "text": "hello"}]}
-        await asyncio.sleep(10)
-
-    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-
-    async def clear():
-        return None
-
-    monkeypatch.setattr(bm_module, "_spend_stop_reason", clear)
-
-    manager = bm_module.BridgeManager()
-    result = await manager.start_auto(a.id, b.id, "kickoff", max_turns=10)
-    record = manager._bridges[result["bridge_id"]]
-    for _ in range(6):
-        await asyncio.sleep(0.05)
-    assert record.state == "active"
-    assert record.end_reason is None
-
-
-@pytest.mark.asyncio
-async def test_spend_stop_reason_is_none_when_bridges_not_enforced(monkeypatch, tracker):
-    _write_blocking_settings(monkeypatch, tracker, bridges=False)
-    assert await bm_module._spend_stop_reason() is None
-
-
-@pytest.mark.asyncio
-async def test_spend_stop_reason_survives_a_guard_failure(monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("guard exploded")
-
-    monkeypatch.setattr(spend_guard, "block_reason", boom)
-    assert await bm_module._spend_stop_reason() is None
