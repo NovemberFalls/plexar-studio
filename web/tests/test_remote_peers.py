@@ -46,9 +46,18 @@ class FakeHttp:
 @pytest.fixture
 def env(tmp_path):
     secrets_box = {}
+
+    def update(mutate):
+        data = json.loads(json.dumps(secrets_box))
+        result = mutate(data)
+        result = data if result is None else result
+        secrets_box.clear()
+        secrets_box.update(result)
+        return result
+
     store = PeerStore(meta_path=tmp_path / "remote_peers.json",
                       read_secrets=lambda: json.loads(json.dumps(secrets_box)),
-                      write_secrets=lambda d: (secrets_box.clear(), secrets_box.update(d)))
+                      update_secrets=update)
     http = FakeHttp()
     remote_peers.configure(store=store, http=http)
     app = FastAPI()
@@ -56,6 +65,24 @@ def env(tmp_path):
     client = TestClient(app, base_url=BASE)
     yield {"client": client, "http": http, "store": store, "secrets": secrets_box, "tmp": tmp_path}
     remote_peers.configure()
+
+
+@pytest.fixture(autouse=True)
+def _detach_capture():
+    yield
+    logger = logging.getLogger("cockpit.peers")
+    for handler in list(logger.handlers):
+        if getattr(handler, "_peers_test", False):
+            logger.removeHandler(handler)
+            logger.setLevel(logging.NOTSET)
+
+
+def _capture(caplog):
+    """Attach caplog straight to cockpit.peers: cockpit loggers may not propagate."""
+    caplog.set_level(logging.DEBUG)
+    caplog.handler._peers_test = True
+    logging.getLogger("cockpit.peers").addHandler(caplog.handler)
+    logging.getLogger("cockpit.peers").setLevel(logging.DEBUG)
 
 
 def _pair(env, label="Desk"):
@@ -112,7 +139,7 @@ def test_default_secret_sink_is_config_json_not_settings(tmp_path, monkeypatch):
 
 
 def test_token_never_in_any_response_or_log(env, caplog):
-    caplog.set_level(logging.DEBUG)
+    _capture(caplog)
     peer = _pair(env)
     pid = peer["id"]
     h = env["http"]
@@ -129,6 +156,7 @@ def test_token_never_in_any_response_or_log(env, caplog):
         assert TOKEN not in body
     # Positive twin: the token WAS sent upstream, as a bearer.
     assert h.calls[-1]["headers"]["Authorization"] == f"Bearer {TOKEN}"
+    assert caplog.records  # not vacuous: pairing logs an INFO line
     for record in caplog.records:
         assert TOKEN not in record.getMessage()
 
@@ -408,7 +436,7 @@ def test_access_refused_is_distinct(env):
 
 
 def test_access_secret_never_in_any_response_or_log(env, caplog):
-    caplog.set_level(logging.DEBUG)
+    _capture(caplog)
     peer = _pair_with_access(env)
     c = env["client"]
     env["http"].routes[("GET", PEER_URL + "/remote/v1/hello")] = _json(200, {"protocol": 1})
@@ -418,6 +446,7 @@ def test_access_secret_never_in_any_response_or_log(env, caplog):
     for body in bodies:
         assert CF_SECRET not in body and CF_ID not in body and TOKEN not in body
     assert CF_SECRET not in (env["tmp"] / "remote_peers.json").read_text()
+    assert caplog.records
     for record in caplog.records:
         msg = record.getMessage()
         assert CF_SECRET not in msg and TOKEN not in msg
@@ -444,3 +473,191 @@ def test_input_401_is_not_retried(env, monkeypatch):
     p = env["store"].get(peer["id"])
     assert asyncio.run(remote_peers.send_input(p, TOKEN, "s1", "x")) is False
     assert len([c for c in env["http"].calls if c["url"].endswith("/input")]) == 1
+
+
+# -- security read follow-ups (N7d) ------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["", ".", "..", " .. "])
+def test_dot_segments_are_refused_before_any_url(env, bad):
+    peer = _pair(env)
+    before = len(env["http"].calls)
+    resp = asyncio.run(remote_peers.peer_close_session(peer["id"], bad))
+    assert resp.status_code == 404 and json.loads(resp.body) == {"error": "unknown session"}
+    resp = asyncio.run(remote_peers.peer_sessions(bad))
+    assert resp.status_code == 404
+    assert len(env["http"].calls) == before
+
+
+def test_ws_dot_segment_session_is_the_same_refusal(env):
+    peer = _pair(env)
+    opened = _with_ws(env, FakeUpstream([]))
+    with pytest.raises(WebSocketDisconnect) as dots:
+        with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/%2E%2E",
+                                             headers={"origin": ORIGIN}):
+            pass
+    with pytest.raises(WebSocketDisconnect) as unknown:
+        with env["client"].websocket_connect("ws://127.0.0.1:8420/ws/peer/nope/s1", headers={"origin": ORIGIN}):
+            pass
+    assert (dots.value.code, dots.value.reason) == (unknown.value.code, unknown.value.reason)
+    assert opened == []
+
+
+def test_http_client_ignores_environment_proxies(monkeypatch):
+    import http.server
+    import threading
+
+    class Hello(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = json.dumps({"protocol": 1}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Hello)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # A dead proxy: any request routed through it fails to connect.
+        for name in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+            monkeypatch.setenv(name, "http://127.0.0.1:9")
+        for name in ("NO_PROXY", "no_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        url = f"http://127.0.0.1:{server.server_address[1]}/remote/v1/hello"
+        resp = remote_peers.urllib_client("GET", url, {"User-Agent": "t"}, None)
+        assert resp.status == 200 and resp.json() == {"protocol": 1}
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize("raw,verdict", [
+    (json.dumps({"type": "output", "seq": 1, "data": "x"}), "send"),
+    (json.dumps({"type": "replay_start", "reset": True, "truncated": False, "cols": 80, "rows": 24}), "send"),
+    (json.dumps({"type": "replay_end", "seq": 0}), "send"),
+    (json.dumps({"type": "ended"}), "ended"),
+    (json.dumps({"type": "resize", "cols": 80, "rows": 24}), "skip"),
+    (json.dumps({"type": "pong"}), "skip"),
+    (json.dumps({"type": "output", "seq": "1", "data": "x"}), "bad"),
+    (json.dumps({"type": "output", "seq": True, "data": "x"}), "bad"),
+    (json.dumps({"type": "output", "seq": -1, "data": "x"}), "bad"),
+    (json.dumps({"type": "output", "seq": 1, "data": 5}), "bad"),
+    (json.dumps({"type": "replay_start", "reset": "yes"}), "bad"),
+    (json.dumps({"type": "replay_end"}), "bad"),
+    (json.dumps({"type": "exec", "cmd": "x"}), "bad"),
+    (json.dumps([1, 2]), "bad"),
+    ("not json", "bad"),
+    (b"bytes", "bad"),
+    (json.dumps({"type": "output", "seq": 1, "data": "x" * (1024 * 1024)}), "bad"),
+], ids=lambda v: v if isinstance(v, str) and len(v) < 40 else "frame")
+def test_page_frame_validation(raw, verdict):
+    assert remote_peers.page_frame(raw)[0] == verdict
+
+
+def test_send_strips_unknown_fields():
+    _v, frame = remote_peers.page_frame(json.dumps({"type": "output", "seq": 2, "data": "a", "evil": 1}))
+    assert frame == {"type": "output", "seq": 2, "data": "a"}
+
+
+def test_ws_invalid_upstream_frame_closes_without_logging_content(env, caplog):
+    _capture(caplog)
+    peer = _pair(env)
+    secret_payload = "PAYLOAD-CONTENT-77"
+    upstream = FakeUpstream([json.dumps({"type": "output", "seq": 1, "data": "ok"}),
+                             json.dumps({"type": "mystery", "data": secret_payload})])
+    _with_ws(env, upstream)
+    with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/s1?replay=1",
+                                         headers={"origin": ORIGIN}) as ws:
+        assert ws.receive_json() == {"type": "output", "seq": 1, "data": "ok"}
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+    assert closed.value.code == 1011
+    assert upstream.closed
+    assert any("invalid frame" in r.getMessage() for r in caplog.records)
+    assert not any(secret_payload in r.getMessage() for r in caplog.records)
+
+
+def test_ws_input_backlog_is_bounded_and_announced(env, monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(remote_peers, "_INPUT_MAX_ITEMS", 2)
+    peer = _pair(env)
+
+    def hung():
+        _time.sleep(0.5)
+        return _json(200, {"accepted": True, "duplicate": False})
+
+    env["http"].routes[("POST", PEER_URL + "/remote/v1/sessions/s1/input")] = hung
+    _with_ws(env, FakeUpstream([]))
+    with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/s1?replay=1",
+                                         headers={"origin": ORIGIN}) as ws:
+        for ch in "abcdefgh":
+            ws.send_text(ch)
+        assert "not accepting input" in ws.receive_text()
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+    assert closed.value.code == 1013
+
+
+def test_ws_input_backlog_bounded_by_bytes(env, monkeypatch):
+    monkeypatch.setattr(remote_peers, "_INPUT_MAX_BYTES", 10)
+    peer = _pair(env)
+    _with_ws(env, FakeUpstream([]))
+    with env["client"].websocket_connect(f"ws://127.0.0.1:8420/ws/peer/{peer['id']}/s1?replay=1",
+                                         headers={"origin": ORIGIN}) as ws:
+        ws.send_text("x" * 11)
+        assert "not accepting input" in ws.receive_text()
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+    assert closed.value.code == 1013
+
+
+def test_config_json_writers_share_one_lock(tmp_path, monkeypatch):
+    """Five modules' setters racing: every key must survive."""
+    import threading
+    import time as _time
+
+    import harness_manager
+    import remote_tunnel
+    import settings_store
+
+    monkeypatch.setattr(settings_store, "CONFIG_FILE", tmp_path / "config.json")
+    real_read = settings_store._read_config
+
+    def slow_read():
+        data = real_read()
+        _time.sleep(0.002)  # widen the read-modify-write window
+        return data
+
+    monkeypatch.setattr(settings_store, "_read_config", slow_read)
+    store = PeerStore(meta_path=tmp_path / "remote_peers.json")
+    setters = [
+        lambda: settings_store.set_ui_key("or-key"),
+        lambda: settings_store.set_provider_ui_key("anthropic", "an-key"),
+        lambda: remote_tunnel.set_token("tunnel-tok"),
+        lambda: harness_manager.set_key("harness-key"),
+        lambda: store.add("L", PEER_URL, TOKEN, "d", ("cid", "csec")),
+    ]
+    barrier = threading.Barrier(len(setters))
+
+    def run(fn):
+        barrier.wait()
+        for _ in range(10):
+            fn()
+
+    threads = [threading.Thread(target=run, args=(fn,)) for fn in setters]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    data = json.loads((tmp_path / "config.json").read_text())
+    assert data[settings_store._KEY_FIELD] == "or-key"
+    assert data[settings_store._ANTHROPIC_KEY_FIELD] == "an-key"
+    assert data[remote_tunnel._TOKEN_FIELD] == "tunnel-tok"
+    assert data[harness_manager.KEY_FIELD] == "harness-key"
+    assert len(data["remote_peer_tokens"]) == 10
+    assert len(data["remote_peer_access"]) == 10

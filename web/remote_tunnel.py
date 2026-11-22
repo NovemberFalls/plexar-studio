@@ -120,19 +120,20 @@ def get_token() -> str | None:
 
 def set_token(token: str) -> None:
     """Persist *token* (overwrites any existing value)."""
-    data = settings_store._read_config()
-    data[_TOKEN_FIELD] = token
-    settings_store._write_config(data)
+    settings_store.update_config(lambda data: data.__setitem__(_TOKEN_FIELD, token))
 
 
 def clear_token() -> bool:
     """Remove the stored token. True if one was actually present."""
-    data = settings_store._read_config()
-    if not data.get(_TOKEN_FIELD):
-        return False
-    del data[_TOKEN_FIELD]
-    settings_store._write_config(data)
-    return True
+    removed = []
+
+    def drop(data: dict) -> None:
+        if data.get(_TOKEN_FIELD):
+            del data[_TOKEN_FIELD]
+            removed.append(True)
+
+    settings_store.update_config(drop)
+    return bool(removed)
 
 
 # ---------------------------------------------------------------------------

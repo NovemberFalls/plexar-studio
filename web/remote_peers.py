@@ -80,6 +80,16 @@ _HEARTBEAT_S = 30.0
 _INPUT_ATTEMPTS = 3
 _INPUT_RETRY_DELAY_S = 0.5
 
+# Bounds on the page -> peer input backlog. A hung or slow peer must not let it
+# grow without limit, and keystrokes are never dropped silently: past either
+# bound the page is told and the socket is closed.
+_INPUT_MAX_ITEMS = 512
+_INPUT_MAX_BYTES = 256 * 1024
+_INPUT_OVERFLOW_BANNER = ("\r\n\x1b[31m[Peer is not accepting input; disconnected rather than "
+                          "drop keystrokes]\x1b[0m\r\n")
+# /ws/terminal never sends more than one 64 KB coalesced replay frame (JSON
+# escaping can double it); 1 MB is generous headroom and still a hard ceiling.
+_MAX_UPSTREAM_FRAME = 1024 * 1024
 _SESSION_ENDED_BANNER = "\r\n\x1b[33m[Session ended]\x1b[0m\r\n"
 # Identical for a refused origin and an unknown peer: the caller must not be able
 # to tell them apart. Starlette turns a pre-accept close into an HTTP 403 anyway.
@@ -137,6 +147,11 @@ def normalize_peer_url(raw: Any) -> str | None:
     return f"{scheme}://{shown}" + (f":{port}" if port is not None else "")
 
 
+def bad_segment(value: Any) -> bool:
+    """True for an id that must never become a path segment: empty, `.`, `..`."""
+    return not isinstance(value, str) or value.strip() in ("", ".", "..")
+
+
 def _seg(value: str) -> str:
     """One path segment, quoted so `/`, `..` and `?` cannot leave the prefix."""
     return urllib.parse.quote(str(value), safe="")
@@ -163,14 +178,11 @@ def _default_read_secrets() -> dict:
     return settings_store._read_config()
 
 
-def _default_write_secrets(data: dict) -> None:
+def _default_update_secrets(mutate: Callable[[dict], Any]) -> dict:
+    """Read-modify-write config.json under settings_store's ONE config lock."""
     import settings_store
 
-    settings_store._write_config(data)
-    try:
-        os.chmod(settings_store.CONFIG_FILE, 0o600)
-    except OSError:
-        logger.debug("Could not chmod config.json to 0600", exc_info=True)
+    return settings_store.update_config(mutate)
 
 
 @dataclass
@@ -197,11 +209,13 @@ class PeerStore:
         self,
         meta_path: Path | None = None,
         read_secrets: Callable[[], dict] | None = None,
-        write_secrets: Callable[[dict], None] | None = None,
+        update_secrets: Callable[[Callable[[dict], Any]], dict] | None = None,
     ) -> None:
         self._meta_path = meta_path
         self._read_secrets = read_secrets or _default_read_secrets
-        self._write_secrets = write_secrets or _default_write_secrets
+        # Never a plain write: config.json is shared with the tunnel, provider and
+        # harness keys, and only update_config serialises their read-modify-writes.
+        self._update_secrets = update_secrets or _default_update_secrets
         self._lock = threading.Lock()
 
     @property
@@ -286,9 +300,7 @@ class PeerStore:
         if self.get(peer_id) is None:
             return False
         with self._lock:
-            data = self._read_secrets()
-            self._put_access(data, peer_id, access)
-            self._write_secrets(data)
+            self._update_secrets(lambda data: self._put_access(data, peer_id, access))
         return True
 
     def add(self, label: str, url: str, token: str, device_id: str | None,
@@ -298,14 +310,15 @@ class PeerStore:
         with self._lock:
             # Token first: a crash between the two writes leaves an orphan secret
             # (harmless, nothing lists it) rather than a listed peer with no token.
-            data = self._read_secrets()
-            tokens = data.get(_TOKEN_FIELD)
-            tokens = dict(tokens) if isinstance(tokens, dict) else {}
-            tokens[peer.id] = token
-            data[_TOKEN_FIELD] = tokens
-            if access is not None:
-                self._put_access(data, peer.id, access)
-            self._write_secrets(data)
+            def put(data: dict) -> None:
+                tokens = data.get(_TOKEN_FIELD)
+                tokens = dict(tokens) if isinstance(tokens, dict) else {}
+                tokens[peer.id] = token
+                data[_TOKEN_FIELD] = tokens
+                if access is not None:
+                    self._put_access(data, peer.id, access)
+
+            self._update_secrets(put)
             rows = self._read_meta()
             rows.append({"id": peer.id, "label": peer.label, "url": peer.url,
                          "added_at": peer.added_at, "device_id": peer.device_id})
@@ -319,19 +332,19 @@ class PeerStore:
             found = len(kept) != len(rows)
             if found:
                 self._write_meta(kept)
-            data = self._read_secrets()
-            dirty = False
-            for field in (_TOKEN_FIELD, _ACCESS_FIELD):
-                entries = data.get(field)
-                if isinstance(entries, dict) and peer_id in entries:
-                    entries = dict(entries)
-                    entries.pop(peer_id, None)
-                    data[field] = entries
-                    dirty = True
-            if dirty:
-                self._write_secrets(data)
-                found = True
-        return found
+            dropped = []
+
+            def drop(data: dict) -> None:
+                for field in (_TOKEN_FIELD, _ACCESS_FIELD):
+                    entries = data.get(field)
+                    if isinstance(entries, dict) and peer_id in entries:
+                        entries = dict(entries)
+                        entries.pop(peer_id, None)
+                        data[field] = entries
+                        dropped.append(field)
+
+            self._update_secrets(drop)
+        return found or bool(dropped)
 
 
 # ---------------------------------------------------------------------------
@@ -361,8 +374,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def urllib_client(method: str, url: str, headers: dict, body: bytes | None) -> UpstreamResponse:
-    """Blocking HTTP call, redirects NOT followed. Runs in a worker thread."""
-    opener = urllib.request.build_opener(_NoRedirect)
+    """Blocking HTTP call, redirects NOT followed. Runs in a worker thread.
+
+    `ProxyHandler({})`: no system or environment proxy, matching the WS path's
+    `proxy=None`. A proxy would see the bearer and the Access secret.
+    """
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with opener.open(request, timeout=_HTTP_TIMEOUT) as resp:
@@ -405,7 +422,7 @@ async def websockets_connector(url: str, headers: dict) -> UpstreamSocket:
         additional_headers=headers,
         user_agent_header=_USER_AGENT,
         open_timeout=_HTTP_TIMEOUT,
-        max_size=16 * 1024 * 1024,
+        max_size=_MAX_UPSTREAM_FRAME,
         logger=_upstream_ws_logger,
         proxy=None,
     )
@@ -551,6 +568,8 @@ def _relay(resp: UpstreamResponse, access_set: bool = False) -> JSONResponse:
 
 
 async def _peer_and_token(peer_id: str) -> tuple[Peer | None, str | None, tuple[str, str] | None]:
+    if bad_segment(peer_id):
+        return None, None, None
     store = _get_store()
     peer = await asyncio.to_thread(store.get, peer_id)
     if peer is None:
@@ -696,6 +715,8 @@ async def peer_create_session(peer_id: str, request: Request):
 
 @router.delete("/api/peers/{peer_id}/sessions/{session_id}")
 async def peer_close_session(peer_id: str, session_id: str):
+    if bad_segment(session_id):
+        return _error(404, "unknown session")
     return await _proxy(peer_id, "DELETE", f"/sessions/{_seg(session_id)}")
 
 
@@ -770,6 +791,52 @@ async def send_resize(peer: Peer, token: str, session_id: str, cols: Any, rows: 
     return bool(isinstance(data, dict) and data.get("resized"))
 
 
+def _seq(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def page_frame(raw: Any) -> tuple[str, Any]:
+    """Validate one upstream frame. Returns (verdict, payload).
+
+    `send` with the frame to relay, `ended`, `skip` for a known frame the page
+    does not take (resize, pong), or `bad` with a reason that names the shape,
+    never the content.
+    """
+    if not isinstance(raw, str):
+        return "bad", "not text"
+    if len(raw) > _MAX_UPSTREAM_FRAME:
+        return "bad", "oversize"
+    try:
+        frame = json.loads(raw)
+    except (ValueError, TypeError):
+        return "bad", "not JSON"
+    if not isinstance(frame, dict):
+        return "bad", "not an object"
+    kind = frame.get("type")
+    if kind == "replay_start":
+        reset, truncated = frame.get("reset", False), frame.get("truncated", False)
+        if not isinstance(reset, bool) or not isinstance(truncated, bool):
+            return "bad", "replay_start fields"
+        return "send", {"type": "replay_start", "reset": reset, "truncated": truncated}
+    if kind == "output":
+        if not _seq(frame.get("seq")) or not isinstance(frame.get("data"), str):
+            return "bad", "output fields"
+        return "send", {"type": "output", "seq": frame["seq"], "data": frame["data"]}
+    if kind == "replay_end":
+        if not _seq(frame.get("seq")):
+            return "bad", "replay_end fields"
+        return "send", {"type": "replay_end", "seq": frame["seq"]}
+    if kind == "ended":
+        return "ended", None
+    if kind == "resize":
+        if not _seq(frame.get("cols")) or not _seq(frame.get("rows")):
+            return "bad", "resize fields"
+        return "skip", None
+    if kind == "pong":
+        return "skip", None
+    return "bad", "unknown type"
+
+
 @router.websocket("/ws/peer/{peer_id}/{session_id}")
 async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
     """Bridge a desktop pane to a session on a peer Studio."""
@@ -781,7 +848,7 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
         await websocket.close(code=_WS_REFUSAL_CODE, reason=_WS_REFUSAL_REASON)
         return
     peer, token, access = await _peer_and_token(peer_id)
-    if peer is None or token is None:
+    if peer is None or token is None or bad_segment(session_id):
         # Same close as a refused origin: no peer-id oracle.
         await websocket.close(code=_WS_REFUSAL_CODE, reason=_WS_REFUSAL_REASON)
         return
@@ -809,26 +876,35 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
         return
 
     inputs: asyncio.Queue = asyncio.Queue()
+    pending_bytes = 0
+    close_with = [1000, ""]
 
     async def upstream_to_page():
         while True:
-            raw = await upstream.recv()
-            try:
-                frame = json.loads(raw)
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(frame, dict):
-                continue
-            kind = frame.get("type")
-            if kind == "replay_start":
-                await websocket.send_json({"type": "replay_start", "reset": bool(frame.get("reset")),
-                                           "truncated": bool(frame.get("truncated"))})
-            elif kind in ("output", "replay_end"):
-                await websocket.send_json(frame)
-            elif kind == "ended":
+            verdict, payload = page_frame(await upstream.recv())
+            if verdict == "send":
+                await websocket.send_json(payload)
+            elif verdict == "ended":
                 await websocket.send_text(_SESSION_ENDED_BANNER)
                 return
-            # resize (the peer's desktop owns the PTY size) and pong: not page frames.
+            elif verdict == "bad":
+                logger.warning("Peer %s sent an invalid frame for %s (%s); closing",
+                               peer.id, session_id, payload)
+                close_with[:] = [1011, "peer sent an invalid frame"]
+                return
+            # skip: resize (the peer's desktop reports its own size) and pong.
+
+    async def enqueue(item: tuple, size: int) -> bool:
+        nonlocal pending_bytes
+        if inputs.qsize() >= _INPUT_MAX_ITEMS or pending_bytes + size > _INPUT_MAX_BYTES:
+            logger.warning("Peer %s input backlog full for %s (%d items, %d bytes); closing",
+                           peer.id, session_id, inputs.qsize(), pending_bytes)
+            await websocket.send_text(_INPUT_OVERFLOW_BANNER)
+            close_with[:] = [1013, "input backlog full"]
+            return False
+        pending_bytes += size
+        inputs.put_nowait((item, size))
+        return True
 
     async def page_to_upstream():
         while True:
@@ -847,16 +923,22 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
                     ctrl = None
                 if isinstance(ctrl, dict) and ctrl.get("type") == "resize":
                     # Queued with the input so it lands in order with keystrokes.
-                    inputs.put_nowait(("resize", ctrl.get("cols"), ctrl.get("rows")))
+                    if not await enqueue(("resize", ctrl.get("cols"), ctrl.get("rows")), 64):
+                        return
                     continue
                 if isinstance(ctrl, dict) and ctrl.get("type") == "pong":
                     continue
-            inputs.put_nowait(("input", text))
+            if not await enqueue(("input", text), len(text.encode("utf-8"))):
+                return
 
     async def drain_inputs():
         # One writer, in order: keystrokes must reach the peer in the order typed.
+        # One writer also means at most ONE worker thread per socket, each call
+        # bounded by _HTTP_TIMEOUT and each item by _INPUT_ATTEMPTS of them.
+        nonlocal pending_bytes
         while True:
-            item = await inputs.get()
+            item, size = await inputs.get()
+            pending_bytes -= size
             if item[0] == "input":
                 await send_input(peer, token, session_id, item[1], access=access)
             elif not await send_resize(peer, token, session_id, item[1], item[2], access=access):
@@ -891,6 +973,6 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
         except Exception:  # noqa: BLE001 - an already-closed upstream is fine
             logger.debug("Upstream close failed for peer %s", peer.id, exc_info=True)
         try:
-            await websocket.close()
+            await websocket.close(code=close_with[0], reason=close_with[1])
         except Exception:  # noqa: BLE001 - the page may already be gone
             logger.debug("Page close failed for peer %s", peer.id, exc_info=True)

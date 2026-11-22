@@ -589,6 +589,33 @@ def test_resize_404_on_unknown_or_dead_session(resize_rig):
     assert calls == []
 
 
+def test_resize_with_a_real_terminal_session(resize_rig):
+    """A real TerminalSession, not a dict double: dead is 404, an unresizable
+    live one (resize_terminal returns False) is 200 resized:false."""
+    from dataclasses import replace
+    from unittest.mock import MagicMock
+
+    from pty_manager import TerminalSession
+
+    backend, store, client, _calls, _ = resize_rig
+    headers = auth(pair(client, store)["token"])
+    session = TerminalSession(id="real-1", name="r", pty=MagicMock(), created_at="")
+    results = []
+
+    def resize(terminal_id, cols, rows):
+        results.append((terminal_id, cols, rows))
+        return False
+
+    remote_gateway.configure(replace(backend.as_remote_backend(), get_session=lambda _id: session,
+                                     resize=resize), store)
+    resp = client.post("/remote/v1/sessions/real-1/resize", json={"cols": 80, "rows": 24}, headers=headers)
+    assert resp.status_code == 200 and resp.json() == {"resized": False}
+    session.alive = False
+    resp = client.post("/remote/v1/sessions/real-1/resize", json={"cols": 80, "rows": 24}, headers=headers)
+    assert resp.status_code == 404 and resp.json() == {"error": "unknown session"}
+    assert results == [("real-1", 80, 24)]
+
+
 def test_resize_503_when_not_wired(rig):
     _backend, store, client = rig
     headers = auth(pair(client, store)["token"])

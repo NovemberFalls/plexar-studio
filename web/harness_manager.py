@@ -107,16 +107,14 @@ def get_saved_key() -> str | None:
 
 
 def set_key(key: str) -> None:
-    data = settings_store._read_config()
-    data[KEY_FIELD] = key
-    settings_store._write_config(data)
+    settings_store.update_config(lambda data: data.__setitem__(KEY_FIELD, key))
 
 
 def clear_key() -> None:
-    data = settings_store._read_config()
-    if KEY_FIELD in data:
-        del data[KEY_FIELD]
-        settings_store._write_config(data)
+    def drop(data: dict) -> None:
+        data.pop(KEY_FIELD, None)
+
+    settings_store.update_config(drop)
 
 
 def _harness_settings() -> dict:

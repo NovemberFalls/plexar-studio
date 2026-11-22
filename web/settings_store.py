@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 logger = logging.getLogger("cockpit.settings")
@@ -113,8 +114,42 @@ def _read_config() -> dict:
 
 
 def _write_config(data: dict) -> None:
-    """Atomically write *data* to config.json (the secrets file)."""
+    """Atomically write *data* to config.json (the secrets file).
+
+    Not for read-modify-write: use `update_config`, or a concurrent save of a
+    different key is lost.
+    """
     _write_json_object(CONFIG_FILE, data, prefix="config_")
+
+
+# ONE lock for every config.json writer in the process. Each module used to do
+# its own read, modify, write, so a peer token save racing a tunnel-token,
+# provider-key or harness-key save silently dropped one of them. Reentrant so a
+# mutator may call a reader. Never hold it across network I/O.
+_CONFIG_LOCK = threading.RLock()
+
+
+def update_config(mutate) -> dict:
+    """Read-modify-write config.json under the process-wide config lock.
+
+    *mutate* receives the current dict and either mutates it in place (returning
+    None) or returns a replacement. The file is written only when the result
+    differs from what was read. Returns the resulting dict. Best-effort 0600,
+    because this file holds secrets.
+    """
+    with _CONFIG_LOCK:
+        data = _read_config()
+        before = json.dumps(data, sort_keys=True)
+        result = mutate(data)
+        if result is None:
+            result = data
+        if json.dumps(result, sort_keys=True) != before:
+            _write_config(result)
+            try:
+                os.chmod(CONFIG_FILE, 0o600)
+            except OSError:
+                logger.debug("Could not chmod %s to 0600", CONFIG_FILE, exc_info=True)
+        return result
 
 
 def get_ui_key() -> str | None:
@@ -125,9 +160,7 @@ def get_ui_key() -> str | None:
 
 def set_ui_key(key: str) -> None:
     """Persist *key* as the UI-supplied OpenRouter key (overwrites any existing value)."""
-    data = _read_config()
-    data[_KEY_FIELD] = key
-    _write_config(data)
+    update_config(lambda data: data.__setitem__(_KEY_FIELD, key))
 
 
 def delete_ui_key() -> bool:
@@ -137,12 +170,15 @@ def delete_ui_key() -> bool:
         True if a key was actually present and removed, False if there was
         nothing to remove.
     """
-    data = _read_config()
-    if not data.get(_KEY_FIELD):
-        return False
-    del data[_KEY_FIELD]
-    _write_config(data)
-    return True
+    removed = []
+
+    def drop(data: dict) -> None:
+        if data.get(_KEY_FIELD):
+            del data[_KEY_FIELD]
+            removed.append(True)
+
+    update_config(drop)
+    return bool(removed)
 
 
 def resolve_openrouter_key() -> tuple[str | None, str | None]:
@@ -176,9 +212,7 @@ def get_provider_ui_key(provider: str) -> str | None:
 def set_provider_ui_key(provider: str, key: str) -> None:
     """Persist *key* as the UI-supplied key for *provider* (overwrites any existing value)."""
     field, _env = _KEY_FIELDS[provider]
-    data = _read_config()
-    data[field] = key
-    _write_config(data)
+    update_config(lambda data: data.__setitem__(field, key))
 
 
 def delete_provider_ui_key(provider: str) -> bool:
@@ -187,12 +221,15 @@ def delete_provider_ui_key(provider: str) -> bool:
     Returns True if a key was actually present and removed.
     """
     field, _env = _KEY_FIELDS[provider]
-    data = _read_config()
-    if not data.get(field):
-        return False
-    del data[field]
-    _write_config(data)
-    return True
+    removed = []
+
+    def drop(data: dict) -> None:
+        if data.get(field):
+            del data[field]
+            removed.append(True)
+
+    update_config(drop)
+    return bool(removed)
 
 
 def resolve_provider_key(provider: str) -> tuple[str | None, str | None]:
