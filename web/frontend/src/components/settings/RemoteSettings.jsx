@@ -1,6 +1,11 @@
 /**
  * RemoteSettings — the Settings ▸ Remote page (Studio Remote / Plexar Mobile pairing).
  *
+ * The page is a 1-2-3 flow, in the order a person has to do it: (1) turn remote
+ * access on, (2) say how other devices reach this machine, (3) pair a device.
+ * Below those sit the paired devices and, as the OTHER direction, the machines
+ * this one controls (PeersCard). The Plexar Harness card lives in Keys & secrets.
+ *
  * Remote access is OPT-IN and OFF by default (SPEC §1). This page:
  *   - toggles `remote.enabled` and edits `remote.hostname` through useSettings
  *     (the normal draft/save flow the rest of Settings uses — a change here is
@@ -16,7 +21,7 @@
  *     DELETE /api/remote/devices/{id} and only removes the row on success.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Cloud, Copy, KeyRound, Plug, RadioTower, QrCode, ShieldOff, Smartphone, TriangleAlert } from "lucide-react";
+import { Cloud, Copy, RadioTower, QrCode, ShieldOff, Smartphone, TriangleAlert } from "lucide-react";
 import QRCode from "qrcode";
 import PeersCard from "./PeersCard";
 
@@ -57,16 +62,6 @@ const LABEL = {
   textTransform: "uppercase",
   letterSpacing: ".08em",
   color: "var(--cc-muted)",
-};
-
-const MONO = "var(--font-mono, monospace)";
-
-const FIELD_GRID = {
-  display: "grid",
-  gridTemplateColumns: "200px 1fr 108px",
-  gap: 8,
-  alignItems: "center",
-  padding: "6px 0",
 };
 
 function CardHeader({ icon: Icon, token, name, children }) {
@@ -326,224 +321,19 @@ function DevicesTable({ devices, onRevokeRequest }) {
   );
 }
 
-const HARNESS_PERMISSION_MODES = [
-  { id: "read-only", label: "Read-only" },
-  { id: "workspace-write", label: "Workspace write" },
-];
-
-/**
- * Plexar Harness card — Settings ▸ Remote (this page is the closest existing
- * home for a "third-party endpoint + credential" card; see the task brief).
- *
- * The key field follows KeysSettings' NO DRAFT STATE / MASKING IS ABSOLUTE
- * contract: PUT /api/harness/key writes through immediately, the key is never
- * echoed back, and a successful save clears the field and shows only
- * confirmation text. The permission-mode select is an ordinary settings field
- * (`harness.permission_mode`) through the normal useSettings get/setField/save
- * draft flow — it is NOT a live API call like the key.
- */
-function HarnessCard({ get, setField }) {
-  // Same fallback as harness_manager.permission_mode() and DEFAULT_SETTINGS, so the
-  // picker never shows a mode the backend is not actually using.
-  const permissionModeDraft = get("harness.permission_mode", "workspace-write") || "workspace-write";
-  const rigUrlDraft = get("harness.rig_url", "") || "";
-
-  const [status, setStatus] = useState(null);
-  const [statusError, setStatusError] = useState(null);
-  const [keyDraft, setKeyDraft] = useState("");
-  const [keyBusy, setKeyBusy] = useState(false);
-  const [keyError, setKeyError] = useState(null);
-  const [keySaved, setKeySaved] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/harness/status")
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("bad status"))))
-      .then((data) => {
-        if (!cancelled) setStatus(data);
-      })
-      .catch(() => {
-        if (!cancelled) setStatusError("Could not load Plexar Harness status");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const saveKey = async () => {
-    const key = keyDraft.trim();
-    if (!key) return;
-    setKeyBusy(true);
-    setKeyError(null);
-    try {
-      const res = await fetch("/api/harness/key", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setKeyError(data?.error || "Could not save the key");
-        return;
-      }
-      setKeyDraft("");
-      setKeySaved(true);
-      setStatus((prev) => (prev ? { ...prev, key_set: true, key_source: "settings" } : prev));
-    } catch {
-      setKeyError("Could not save the key");
-    } finally {
-      setKeyBusy(false);
-    }
-  };
-
-  const clearKey = async () => {
-    setKeyBusy(true);
-    setKeyError(null);
-    try {
-      const res = await fetch("/api/harness/key", { method: "DELETE" });
-      if (!res.ok) {
-        setKeyError("Could not clear the key");
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      setKeyDraft("");
-      setKeySaved(false);
-      // A key can remain in the environment after the saved one is cleared.
-      setStatus((prev) => (prev ? { ...prev, key_set: !!data.key_set, key_source: data.key_source ?? null } : prev));
-    } catch {
-      setKeyError("Could not clear the key");
-    } finally {
-      setKeyBusy(false);
-    }
-  };
-
-  return (
-    <div style={CARD} data-testid="card-harness">
-      <CardHeader icon={Bot} token="var(--cc-accent)" name="Plexar Harness" />
-
-      {statusError && (
-        <Callout token="var(--cc-error)" testId="harness-status-error" alert>
-          {statusError}
-        </Callout>
-      )}
-      {status && (
-        <div data-testid="harness-status" style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11, color: "var(--cc-dim)", marginBottom: 10 }}>
-          <span>Launcher: {status.launcher || "not found"}</span>
-          <span>Node: {status.node_version || "unknown"} {status.node_ok ? "(ok)" : "(too old)"}</span>
-        </div>
-      )}
-
-      <div style={FIELD_GRID}>
-        <span style={LABEL}>Key</span>
-        <input
-          type="password"
-          data-testid="harness-key-input"
-          aria-label="Plexar Harness key"
-          placeholder="plx_…"
-          value={keyDraft}
-          disabled={keyBusy}
-          onChange={(e) => {
-            setKeyDraft(e.target.value);
-            setKeySaved(false);
-          }}
-          style={{
-            height: 30,
-            padding: "0 9px",
-            borderRadius: 8,
-            background: "var(--cc-elev)",
-            border: "1px solid var(--cc-border)",
-            color: "var(--cc-fg)",
-            fontFamily: MONO,
-            fontSize: 12,
-          }}
-        />
-        <div className="flex items-center gap-2">
-          <ActionButton label="Save" accent testId="harness-key-save" onClick={saveKey} disabled={keyBusy || !keyDraft.trim()} />
-          <ActionButton label="Clear" testId="harness-key-clear" onClick={clearKey} disabled={keyBusy || status?.key_source !== "settings"} icon={KeyRound} />
-        </div>
-      </div>
-      {status?.key_source === "environment" && !keySaved && (
-        <Callout token="var(--cc-idle)" testId="harness-key-env">
-          Using PLEXAR_HARNESS_KEY from your environment. Save a key here to override it.
-        </Callout>
-      )}
-      {status?.key_source === "settings" && !keySaved && (
-        <Callout token="var(--cc-idle)" testId="harness-key-settings">
-          A key is saved in Studio.
-        </Callout>
-      )}
-      {keySaved && (
-        <Callout token="var(--cc-idle)" testId="harness-key-saved">
-          Key saved.
-        </Callout>
-      )}
-      {keyError && (
-        <Callout token="var(--cc-error)" testId="harness-key-error" alert>
-          {keyError}
-        </Callout>
-      )}
-
-      <div style={{ ...FIELD_GRID, gridTemplateColumns: "200px 1fr" }}>
-        <span style={LABEL}>Permission mode</span>
-        <select
-          aria-label="Plexar Harness permission mode"
-          data-testid="harness-permission-mode"
-          value={permissionModeDraft}
-          onChange={(e) => setField("harness.permission_mode", e.target.value)}
-          style={{
-            height: 30,
-            padding: "0 9px",
-            borderRadius: 8,
-            background: "var(--cc-elev)",
-            border: "1px solid var(--cc-border)",
-            color: "var(--cc-fg)",
-            fontSize: 12,
-          }}
-        >
-          {HARNESS_PERMISSION_MODES.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ ...FIELD_GRID, gridTemplateColumns: "200px 1fr" }}>
-        <span style={LABEL}>Rig URL</span>
-        <input
-          type="text"
-          data-testid="harness-rig-url"
-          aria-label="Plexar Harness rig URL"
-          placeholder="defaults to the configured Plexar provider address"
-          value={rigUrlDraft}
-          onChange={(e) => setField("harness.rig_url", e.target.value)}
-          style={{
-            height: 30,
-            padding: "0 9px",
-            borderRadius: 8,
-            background: "var(--cc-elev)",
-            border: "1px solid var(--cc-border)",
-            color: "var(--cc-fg)",
-            fontFamily: MONO,
-            fontSize: 12,
-          }}
-        />
-      </div>
-      <div style={{ fontSize: 11, color: "var(--cc-dim)", marginTop: -6, marginBottom: 4 }}>
-        Leave blank to use the configured Plexar provider address (Settings ▸ Providers), or the
-        harness's own built-in default if that is not set either.
-      </div>
-    </div>
-  );
-}
-
 export default function RemoteSettings({ get, setField }) {
   const enabledDraft = Boolean(get("remote.enabled", false));
+  // The address devices use. The setting key is `remote.hostname`.
   const hostnameDraft = get("remote.hostname", "") || "";
   const accessRequiredDraft = Boolean(get("remote.access_required", false));
 
   const [cfStatus, setCfStatus] = useState(null); // {installed, path, version, running}
   const [cfStatusError, setCfStatusError] = useState(null);
+
+  // Which "how do devices reach me" answer is showing. null = not chosen yet, so
+  // it follows what the connector says; choosing writes NO setting.
+  const [reach, setReach] = useState(null);
+  const [configOpen, setConfigOpen] = useState(false);
 
   const [cfConfig, setCfConfig] = useState(null); // {hostname, config_yml, commands}
   const [cfConfigError, setCfConfigError] = useState(null);
@@ -907,12 +697,103 @@ export default function RemoteSettings({ get, setField }) {
       : null;
   const autostartDraft = Boolean(get("remote.tunnel.autostart", true)) && Boolean(get("remote.tunnel.enabled", false));
   const logTail = (tunnel?.log_tail || []).slice(-20);
+  const defaultReach = tokenSet || Boolean(get("remote.tunnel.enabled", false)) ? "studio-tunnel" : "own-address";
+  const reachChoice = reach ?? defaultReach;
+  // Pairing needs both facts to be SAVED: the server's view, not the draft.
+  const savedAddress = Boolean(status?.hostname);
+  const pairBlockedReason = !status?.enabled
+    ? "Turn on remote access in step 1 and save."
+    : !savedAddress
+      ? "Set this machine's address in step 2 and save."
+      : null;
+
+
+  const addressField = (
+    <div style={{ marginTop: 8 }}>
+      <div style={LABEL}>Address</div>
+      <input
+        type="text"
+        data-testid="remote-hostname-input"
+        aria-label="Address devices use to reach this machine"
+        value={hostnameDraft}
+        onChange={(e) => setField("remote.hostname", e.target.value)}
+        placeholder="https://studio.example.com"
+        style={{
+          width: "100%",
+          maxWidth: 420,
+          height: 28,
+          marginTop: 4,
+          borderRadius: 8,
+          padding: "0 8px",
+          fontFamily: "inherit",
+          fontSize: 11,
+          background: "var(--cc-elev)",
+          border: "1px solid var(--cc-border)",
+          color: "var(--cc-fg)",
+        }}
+      />
+      <p style={{ fontSize: 10, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 0" }}>
+        The base URL a device should use, e.g. your tunnel hostname. Save changes after editing it.
+      </p>
+    </div>
+  );
+
+  const accessToggle = (
+    <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0 4px", cursor: "pointer" }}>
+      <input
+        type="checkbox"
+        data-testid="access-required-toggle"
+        checked={accessRequiredDraft}
+        onChange={(e) => setField("remote.access_required", e.target.checked)}
+      />
+      <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>
+        Cloudflare Access is required in front of this tunnel
+      </span>
+    </label>
+  );
+
+  const testUrl = (
+    <div style={{ marginTop: 6 }}>
+      <ActionButton
+        label={probeBusy ? "Testing…" : "Test public URL"}
+        testId="probe-public-url"
+        onClick={hostnameDraft ? runProbe : undefined}
+        disabled={!hostnameDraft || probeBusy}
+        title={hostnameDraft ? "Probe your public hostname from this server" : "Enter an address above first."}
+      />
+      {!hostnameDraft && (
+        <span data-testid="cloudflare-tools-disabled-reason" style={{ fontSize: 11, color: "var(--cc-muted)" }}>
+          {" "}Enter an address above to test it.
+        </span>
+      )}
+      {probeError && (
+        <Callout token="var(--cc-error)" testId="probe-error" alert>
+          {probeError}
+        </Callout>
+      )}
+      {probeResult && (
+        <div data-testid="probe-result" style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-fg)" }}>
+            {probeResult.classification}
+          </div>
+          <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-dim)", margin: "4px 0 0" }}>
+            {PROBE_HINTS[probeResult.classification] || "Unrecognized classification."}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+
+  const REACH_OPTIONS = [
+    { id: "studio-tunnel", label: "Studio runs a Cloudflare Tunnel for me" },
+    { id: "own-address", label: "I already have an address for this machine" },
+  ];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
-      {/* ── Remote access toggle ─────────────────────────── */}
+      {/* ── 1 · Remote access toggle ─────────────────────── */}
       <div style={CARD} data-testid="card-remote-toggle">
-        <CardHeader icon={RadioTower} token="var(--cc-accent)" name="Remote access" />
+        <CardHeader icon={RadioTower} token="var(--cc-accent)" name="1 · Turn on remote access" />
 
         <label
           style={{
@@ -930,42 +811,14 @@ export default function RemoteSettings({ get, setField }) {
             onChange={(e) => setField("remote.enabled", e.target.checked)}
           />
           <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>
-            Enable remote access from Plexar Mobile
+            Enable remote access to this machine
           </span>
         </label>
         <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 8px" }}>
           Off by default. When off, every <code>/remote/v1/*</code> route (pairing included)
-          answers 404. Turning this on and saving lets a paired phone list sessions, start one, and
-          attach to its live output through a tunnel you control.
+          answers 404. Turning this on and saving lets a paired phone or another computer list
+          sessions, start one, and attach to its live output through an address you control.
         </p>
-
-        <div style={{ marginTop: 4 }}>
-          <div style={LABEL}>Public URL</div>
-          <input
-            type="text"
-            data-testid="remote-hostname-input"
-            value={hostnameDraft}
-            onChange={(e) => setField("remote.hostname", e.target.value)}
-            placeholder="https://studio.example.com"
-            style={{
-              width: "100%",
-              maxWidth: 420,
-              height: 28,
-              marginTop: 4,
-              borderRadius: 8,
-              padding: "0 8px",
-              fontFamily: "inherit",
-              fontSize: 11,
-              background: "var(--cc-elev)",
-              border: "1px solid var(--cc-border)",
-              color: "var(--cc-fg)",
-            }}
-          />
-          <p style={{ fontSize: 10, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 0" }}>
-            The base URL a phone should use, e.g. your Cloudflare Tunnel hostname. Leave empty to
-            fall back to this machine&rsquo;s LAN address in the pairing QR.
-          </p>
-        </div>
 
         {statusError && (
           <Callout token="var(--cc-error)" testId="status-error" alert>
@@ -974,209 +827,58 @@ export default function RemoteSettings({ get, setField }) {
         )}
       </div>
 
-      {/* ── Pair a phone ─────────────────────────────────── */}
-      <div style={CARD} data-testid="card-pairing">
-        <CardHeader icon={QrCode} token="var(--cc-macro)" name="Pair a phone" />
-
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 0 2px" }}>
-          <ActionButton
-            label={pairingBusy ? "Starting…" : "Pair a phone"}
-            icon={Smartphone}
-            accent
-            testId="start-pairing"
-            onClick={status?.enabled ? startPairing : undefined}
-            disabled={!status?.enabled || pairingBusy}
-            title={
-              status?.enabled
-                ? "Generate a one-time pairing code and QR for Plexar Mobile"
-                : "Enable remote access and save changes first."
-            }
-          />
-          {!status?.enabled && (
-            <span data-testid="pairing-disabled-reason" style={{ fontSize: 11, color: "var(--cc-muted)" }}>
-              Remote access is off, so pairing is disabled. Enable it above and save changes.
-            </span>
-          )}
+      {/* ── 2 · How devices reach this machine ───────────── */}
+      <div style={CARD} data-testid="card-reach">
+        <CardHeader icon={Cloud} token="var(--cc-macro)" name="2 · How devices reach this machine" />
+        <div data-testid="reach-status" style={{ fontSize: 11, color: "var(--cc-dim)", padding: "6px 0", overflowWrap: "anywhere" }}>
+          {hostnameDraft ? hostnameDraft : "No address set"}
         </div>
-
-        {pairingError && (
-          <Callout token="var(--cc-error)" testId="pairing-error" alert>
-            {pairingError}
-          </Callout>
-        )}
-
-        {pairing && (
-          <div
-            data-testid="pairing-result"
-            style={{
-              display: "flex",
-              gap: 16,
-              alignItems: "flex-start",
-              marginTop: 12,
-              flexWrap: "wrap",
-            }}
-          >
-            {qrDataUrl && (
-              <img
-                data-testid="pairing-qr"
-                src={qrDataUrl}
-                alt="Pairing QR code"
-                width={140}
-                height={140}
-                style={{ borderRadius: 8, background: "#fff", padding: 6 }}
-              />
-            )}
-            <div style={{ minWidth: 0 }}>
-              <div style={LABEL}>Code</div>
-              <div
-                data-testid="pairing-code"
-                style={{
-                  fontSize: 20,
-                  fontWeight: 800,
-                  fontFamily: "var(--font-mono, monospace)",
-                  letterSpacing: "0.06em",
-                  color: expired ? "var(--cc-muted)" : "var(--cc-fg)",
-                  padding: "4px 0",
-                }}
-              >
-                {pairing.code}
-              </div>
-              <div data-testid="pairing-expiry" style={{ fontSize: 11, color: "var(--cc-dim)" }}>
-                {expired ? "Expired — start a new pairing." : `Expires in ${left}s`}
-              </div>
-              {pairing.url && (
-                <div style={{ fontSize: 10, color: "var(--cc-muted)", marginTop: 4, overflowWrap: "anywhere" }}>
-                  {pairing.url}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ── Your own Cloudflare deployment ───────────────────── */}
-      <div style={CARD} data-testid="card-cloudflare-deployment">
-        <CardHeader icon={Cloud} token="var(--cc-macro)" name="Your own Cloudflare deployment" />
-        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 8px" }}>
-          The Cloudflare Tunnel is transport only — it carries traffic to this machine. Pairing is
-          the lock: a phone still needs a device token minted above to do anything once it arrives.
+        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "0 0 8px" }}>
+          The address is only transport. Pairing is the lock: a device still needs a device token
+          from step 3 to do anything once it arrives.
         </p>
 
-        <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0 8px", cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            data-testid="access-required-toggle"
-            checked={accessRequiredDraft}
-            onChange={(e) => setField("remote.access_required", e.target.checked)}
-          />
-          <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>
-            Cloudflare Access is required in front of this tunnel
-          </span>
-        </label>
-
-        <div style={{ fontSize: 11, color: "var(--cc-dim)", margin: "4px 0 10px" }}>
-          {cfStatusError ? (
-            <span data-testid="cloudflared-status-error" style={{ color: "var(--cc-error)" }}>
-              {cfStatusError}
+        <div role="radiogroup" aria-label="How devices reach this machine" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {REACH_OPTIONS.map((o) => (
+            <label key={o.id} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="remote-reach"
+                data-testid={`reach-${o.id}`}
+                value={o.id}
+                checked={reachChoice === o.id}
+                onChange={() => setReach(o.id)}
+              />
+              <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>{o.label}</span>
+            </label>
+          ))}
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "not-allowed", opacity: 0.6 }}>
+            <input
+              type="radio"
+              name="remote-reach"
+              data-testid="reach-lan"
+              value="lan"
+              checked={false}
+              disabled
+              aria-disabled="true"
+              readOnly
+              style={{ marginTop: 3 }}
+            />
+            <span>
+              <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>Only devices on this network</span>
+              <span data-testid="reach-lan-reason" style={{ display: "block", fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)" }}>
+                Not available yet. Studio listens only on this computer, so another device on the network cannot reach it without a tunnel or a VPN address.
+              </span>
             </span>
-          ) : cfStatus ? (
-            <span data-testid="cloudflared-status-line">
-              cloudflared: {cfStatus.installed ? `installed${cfStatus.version ? ` (${cfStatus.version})` : ""}` : "not found"}
-              {" · "}
-              {cfStatus.running ? "running" : "not running"}
-            </span>
-          ) : (
-            "Checking cloudflared…"
-          )}
+          </label>
         </div>
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <ActionButton
-            label={cfConfigBusy ? "Generating…" : "Generate config"}
-            testId="generate-config"
-            onClick={hostnameDraft ? generateConfig : undefined}
-            disabled={!hostnameDraft || cfConfigBusy}
-            title={hostnameDraft ? "Generate the cloudflared config and commands" : "Enter a public URL above first."}
-          />
-          <ActionButton
-            label={probeBusy ? "Testing…" : "Test public URL"}
-            testId="probe-public-url"
-            onClick={hostnameDraft ? runProbe : undefined}
-            disabled={!hostnameDraft || probeBusy}
-            title={hostnameDraft ? "Probe your public hostname from this server" : "Enter a public URL above first."}
-          />
-        </div>
-        {!hostnameDraft && (
-          <span data-testid="cloudflare-tools-disabled-reason" style={{ fontSize: 11, color: "var(--cc-muted)" }}>
-            {" "}Enter a public URL above to generate a config or test it.
-          </span>
-        )}
-
-        {cfConfigError && (
-          <Callout token="var(--cc-error)" testId="config-error" alert>
-            {cfConfigError}
-          </Callout>
-        )}
-
-        {cfConfig && (
-          <div data-testid="cloudflared-config-result" style={{ marginTop: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <div style={LABEL}>config.yml</div>
-              <CopyButton text={cfConfig.config_yml} testId="copy-config-yml" />
-            </div>
-            <pre
-              data-testid="cloudflared-config-yml"
-              style={{
-                fontSize: 10,
-                lineHeight: 1.5,
-                background: "var(--cc-elev)",
-                border: "1px solid var(--cc-border)",
-                borderRadius: 8,
-                padding: 10,
-                margin: "4px 0 10px",
-                overflowX: "auto",
-                whiteSpace: "pre",
-              }}
-            >
-              {cfConfig.config_yml}
-            </pre>
-
-            <div style={LABEL}>Commands</div>
-            <ol data-testid="cloudflared-commands" style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-              {(cfConfig.commands || []).map((cmd, idx) => (
-                <li
-                  key={idx}
-                  style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}
-                >
-                  <code style={{ fontSize: 10, color: "var(--cc-fg)", overflowWrap: "anywhere" }}>{cmd}</code>
-                  <CopyButton text={cmd} testId={`copy-command-${idx}`} label="" />
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
-
-        {probeError && (
-          <Callout token="var(--cc-error)" testId="probe-error" alert>
-            {probeError}
-          </Callout>
-        )}
-
-        {probeResult && (
-          <div data-testid="probe-result" style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-fg)" }}>
-              {probeResult.classification}
-            </div>
-            <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-dim)", margin: "4px 0 0" }}>
-              {PROBE_HINTS[probeResult.classification] || "Unrecognized classification."}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* ── Tunnel connector (Studio-managed) ─────────────── */}
-      <div style={CARD} data-testid="card-tunnel-connector">
-        <CardHeader icon={Plug} token="var(--cc-accent)" name="Tunnel connector" />
+        {reachChoice === "studio-tunnel" && (
+          <div data-testid="reach-studio-tunnel-fields" style={{ marginTop: 8 }}>
+            {addressField}
+            {accessToggle}
+            {testUrl}
+            <div style={{ marginTop: 12 }} data-testid="tunnel-connector">
         <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 8px" }}>
           Studio runs <code>cloudflared</code> for you — hidden, and restarted automatically if it
           dies. Paste the connector token from your Cloudflare dashboard and press Start. The token
@@ -1379,19 +1081,192 @@ export default function RemoteSettings({ get, setField }) {
             </pre>
           )}
         </div>
+            </div>
+          </div>
+        )}
+
+        {reachChoice === "own-address" && (
+          <div data-testid="reach-own-address-fields" style={{ marginTop: 8 }}>
+            <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: 0 }}>
+              Use any address that reaches this computer&rsquo;s Studio: a Cloudflare Tunnel you run
+              yourself, Tailscale, a VPN, or your own reverse proxy.
+            </p>
+            {addressField}
+            {accessToggle}
+            {testUrl}
+
+            <div style={{ marginTop: 12 }}>
+              <ActionButton
+                label="Cloudflare tunnel config example"
+                testId="config-example-toggle"
+                onClick={() => setConfigOpen((v) => !v)}
+              />
+              {configOpen && (
+                <div data-testid="config-example" style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, color: "var(--cc-dim)", margin: "0 0 10px" }}>
+                    {cfStatusError ? (
+                      <span data-testid="cloudflared-status-error" style={{ color: "var(--cc-error)" }}>
+                        {cfStatusError}
+                      </span>
+                    ) : cfStatus ? (
+                      <span data-testid="cloudflared-status-line">
+                        cloudflared: {cfStatus.installed ? `installed${cfStatus.version ? ` (${cfStatus.version})` : ""}` : "not found"}
+                        {" · "}
+                        {cfStatus.running ? "running" : "not running"}
+                      </span>
+                    ) : (
+                      "Checking cloudflared…"
+                    )}
+                  </div>
+                  <ActionButton
+                    label={cfConfigBusy ? "Generating…" : "Generate config"}
+                    testId="generate-config"
+                    onClick={hostnameDraft ? generateConfig : undefined}
+                    disabled={!hostnameDraft || cfConfigBusy}
+                    title={hostnameDraft ? "Generate the cloudflared config and commands" : "Enter an address above first."}
+                  />
+        {cfConfigError && (
+          <Callout token="var(--cc-error)" testId="config-error" alert>
+            {cfConfigError}
+          </Callout>
+        )}
+
+        {cfConfig && (
+          <div data-testid="cloudflared-config-result" style={{ marginTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <div style={LABEL}>config.yml</div>
+              <CopyButton text={cfConfig.config_yml} testId="copy-config-yml" />
+            </div>
+            <pre
+              data-testid="cloudflared-config-yml"
+              style={{
+                fontSize: 10,
+                lineHeight: 1.5,
+                background: "var(--cc-elev)",
+                border: "1px solid var(--cc-border)",
+                borderRadius: 8,
+                padding: 10,
+                margin: "4px 0 10px",
+                overflowX: "auto",
+                whiteSpace: "pre",
+              }}
+            >
+              {cfConfig.config_yml}
+            </pre>
+
+            <div style={LABEL}>Commands</div>
+            <ol data-testid="cloudflared-commands" style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+              {(cfConfig.commands || []).map((cmd, idx) => (
+                <li
+                  key={idx}
+                  style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}
+                >
+                  <code style={{ fontSize: 10, color: "var(--cc-fg)", overflowWrap: "anywhere" }}>{cmd}</code>
+                  <CopyButton text={cmd} testId={`copy-command-${idx}`} label="" />
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* ── Plexar Harness ────────────────────────────────── */}
-      <HarnessCard get={get} setField={setField} />
+      {/* ── 3 · Pair a device ────────────────────────────── */}
+      <div style={CARD} data-testid="card-pairing">
+        <CardHeader icon={QrCode} token="var(--cc-macro)" name="3 · Pair a device" />
 
-      {/* ── Other machines (Studio peers) ─────────────────── */}
-      <PeersCard />
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 0 2px" }}>
+          <ActionButton
+            label={pairingBusy ? "Starting…" : "Pair a device"}
+            icon={Smartphone}
+            accent
+            testId="start-pairing"
+            onClick={pairBlockedReason ? undefined : startPairing}
+            disabled={Boolean(pairBlockedReason) || pairingBusy}
+            title={pairBlockedReason || "Generate a one-time pairing code, QR and link"}
+          />
+          {pairBlockedReason && (
+            <span data-testid="pairing-blocked-reason" style={{ fontSize: 11, color: "var(--cc-muted)" }}>
+              {pairBlockedReason}
+            </span>
+          )}
+        </div>
+
+        {pairingError && (
+          <Callout token="var(--cc-error)" testId="pairing-error" alert>
+            {pairingError}
+          </Callout>
+        )}
+
+        {pairing && (
+          <div data-testid="pairing-result" style={{ marginTop: 12 }}>
+            <div style={LABEL}>Phone: scan this in Plexar Mobile</div>
+            <div style={{ display: "flex", gap: 16, alignItems: "flex-start", marginTop: 6, flexWrap: "wrap" }}>
+              {qrDataUrl && (
+                <img
+                  data-testid="pairing-qr"
+                  src={qrDataUrl}
+                  alt="Pairing QR code"
+                  width={140}
+                  height={140}
+                  style={{ borderRadius: 8, background: "#fff", padding: 6 }}
+                />
+              )}
+              <div style={{ minWidth: 0 }}>
+                <div style={LABEL}>Code</div>
+                <div
+                  data-testid="pairing-code"
+                  style={{
+                    fontSize: 20,
+                    fontWeight: 800,
+                    fontFamily: "var(--font-mono, monospace)",
+                    letterSpacing: "0.06em",
+                    color: expired ? "var(--cc-muted)" : "var(--cc-fg)",
+                    padding: "4px 0",
+                  }}
+                >
+                  {pairing.code}
+                </div>
+                <div data-testid="pairing-expiry" style={{ fontSize: 11, color: "var(--cc-dim)" }}>
+                  {expired ? "Expired — start a new pairing." : `Expires in ${left}s`}
+                </div>
+                {pairing.url && (
+                  <div style={{ fontSize: 10, color: "var(--cc-muted)", marginTop: 4, overflowWrap: "anywhere" }}>
+                    {pairing.url}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ ...LABEL, marginTop: 14 }}>Another computer: copy this pairing link</div>
+            <div style={{ marginTop: 6 }}>
+              <CopyButton text={pairing.qr_payload} testId="copy-pairing-link" label="Copy pairing link" />
+            </div>
+            <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "6px 0 0" }}>
+              Paste it into Settings &gt; Remote &gt; Machines this one controls on the other computer.
+            </p>
+          </div>
+        )}
+      </div>
 
       {/* ── Devices ───────────────────────────────────────── */}
       <div style={CARD} data-testid="card-devices">
-        <CardHeader icon={ShieldOff} token="var(--cc-waiting)" name="Devices" />
+        <CardHeader icon={ShieldOff} token="var(--cc-waiting)" name="Devices that can reach this machine" />
         <DevicesTable devices={status?.devices} onRevokeRequest={requestRevoke} />
       </div>
+
+      {/* ── The other direction ───────────────────────────── */}
+      <div data-testid="heading-controls" style={{ marginTop: 8 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--cc-fg)" }}>Machines this one controls</div>
+        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 0" }}>
+          This is the other direction: this computer driving another computer&rsquo;s Studio.
+        </p>
+      </div>
+      <PeersCard />
 
       {revokeTarget && (
         <RevokeConfirm

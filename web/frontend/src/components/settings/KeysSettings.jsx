@@ -27,12 +27,14 @@
  * key that is doing nothing. The OpenRouter key IS consumed (pricing snapshots +
  * the provider lever), so that caveat appears on Anthropic ONLY.
  *
- * Props: the shell may pass `{get, setField, isDirty}`; this page uses none of
- * them, deliberately (see NO DRAFT STATE above).
+ * Props: the shell passes `{get, setField, isDirty}`. The key cards use none of
+ * them, deliberately (see NO DRAFT STATE above); only the Plexar Harness card at
+ * the bottom does, for its permission mode and rig URL, which ARE ordinary drafts.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { Cloud, KeyRound, Lock, Server, TriangleAlert } from "lucide-react";
+import HarnessCard from "./HarnessCard";
 
 // ── tokens / shared style fragments (idiom from ProvidersSettings) ──
 const ACCENT_FG = "#0f1216"; // the one permitted literal: accent-button foreground
@@ -640,7 +642,7 @@ function KeyCard({ provider }) {
 
 // ── page ──────────────────────────────────────────────────
 
-export default function KeysSettings() {
+export default function KeysSettings({ get = (_path, fallback) => fallback, setField = () => {} }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
       {/* Two facts the user needs before touching either card: where the values
@@ -674,6 +676,8 @@ export default function KeysSettings() {
       {KEY_PROVIDERS.map((provider) => (
         <KeyCard key={provider.id} provider={provider} />
       ))}
+
+      <HarnessCard get={get} setField={setField} />
     </div>
   );
 }

@@ -151,6 +151,29 @@ export function accessPairError(clientId, secret) {
   return "";
 }
 
+/**
+ * Read the pairing link another Studio shows in Settings > Remote: the exact
+ * `qr_payload` string, `{"v":1,"url","code"[,"access":true]}`. Never throws; a
+ * bad paste comes back as `{ ok: false, error }` for inline display.
+ */
+export function parsePairingLink(text) {
+  let data;
+  try {
+    data = JSON.parse(String(text ?? "").trim());
+  } catch {
+    return { ok: false, error: "That is not a pairing link. Copy it again from the other computer." };
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { ok: false, error: "That is not a pairing link. Copy it again from the other computer." };
+  }
+  if (data.v !== 1) return { ok: false, error: "This pairing link is from a version Studio does not understand." };
+  const url = typeof data.url === "string" ? data.url.trim() : "";
+  const code = typeof data.code === "string" ? data.code.trim() : "";
+  if (!url) return { ok: false, error: "The pairing link has no address." };
+  if (!code) return { ok: false, error: "The pairing link has no code." };
+  return { ok: true, url, code, access: data.access === true };
+}
+
 /** The fields POST /api/peers/{id}/sessions passes through, from the dialog's choices. */
 export function peerCreateBody({ name, workdir, harness, model, permissionMode, effort, bypassPermissions }) {
   return {

@@ -1,5 +1,5 @@
 /**
- * Settings > Remote > "Other machines": pair this Studio with another
+ * Settings > Remote > "Machines this one controls": pair this Studio with another
  * machine's Studio (docs/studio-peers-v1.md), see each one's status, remove
  * it, and set or clear its Cloudflare Access service token.
  *
@@ -11,7 +11,7 @@
 import { useEffect, useState } from "react";
 import { Monitor, TriangleAlert } from "lucide-react";
 import usePeers, { refreshPeers, checkPeerStatus } from "../../hooks/usePeers";
-import { peersApi, describePeerStatus, accessPairError } from "../../utils/peers";
+import { peersApi, describePeerStatus, accessPairError, parsePairingLink } from "../../utils/peers";
 
 const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
 
@@ -169,6 +169,12 @@ function PeerRow({ peer, live }) {
 }
 
 function AddPeerForm() {
+  const [link, setLink] = useState("");
+  const [linkError, setLinkError] = useState("");
+  const [linkOk, setLinkOk] = useState(false);
+  const [linkAccess, setLinkAccess] = useState(false);
+  const [accessFailed, setAccessFailed] = useState(false);
+  const [manual, setManual] = useState(false);
   const [url, setUrl] = useState("");
   const [code, setCode] = useState("");
   const [label, setLabel] = useState("");
@@ -177,9 +183,21 @@ function AddPeerForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const onLink = (text) => {
+    setLink(text);
+    if (!text.trim()) { setLinkError(""); setLinkOk(false); setLinkAccess(false); return; }
+    const r = parsePairingLink(text);
+    if (!r.ok) { setLinkError(r.error); setLinkOk(false); setLinkAccess(false); return; }
+    setLinkError("");
+    setLinkOk(true);
+    setLinkAccess(r.access);
+    setUrl(r.url);
+    setCode(r.code);
+  };
+
   const submit = async (e) => {
     e.preventDefault();
-    if (!url.trim() || !code.trim()) { setError("Give the machine's address and a pairing code from its Settings > Remote."); return; }
+    if (!url.trim() || !code.trim()) { setError("Paste the pairing link from the other computer's Settings > Remote, or enter its address and a pairing code by hand."); return; }
     const bad = accessPairError(cfId, cfSecret);
     if (bad) { setError(bad); return; }
     setBusy(true);
@@ -191,29 +209,50 @@ function AddPeerForm() {
       ...(cfId.trim() ? { cf_client_id: cfId.trim(), cf_client_secret: cfSecret.trim() } : {}),
     });
     setBusy(false);
-    // Secrets never stay in the form, whatever the outcome.
+    // Secrets never stay in the form, whatever the outcome. The link carries the
+    // code, so it goes too.
     setCfSecret("");
     setCode("");
-    if (!r.ok) { setError(r.reason ? `${r.error}: ${describePeerStatus({ reason: r.reason }).remedy}` : r.error); return; }
+    setLink("");
+    setLinkOk(false);
+    if (!r.ok) {
+      if (r.reason === "access_required" || r.reason === "access_refused") setAccessFailed(true);
+      setError(r.reason ? `${r.error}: ${describePeerStatus({ reason: r.reason }).remedy}` : r.error);
+      return;
+    }
     setUrl("");
     setLabel("");
     setCfId("");
+    setLinkAccess(false);
+    setAccessFailed(false);
     await refreshPeers();
     if (r.data?.peer?.id) checkPeerStatus(r.data.peer.id);
   };
 
+  const showFields = manual || linkOk || accessFailed;
+  const showAccess = linkAccess || accessFailed;
+
   return (
     <form onSubmit={submit} data-testid="peer-add-form" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 12 }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: "var(--cc-fg)" }}>Pair another machine</div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <input style={{ ...INPUT, flex: 2 }} aria-label="Machine address" placeholder="https://studio.example.com" value={url} onChange={(e) => setUrl(e.target.value)} />
-        <input style={{ ...INPUT, flex: 1 }} aria-label="Pairing code" placeholder="Pairing code" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" />
-        <input style={{ ...INPUT, flex: 1 }} aria-label="Label" placeholder="Label (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
+      <input style={{ ...INPUT, width: "100%" }} aria-label="Pairing link" placeholder="Paste the pairing link from the other computer" value={link} onChange={(e) => onLink(e.target.value)} autoComplete="off" spellCheck={false} />
+      <InlineError text={linkError} testId="peer-link-error" />
+      <div>
+        <Button label={manual ? "Hide the details" : "Enter the details by hand"} onClick={() => setManual((v) => !v)} testId="peer-manual-toggle" />
       </div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <input style={{ ...INPUT, flex: 1 }} aria-label="Access client id (optional)" placeholder="Access client id (optional)" value={cfId} onChange={(e) => setCfId(e.target.value)} autoComplete="off" />
-        <input style={{ ...INPUT, flex: 1 }} type="password" aria-label="Access client secret (optional)" placeholder="Access client secret (optional)" value={cfSecret} onChange={(e) => setCfSecret(e.target.value)} autoComplete="new-password" />
-      </div>
+      {showFields && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <input style={{ ...INPUT, flex: 2 }} aria-label="Machine address" placeholder="https://studio.example.com" value={url} onChange={(e) => setUrl(e.target.value)} />
+          <input style={{ ...INPUT, flex: 1 }} aria-label="Pairing code" placeholder="Pairing code" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" />
+          <input style={{ ...INPUT, flex: 1 }} aria-label="Label" placeholder="Label (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
+        </div>
+      )}
+      {showAccess && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <input style={{ ...INPUT, flex: 1 }} aria-label="Access client id (optional)" placeholder="Access client id (optional)" value={cfId} onChange={(e) => setCfId(e.target.value)} autoComplete="off" />
+          <input style={{ ...INPUT, flex: 1 }} type="password" aria-label="Access client secret (optional)" placeholder="Access client secret (optional)" value={cfSecret} onChange={(e) => setCfSecret(e.target.value)} autoComplete="new-password" />
+        </div>
+      )}
       <div><Button type="submit" label={busy ? "Pairing..." : "Pair machine"} accent disabled={busy} testId="peer-add" /></div>
       <InlineError text={error} testId="peer-add-error" />
     </form>
@@ -240,7 +279,7 @@ export default function PeersCard() {
         <span style={{ fontSize: 13, fontWeight: 700, color: "var(--cc-fg)" }}>Other machines</span>
       </div>
       <div style={{ fontSize: 11, color: "var(--cc-dim)", marginTop: 8, lineHeight: 1.5 }}>
-        Pair another computer&apos;s Studio the way a phone pairs: make a code in its Settings &gt; Remote, then enter its address and the code here. Its sessions then appear in the sidebar.
+        On the other computer open Settings &gt; Remote, click Pair a device, copy the pairing link, and paste it here. Its sessions then appear in the sidebar.
       </div>
       <InlineError text={error} testId="peers-load-error" />
       {loaded && peers.length === 0 && !error && (

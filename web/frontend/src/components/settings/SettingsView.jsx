@@ -123,7 +123,7 @@ const PAGE_META = {
   },
   remote: {
     title: "Remote",
-    description: "Pair Plexar Mobile to this machine and manage devices that can reach it.",
+    description: "Let a phone or another computer reach this machine, and manage the devices that can.",
   },
 };
 

@@ -21,6 +21,8 @@ beforeEach(() => {
   });
 });
 
+const link = (url, code, access) => JSON.stringify({ v: 1, url, code, ...(access ? { access: true } : {}) });
+
 const PEER = { id: "p1", label: "Desk PC", url: "https://desk.example.com", access_token_set: false };
 
 describe("PeersCard", () => {
@@ -40,8 +42,9 @@ describe("PeersCard", () => {
     routes["POST /api/peers"] = res(400, { error: "invalid or expired code" });
     render(<PeersCard />);
     await screen.findByText("No machines paired yet.");
-    fireEvent.change(screen.getByLabelText("Machine address"), { target: { value: "https://x.example.com" } });
-    fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "ABCD1234" } });
+    fireEvent.click(screen.getByTestId("peer-manual-toggle"));
+    // A link that says Access is in front of the machine reveals the Access fields.
+    fireEvent.change(screen.getByLabelText("Pairing link"), { target: { value: link("https://x.example.com", "ABCD1234", true) } });
     fireEvent.change(screen.getByLabelText("Access client id (optional)"), { target: { value: "id" } });
     await act(async () => { fireEvent.click(screen.getByTestId("peer-add")); });
     expect(screen.getByTestId("peer-add-error")).toHaveTextContent(/both/);
@@ -55,6 +58,59 @@ describe("PeersCard", () => {
     // The secret and the code are never left in the form.
     expect(screen.getByLabelText("Access client secret (optional)")).toHaveValue("");
     expect(screen.getByLabelText("Pairing code")).toHaveValue("");
+  });
+
+  it("pasting a pairing link fills the address and code and submits them", async () => {
+    routes["GET /api/peers"] = res(200, { peers: [] });
+    routes["POST /api/peers"] = res(200, { peer: { ...PEER, id: "p9" } });
+    render(<PeersCard />);
+    await screen.findByText("No machines paired yet.");
+    // The fields only appear once there is something to show in them.
+    expect(screen.queryByLabelText("Machine address")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Pairing link"), { target: { value: `  ${link("https://desk.example.com", "ZXCV5678")}\n` } });
+    expect(screen.getByLabelText("Machine address")).toHaveValue("https://desk.example.com");
+    expect(screen.getByLabelText("Pairing code")).toHaveValue("ZXCV5678");
+    await act(async () => { fireEvent.click(screen.getByTestId("peer-add")); });
+    const body = JSON.parse(globalThis.fetch.mock.calls.find(([u, o]) => u === "/api/peers" && o?.method === "POST")[1].body);
+    expect(body).toEqual({ url: "https://desk.example.com", code: "ZXCV5678" });
+  });
+
+  it("shows the Access fields only for a link that says access, or after an Access failure", async () => {
+    routes["GET /api/peers"] = res(200, { peers: [] });
+    routes["POST /api/peers"] = res(400, { error: "Access refused", reason: "access_required" });
+    render(<PeersCard />);
+    await screen.findByText("No machines paired yet.");
+    fireEvent.change(screen.getByLabelText("Pairing link"), { target: { value: link("https://a.example.com", "AAAA1111") } });
+    expect(screen.queryByLabelText("Access client id (optional)")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Pairing link"), { target: { value: link("https://a.example.com", "AAAA1111", true) } });
+    expect(screen.getByLabelText("Access client id (optional)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Access client secret (optional)")).toBeInTheDocument();
+
+    // And after a failure the link did not predict.
+    fireEvent.change(screen.getByLabelText("Pairing link"), { target: { value: link("https://a.example.com", "AAAA1111") } });
+    expect(screen.queryByLabelText("Access client id (optional)")).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByTestId("peer-add")); });
+    expect(await screen.findByLabelText("Access client id (optional)")).toBeInTheDocument();
+  });
+
+  it("the manual toggle reveals the address, code and label fields", async () => {
+    routes["GET /api/peers"] = res(200, { peers: [] });
+    render(<PeersCard />);
+    await screen.findByText("No machines paired yet.");
+    expect(screen.queryByLabelText("Pairing code")).toBeNull();
+    fireEvent.click(screen.getByTestId("peer-manual-toggle"));
+    expect(screen.getByLabelText("Machine address")).toBeInTheDocument();
+    expect(screen.getByLabelText("Pairing code")).toBeInTheDocument();
+    expect(screen.getByLabelText("Label")).toBeInTheDocument();
+  });
+
+  it("an unparseable paste shows the parse error inline", async () => {
+    routes["GET /api/peers"] = res(200, { peers: [] });
+    render(<PeersCard />);
+    await screen.findByText("No machines paired yet.");
+    fireEvent.change(screen.getByLabelText("Pairing link"), { target: { value: "not a link" } });
+    expect(screen.getByTestId("peer-link-error")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Machine address")).toBeNull();
   });
 
   it("removes only after an in-app confirm, and awaits it", async () => {
