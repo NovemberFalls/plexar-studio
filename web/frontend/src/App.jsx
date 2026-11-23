@@ -1413,7 +1413,12 @@ export default function App() {
               const followsRename = typeof t.name === "string" && t.name.length > 0 && t.name !== s.backendName;
               const newName = followsRename ? t.name : s.name;
               const newBackendName = followsRename ? t.name : s.backendName;
+              // A /model switch inside the CLI: the server reports it as live_model
+              // once the transcript shows it. Never taken from t.model, which for
+              // other providers is not in the picker's vocabulary.
+              const newModel = typeof t.live_model === "string" && t.live_model ? t.live_model : s.model;
               if (
+                s.model === newModel &&
                 s.activityState === newState &&
                 s.tokens === newTokens &&
                 s.cost === newCost &&
@@ -1425,7 +1430,7 @@ export default function App() {
                 return s;
               }
               changed = true;
-              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId, codex_session_id: newCodexSessionId, name: newName, backendName: newBackendName };
+              return { ...s, model: newModel, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId, codex_session_id: newCodexSessionId, name: newName, backendName: newBackendName };
             });
 
             // Adopt agent-spawned workers and phone-created sessions (and drop ones whose terminal is gone).

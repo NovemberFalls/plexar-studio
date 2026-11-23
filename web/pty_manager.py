@@ -624,6 +624,7 @@ class TerminalSession:
     jsonl_ids_held: set = field(default_factory=set)
     cli_title: Optional[str] = None  # last CLI-side title observed, from either channel
     _cli_title_checked: float = 0.0  # monotonic throttle stamp for _refresh_cli_title
+    live_model: Optional[str] = None  # model adopted from the CLI's own transcript after a /model switch
 
 
 def _resolve_max_sessions() -> int:
@@ -2235,6 +2236,9 @@ class PtyManager:
             "name_source": session.name_source,
             "cli_title": session.cli_title,
             "model": session.model,
+            # Set only once the CLI's transcript showed a different model than the
+            # one spawned with; the desktop adopts it, and never guesses from "model".
+            "live_model": session.live_model,
             "provider": session.provider,
             "harness": session.harness,
             "created_at": session.created_at,
@@ -2475,13 +2479,59 @@ class PtyManager:
         logger.info("Terminal %s renamed by the CLI: %r", session.id, osc_title)
         return osc_title
 
+    @staticmethod
+    def _same_model(spawned: str, observed: str) -> bool:
+        """Whether *observed* (a transcript's exact id) is the model *spawned* names.
+
+        A spawn value may be a bare alias (``opus``) or carry a suffix the
+        transcript never records (``claude-opus-5-5[1m]``). Neither is a switch,
+        and adopting the transcript's id would throw the alias or suffix away.
+        """
+        base = (spawned or "").split("[", 1)[0].strip().lower()
+        seen = observed.strip().lower()
+        if not base:
+            return False
+        return base == seen or ("-" not in base and base in seen.split("-"))
+
+    def _refresh_cli_model(self, session) -> Optional[str]:
+        """Adopt a model switch made INSIDE the CLI (``/model``) as this session's model.
+
+        Owner, 2026-11-23: "when I change a model ... it holds the model it
+        spawned with." ``session.model`` was written at spawn and never again.
+        The transcript's last assistant turn names the model that actually
+        answered, so the label follows from the next reply after a switch. Only
+        turns newer than this pane's spawn count, and only for claude-code on
+        the Anthropic provider: other providers map their own ids.
+
+        Blocking disk I/O; called from ``refresh_cli_titles`` on the executor.
+        """
+        if getattr(session, "harness", "claude-code") != "claude-code" or session.provider != "anthropic":
+            return None
+        path = self._get_jsonl_path(session)
+        if not path:
+            return None
+        from jsonl_watcher import latest_assistant_model
+
+        observed = latest_assistant_model(path, after=session.created_at)
+        if not observed or observed == session.model or self._same_model(session.model, observed):
+            return None
+        logger.info("Terminal %s model changed by the CLI: %r -> %r", session.id, session.model, observed)
+        session.model = observed
+        session.live_model = observed
+        return observed
+
     def refresh_cli_titles(self) -> None:
         """Run ``_refresh_cli_title`` over every live session (executor entry point)."""
         for session in list(self.sessions.values()):
             if not session.alive:
                 continue
             try:
+                # Same 5 s throttle as the title: read the stamp before the title
+                # check moves it.
+                due = time.monotonic() - session._cli_title_checked >= self._CLI_TITLE_THROTTLE
                 self._refresh_cli_title(session)
+                if due:
+                    self._refresh_cli_model(session)
             except Exception:
                 logger.warning(
                     "CLI title refresh failed for session %s", session.id, exc_info=True

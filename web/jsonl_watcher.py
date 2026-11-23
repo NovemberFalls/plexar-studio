@@ -293,6 +293,60 @@ def read_all_messages(filepath: str) -> list[dict]:
     return messages
 
 
+def latest_assistant_model(path: str, after: str = "", tail_bytes: int = 65536) -> str | None:
+    """Return the model id of the LAST assistant turn in a Claude Code JSONL.
+
+    Every assistant record carries ``message.model``, the exact id that produced
+    the turn, so this is how a ``/model`` switch made inside the CLI is seen
+    (measured 2026-11-23: 4 of the 40 newest transcripts change model mid-file).
+    ``<synthetic>`` records (CLI-written notices) and sidechain turns are not the
+    session's model and are skipped.
+
+    *after* is an ISO-8601 UTC timestamp; a record at or before it is ignored, so
+    a resumed transcript's older conversation cannot speak for this session.
+    Tail-only, like ``latest_custom_title``. None when there is nothing to report.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            start = max(0, size - tail_bytes)
+            f.seek(start)
+            chunk = f.read()
+    except OSError:
+        return None
+
+    lines = chunk.decode("utf-8", errors="replace").split("\n")
+    if start > 0 and lines:
+        lines = lines[1:]  # first line is probably truncated mid-record
+
+    after_key = _ts_key(after)
+    for line in reversed(lines):
+        if '"assistant"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        message = obj.get("message")
+        model = message.get("model") if isinstance(message, dict) else None
+        if not isinstance(model, str) or not model.strip() or model.startswith("<"):
+            continue
+        if after_key and _ts_key(obj.get("timestamp")) <= after_key:
+            return None  # everything earlier is older still
+        return model.strip()
+    return None
+
+
+def _ts_key(value) -> str:
+    """An ISO-8601 UTC timestamp cut to whole seconds, comparable as text."""
+    if not isinstance(value, str) or len(value) < 19:
+        return ""
+    return value[:19]
+
+
 # Max length of a CLI-side title we are willing to adopt as a session name.
 MAX_CUSTOM_TITLE_LEN = 120
 
