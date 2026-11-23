@@ -247,17 +247,53 @@ describe("RemoteSettings — how devices reach this machine", () => {
     expect(screen.getByTestId("reach-status")).toHaveTextContent("No address set");
   });
 
-  it("offers the LAN choice disabled, with its reason", async () => {
+  it("choosing 'Only devices on this network' writes remote.lan.enabled, and leaving it writes it back", async () => {
     globalThis.fetch = makeFetchMock();
-    render(<RemoteSettings {...makeSettingsProps()} />);
+    const props = makeSettingsProps();
+    render(<RemoteSettings {...props} />);
     await openSetup();
     expect(screen.getByRole("radiogroup", { name: "How devices reach this machine" })).toBeInTheDocument();
     const lan = screen.getByTestId("reach-lan");
-    expect(lan).toHaveAttribute("aria-disabled", "true");
-    expect(lan).toBeDisabled();
-    expect(screen.getByTestId("reach-lan-reason")).toHaveTextContent(
-      "Not available yet. Studio listens only on this computer, so another device on the network cannot reach it without a tunnel or a VPN address."
+    expect(lan).not.toBeDisabled();
+    expect(lan).not.toBeChecked();
+    fireEvent.click(lan);
+    expect(props.setField).toHaveBeenCalledWith("remote.lan.enabled", true);
+  });
+
+  it("shows the local address, the port and the plain-words notes in local mode, and no tunnel fields", async () => {
+    globalThis.fetch = makeFetchMock({
+      status: { ...STATUS_ON, lan: { enabled: true, port: 8421, running: true, url: "http://192.168.1.20:8421", error: null } },
+    });
+    const props = makeSettingsProps({
+      remote: { enabled: true, hostname: "https://studio.example.com", lan: { enabled: true, port: 8421 } },
+    });
+    render(<RemoteSettings {...props} />);
+    await openSetup();
+    expect(screen.getByTestId("reach-lan")).toBeChecked();
+    await waitFor(() => expect(screen.getByTestId("lan-state")).toHaveTextContent("Listening at http://192.168.1.20:8421"));
+    expect(screen.getByTestId("lan-notes")).toHaveTextContent("This connection is not encrypted");
+    expect(screen.queryByTestId("tunnel-start")).toBeNull();
+    expect(screen.queryByTestId("remote-hostname-input")).toBeNull();
+    expect(screen.queryByTestId("access-required-toggle")).toBeNull();
+    expect(screen.getByTestId("setup-summary-address")).toHaveTextContent("http://192.168.1.20:8421");
+
+    fireEvent.change(screen.getByTestId("lan-port-input"), { target: { value: "9000" } });
+    expect(props.setField).toHaveBeenCalledWith("remote.lan.port", 9000);
+    fireEvent.click(screen.getByTestId("reach-own-address"));
+    expect(props.setField).toHaveBeenCalledWith("remote.lan.enabled", false);
+  });
+
+  it("blocks pairing with the listener's own error when local mode cannot listen", async () => {
+    globalThis.fetch = makeFetchMock({
+      status: { ...STATUS_ON, lan: { enabled: true, port: 8421, running: false, url: "", error: "Port 8421 is not available on this computer." } },
+    });
+    render(<RemoteSettings {...makeSettingsProps({ remote: { enabled: true, hostname: "", lan: { enabled: true, port: 8421 } } })} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("pairing-blocked-reason")).toHaveTextContent("Port 8421 is not available on this computer.")
     );
+    expect(screen.getByTestId("start-pairing")).toBeDisabled();
+    expect(screen.getByTestId("lan-error")).toBeInTheDocument();
+    expect(screen.queryByTestId("card-setup-summary")).toBeNull();
   });
 
   it("starts on the tunnel answer when it is enabled; switching to own-address hides the connector and writes no setting", async () => {

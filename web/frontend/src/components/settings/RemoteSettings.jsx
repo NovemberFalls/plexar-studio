@@ -9,6 +9,12 @@
  * "Control another machine" is the OTHER direction (PeersCard) and needs none
  * of those steps. The Plexar Harness card lives in Keys & secrets.
  *
+ * Step 2 has three answers. Two are an address that reaches this machine from
+ * outside (a tunnel Studio runs, or one the user already has). The third,
+ * "Only devices on this network", is `remote.lan.enabled`: Studio opens a
+ * second port that serves only the paired-device routes (remote_lan.py), so no
+ * account or domain is needed. It is the one answer that IS a setting.
+ *
  * Remote access is OPT-IN and OFF by default (SPEC §1). This page:
  *   - toggles `remote.enabled` and edits `remote.hostname` through useSettings
  *     (the normal draft/save flow the rest of Settings uses — a change here is
@@ -466,8 +472,12 @@ export default function RemoteSettings({ get, setField }) {
     }
   }, []);
 
+  // Polled like the connector below: saving turns remote access or the local
+  // listener on, and the pairing gate must follow without a page revisit.
   useEffect(() => {
     loadStatus();
+    const id = setInterval(loadStatus, TUNNEL_POLL_MS);
+    return () => clearInterval(id);
   }, [loadStatus]);
 
   const loadCloudflaredStatus = useCallback(async () => {
@@ -770,13 +780,29 @@ export default function RemoteSettings({ get, setField }) {
   const autostartDraft = Boolean(get("remote.tunnel.autostart", true)) && Boolean(get("remote.tunnel.enabled", false));
   const logTail = (tunnel?.log_tail || []).slice(-20);
   const defaultReach = tokenSet || Boolean(get("remote.tunnel.enabled", false)) ? "studio-tunnel" : "own-address";
-  const reachChoice = reach ?? defaultReach;
+  const lanDraft = Boolean(get("remote.lan.enabled", false));
+  const lanPortDraft = get("remote.lan.port", 8421);
+  const reachChoice = lanDraft ? "lan" : reach ?? defaultReach;
+  // Only the local-network answer is a setting; the other two are just which
+  // fields to show, so choosing between them writes nothing.
+  const chooseReach = (id) => {
+    if (id === "lan") {
+      if (!lanDraft) setField("remote.lan.enabled", true);
+      return;
+    }
+    if (lanDraft) setField("remote.lan.enabled", false);
+    setReach(id);
+  };
   // Pairing needs both facts to be SAVED: the server's view, not the draft.
-  const savedAddress = Boolean(status?.hostname);
+  const lan = status?.lan;
+  const lanMode = Boolean(lan?.enabled);
+  const savedAddress = lanMode ? Boolean(lan?.running) : Boolean(status?.hostname);
   const pairBlockedReason = !status?.enabled
     ? "Turn on remote access in step 1 and save."
     : !savedAddress
-      ? "Set this machine's address in step 2 and save."
+      ? lanMode
+        ? lan?.error || "The local network listener is not running yet."
+        : "Set this machine's address in step 2 and save."
       : null;
   const statusLoading = status === null && !statusError;
   const setupDone = Boolean(status?.enabled) && savedAddress;
@@ -909,9 +935,14 @@ export default function RemoteSettings({ get, setField }) {
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-idle)" }}>Remote access is on</span>
             <span data-testid="setup-summary-address" style={{ fontSize: 12, color: "var(--cc-fg)", overflowWrap: "anywhere" }}>
-              {status.hostname}
+              {lanMode ? lan.url : status.hostname}
             </span>
-            {reachChoice === "studio-tunnel" && (
+            {lanMode && (
+              <span data-testid="setup-summary-lan" style={{ fontSize: 11, color: "var(--cc-dim)" }}>
+                this network only
+              </span>
+            )}
+            {!lanMode && reachChoice === "studio-tunnel" && (
               <span data-testid="setup-summary-tunnel" style={{ fontSize: 11, color: tunnelToken }}>
                 connector {tunnelState}
               </span>
@@ -967,7 +998,7 @@ export default function RemoteSettings({ get, setField }) {
       {/* ── 2 · How devices reach this machine ───────────── */}
       <div style={CARD} data-testid="card-reach">
         <CardHeader icon={Cloud} token="var(--cc-macro)" name="2 · How devices reach this machine" />
-        {!hostnameDraft && (
+        {!hostnameDraft && reachChoice !== "lan" && (
           <div data-testid="reach-status" style={{ fontSize: 11, color: "var(--cc-waiting)", padding: "6px 0 0" }}>
             No address set
           </div>
@@ -986,31 +1017,78 @@ export default function RemoteSettings({ get, setField }) {
                 data-testid={`reach-${o.id}`}
                 value={o.id}
                 checked={reachChoice === o.id}
-                onChange={() => setReach(o.id)}
+                onChange={() => chooseReach(o.id)}
               />
               <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>{o.label}</span>
             </label>
           ))}
-          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "not-allowed", opacity: 0.6 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
             <input
               type="radio"
               name="remote-reach"
               data-testid="reach-lan"
               value="lan"
-              checked={false}
-              disabled
-              aria-disabled="true"
-              readOnly
-              style={{ marginTop: 3 }}
+              checked={reachChoice === "lan"}
+              onChange={() => chooseReach("lan")}
             />
-            <span>
-              <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>Only devices on this network</span>
-              <span data-testid="reach-lan-reason" style={{ display: "block", fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)" }}>
-                Not available yet. Studio listens only on this computer, so another device on the network cannot reach it without a tunnel or a VPN address.
-              </span>
-            </span>
+            <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>Only devices on this network</span>
           </label>
         </div>
+
+        {reachChoice === "lan" && (
+          <div data-testid="reach-lan-fields" style={{ marginTop: 8 }}>
+            <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: 0 }}>
+              Works while the other device is on the same network as this computer, such as your
+              home Wi-Fi. No account, domain or tunnel is needed. Away from this network the
+              device cannot connect.
+            </p>
+            <div data-testid="lan-state" style={{ fontSize: 12, padding: "8px 0 2px", color: lan?.running ? "var(--cc-idle)" : "var(--cc-dim)", overflowWrap: "anywhere" }}>
+              {lan?.running && lanMode
+                ? `Listening at ${lan.url}`
+                : lanMode
+                  ? "Not listening."
+                  : "Save changes to start listening."}
+            </div>
+            {lan?.error && lanMode && (
+              <Callout token="var(--cc-error)" testId="lan-error" alert>
+                {lan.error}
+              </Callout>
+            )}
+            <div style={{ marginTop: 8 }}>
+              <div style={LABEL}>Port</div>
+              <input
+                type="number"
+                min={1024}
+                max={65535}
+                data-testid="lan-port-input"
+                aria-label="Port for devices on this network"
+                value={lanPortDraft}
+                onChange={(e) => {
+                  const n = Number.parseInt(e.target.value, 10);
+                  if (Number.isFinite(n)) setField("remote.lan.port", n);
+                }}
+                style={{
+                  width: 110,
+                  height: 28,
+                  marginTop: 4,
+                  borderRadius: 8,
+                  padding: "0 8px",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                  background: "var(--cc-elev)",
+                  border: "1px solid var(--cc-border)",
+                  color: "var(--cc-fg)",
+                }}
+              />
+            </div>
+            <ul data-testid="lan-notes" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--cc-muted)", margin: "10px 0 0", paddingLeft: 18 }}>
+              <li>Windows may ask whether to allow Plexar Studio on the network. Allow it for private networks.</li>
+              <li>This connection is not encrypted. Use it only on a network you trust.</li>
+              <li>Only a paired device gets anything, and only the paired-device routes are offered on this port. The rest of Studio stays unreachable from the network.</li>
+              <li>Another computer running Studio can connect this way today. Plexar Mobile on Android does not yet accept an unencrypted local address.</li>
+            </ul>
+          </div>
+        )}
 
         {reachChoice === "studio-tunnel" && (
           <div data-testid="reach-studio-tunnel-fields" style={{ marginTop: 8 }}>

@@ -386,6 +386,10 @@ DEFAULT_SETTINGS = {
         "hostname": "",
         "access_required": False,
         "tunnel": {"enabled": False, "autostart": True, "cloudflared_path": ""},
+        # Local-network mode (remote_lan.py): a second port, on every interface,
+        # serving ONLY the device-token routes. Off by default; needs
+        # remote.enabled as well.
+        "lan": {"enabled": False, "port": 8421},
     },
     # Terminal (xterm.js) options. These are Cockpit's own -- the `claude` CLI
     # neither sees nor restricts them. NOT yet read by TerminalPane, which still
@@ -429,6 +433,8 @@ _NUMERIC_BOUNDS = {
     # value is an opt-in ceiling. The grid's 8 panes per page is display only.
     "sessions.max_sessions": (0, 1024),
     "data.retention_days": (1, 3650),
+    # Above the privileged range; never the main listener's own port by default.
+    "remote.lan.port": (1024, 65535),
     "spend.monthly_reset_day": (1, 28),
     "spend.alert_at_percent": (1, 100),
     # 8 is the smallest legible mono size; past ~28 a pane holds too few columns
@@ -440,7 +446,7 @@ _NUMERIC_BOUNDS = {
 
 # Bounded leaves that must be whole numbers (JSON has one number type, so 3.0 is
 # accepted and 3.5 is not).
-_INT_LEAVES = frozenset({"appearance.background.blur"})
+_INT_LEAVES = frozenset({"appearance.background.blur", "remote.lan.port"})
 
 # Dotted key -> allowed values. A value outside the set is rejected rather than
 # stored: spend_guard branches on these strings, and an unknown mode would make

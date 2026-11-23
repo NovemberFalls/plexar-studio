@@ -16,7 +16,8 @@ output echoes request headers.
 **Where requests go.** Only to a STORED peer url, only under the fixed `/remote/v1`
 prefix, with every caller-supplied path segment percent-quoted so it cannot climb out
 of it. A url is validated once, at add time: `https` to any host, `http` only to a
-loopback host (a dev rig on this machine). Redirects are never followed, on HTTP or
+loopback host (a dev rig on this machine) or a private-network IP address (another
+Studio's local-network listener, which is plain HTTP by design). Redirects are never followed, on HTTP or
 WebSocket: a 3xx from a peer is reported, and a Cloudflare Access challenge (a 302 to
 `*.cloudflareaccess.com`, or an HTML page where JSON was expected) is classified as
 `access_required`, distinct from `unauthorized` (a 401 from Studio itself) and from
@@ -55,6 +56,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 import origin_guard
+import remote_lan
 
 logger = logging.getLogger("cockpit.peers")
 
@@ -116,10 +118,19 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def _is_private_ip(host: str) -> bool:
+    """A literal address on a private network. Never a name: a
+    name cannot be judged without resolving it, and what it resolves to can change."""
+    # The same ranges the other Studio's listener serves, minus link-local:
+    # 169.254.169.254 is a cloud metadata address, not a machine to pair with.
+    return remote_lan.is_private_address(host)
+
+
 def normalize_peer_url(raw: Any) -> str | None:
     """The peer's base url (`scheme://host[:port]`), or None when refused.
 
-    https to any host; http only to a loopback host. No credentials, query,
+    https to any host; http only to a loopback host or a private-network IP
+    address (another Studio's local-network listener). No credentials, query,
     fragment or path beyond a bare `/`: the stored value is an ORIGIN, and every
     request appends the fixed `/remote/v1` prefix to it.
     """
@@ -141,7 +152,7 @@ def normalize_peer_url(raw: Any) -> str | None:
         return None
     if parts.query or parts.fragment or parts.path not in ("", "/"):
         return None
-    if scheme == "http" and not _is_loopback(host):
+    if scheme == "http" and not (_is_loopback(host) or _is_private_ip(host)):
         return None
     shown = f"[{host}]" if ":" in host else host
     return f"{scheme}://{shown}" + (f":{port}" if port is not None else "")
@@ -621,7 +632,7 @@ async def add_peer(request: Request):
         return _error(400, "body must be a JSON object")
     url = normalize_peer_url(body.get("url"))
     if url is None:
-        return _error(400, "url must be https, or http to a loopback host, with no path")
+        return _error(400, "url must be https, or http to a loopback or private-network address, with no path")
     code = body.get("code")
     if not isinstance(code, str) or not code.strip():
         return _error(400, "code must not be empty")

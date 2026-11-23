@@ -39,6 +39,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 import app_paths
 import jsonl_watcher
+import remote_lan
 from remote_devices import Device, DeviceStore, PairingError
 
 logger = logging.getLogger("cockpit.remote")
@@ -324,7 +325,34 @@ def _lan_ipv4() -> str:
         sock.close()
 
 
+def _remote_lan() -> dict:
+    """The local-network mode as saved: {enabled, wanted, port}.
+
+    ``enabled`` is the user's choice on its own; ``wanted`` also needs remote
+    access on, and is what the listener and the pairing address follow.
+    """
+    settings: Any = {}
+    if _backend is not None:
+        try:
+            settings = _backend.settings() or {}
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to read settings for the local-network mode", exc_info=True)
+    wanted, port = remote_lan.lan_settings(settings)
+    remote = settings.get("remote") if isinstance(settings, dict) else None
+    lan = remote.get("lan") if isinstance(remote, dict) else None
+    return {"enabled": bool(isinstance(lan, dict) and lan.get("enabled")), "wanted": wanted, "port": port}
+
+
+def _lan_url(port: int) -> str:
+    return f"http://{_lan_ipv4()}:{port}"
+
+
 def _pairing_url() -> str:
+    # Local-network mode is a choice of HOW devices reach this machine, so it
+    # wins over a stored hostname: that address stays saved for switching back.
+    lan = _remote_lan()
+    if lan["wanted"]:
+        return _lan_url(lan["port"])
     hostname = _remote_hostname()
     if hostname:
         return hostname
@@ -598,7 +626,9 @@ def qr_payload(url: str, code: str) -> str:
     Cloudflare Access gate sits in front of the tunnel (``remote.access_required``).
     """
     payload: dict[str, Any] = {"v": 1, "url": url, "code": code}
-    if _access_required():
+    # Cloudflare Access sits in front of a tunnel, never in front of the
+    # local-network listener.
+    if _access_required() and not _remote_lan()["wanted"]:
         payload["access"] = True
     return json.dumps(payload)
 
@@ -632,8 +662,23 @@ async def remote_status():
     return {
         "enabled": remote_enabled(),
         "hostname": _remote_hostname(),
+        "lan": _lan_status(),
         "protocol": PROTOCOL_VERSION,
         "devices": [d.to_dict() for d in store.list_devices()],
+    }
+
+
+def _lan_status() -> dict:
+    """What the Settings page shows for local-network mode. No secret in it."""
+    saved = _remote_lan()
+    live = remote_lan.listener.status()
+    return {
+        "enabled": saved["enabled"],
+        "port": saved["port"],
+        "running": live["running"],
+        # The address is only offered while something is actually listening.
+        "url": _lan_url(live["port"]) if live["running"] else "",
+        "error": live["error"],
     }
 
 

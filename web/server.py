@@ -227,9 +227,24 @@ async def lifespan(app: FastAPI):
         app.state.window_watchdog_task = asyncio.create_task(
             window_watchdog.run(app_paths.data_path("logs", "dumps")))
 
+    # The local-network listener for Studio Remote (remote_lan.py): a second
+    # port serving only the device-token routes. Off unless remote.lan.enabled.
+    # Best-effort: a port that cannot be bound is a reported state, not a
+    # startup failure.
+    remote_lan.listener.configure(
+        app, settings_store.read_settings,
+        ws_ping_interval=_WS_PING_INTERVAL_S, ws_ping_timeout=_WS_PING_TIMEOUT_S,
+    )
+    await remote_lan.listener.reconcile()
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
     yield
+
+    try:
+        await remote_lan.listener.stop()
+    except Exception:
+        logger.error("Stopping the local-network listener failed", exc_info=True)
 
     window_task = getattr(app.state, "window_watchdog_task", None)
     if window_task:
@@ -3388,6 +3403,11 @@ async def put_settings(request: Request):
             await asyncio.to_thread(remote_tunnel.manager.reconcile)
         except Exception:
             logger.error("Tunnel reconcile after settings save failed", exc_info=True)
+
+    # The local-network listener follows remote.enabled and remote.lan.* the
+    # moment they are saved. reconcile() never raises.
+    if isinstance(body, dict) and isinstance(body.get("remote"), dict):
+        await remote_lan.listener.reconcile()
 
     return JSONResponse({"path": settings_store.settings_path(), "settings": effective})
 
@@ -7567,6 +7587,7 @@ app.include_router(remote_tunnel.router)
 # the phone does and proxies its sessions. Ordinary origin-guarded /api and /ws
 # routes; the peer's token stays in config.json and never reaches the page.
 import remote_peers  # noqa: E402 -- grouped with the remote router wiring above
+import remote_lan  # noqa: E402 -- the local-network listener; started in lifespan
 
 app.include_router(remote_peers.router)
 
