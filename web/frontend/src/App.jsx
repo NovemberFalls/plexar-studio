@@ -2315,15 +2315,24 @@ export default function App() {
   const orchRows = useMemo(() => orchestratorRows(orch.runs, sessions), [orch.runs, sessions]);
   const [dockRunId, setDockRunId] = useState(null);
   const [dockOpen, setDockOpen] = useState(() => {
-    try { return localStorage.getItem("cockpit-run-dock-open") !== "false"; } catch { return true; }
+    // Closed until the user opens it (a row in the Orchestrators list, or the
+    // top bar toggle): it takes 42% of the grid, which nobody asked for unprompted.
+    try { return localStorage.getItem("cockpit-run-dock-open") === "true"; } catch { return false; }
   });
   const setDockOpenPersist = useCallback((open) => {
     setDockOpen(open);
     try { localStorage.setItem("cockpit-run-dock-open", open ? "true" : "false"); } catch { /* unpersisted */ }
   }, []);
   const focusedRunId = runForSession(orch.runs, focusedSession?.terminalId)?.run_id || null;
+  const dockFocusRef = useRef(focusedSessionId);
   useEffect(() => {
+    const moved = dockFocusRef.current !== focusedSessionId;
+    dockFocusRef.current = focusedSessionId;
     if (focusedRunId) setDockRunId(focusedRunId);
+    // Focusing a pane with no open run drops a run picked earlier, so the dock
+    // follows the pane. A run that merely CLOSED while its pane stayed focused is
+    // kept, so its result can still be read.
+    else if (moved) setDockRunId(null);
   }, [focusedSessionId, focusedRunId]);
   const pickRun = useCallback((run, session) => {
     setDockRunId(run.run_id);
@@ -3024,6 +3033,8 @@ export default function App() {
                   setSidebarOpen={setSidebarOpen}
                   inspectorOpen={inspectorOpen}
                   setInspectorOpen={setInspectorOpen}
+                  runDockOpen={dockOpen}
+                  setRunDockOpen={setDockOpenPersist}
                   layoutMode={layoutMode}
                   setLayoutMode={setLayoutMode}
                   fillWidth={fillWidth}
@@ -3280,8 +3291,15 @@ export default function App() {
               )}
             </main>
 
-            {activeSection === "work" && dockOpen && dockRunId && (
-              <RunDock base={orch.base} runId={dockRunId} run={dockRun} onClose={() => setDockOpenPersist(false)} />
+            {activeSection === "work" && dockOpen && (
+              <RunDock
+                base={orch.base}
+                runId={dockRunId}
+                run={dockRun}
+                sessionId={focusedSession?.terminalId || null}
+                sessionName={focusedSession?.name || null}
+                onClose={() => setDockOpenPersist(false)}
+              />
             )}
 
             {/* Settings owns INTENT (Phase 4). It renders instead of the panes +

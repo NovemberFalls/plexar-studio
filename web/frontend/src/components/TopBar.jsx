@@ -5,7 +5,7 @@
    the single source for the model, permission-mode and effort vocabularies a
    session can be configured with. */
 import { useState, useEffect } from "react";
-import { PanelLeft, PanelRight, ChevronDown, KeyRound, Cpu, LayoutGrid, Rows3, StretchHorizontal } from "lucide-react";
+import { PanelLeft, PanelRight, Workflow, ChevronDown, KeyRound, Cpu, LayoutGrid, Rows3, StretchHorizontal } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import PlexarKeyModal from "./PlexarKeyModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
@@ -77,6 +77,10 @@ export default function TopBar({
   // is deliberately the mirror of the sidebar's: same icon family, same header.
   inspectorOpen,
   setInspectorOpen,
+  // The run dock (the framework's live picture of an orchestration run). Same
+  // rule as the Inspector: a panel that can be closed needs a way back here.
+  runDockOpen,
+  setRunDockOpen,
   // "grid" | "scroll". Optional: hosts that render no pane area omit it.
   layoutMode,
   setLayoutMode,
@@ -1229,6 +1233,26 @@ export default function TopBar({
     </button>
   );
 
+  const runDockToggle = !setRunDockOpen ? null : (
+    <button
+      onClick={() => setRunDockOpen(!runDockOpen)}
+      className="transition-colors hover-bg-surface"
+      style={{
+        display: "flex",
+        padding: 5,
+        borderRadius: 7,
+        color: runDockOpen
+          ? "var(--cc-accent, var(--accent))"
+          : "var(--cc-dim, var(--text-secondary))",
+      }}
+      title={runDockOpen ? "Hide run view" : "Show run view (the focused session's orchestration)"}
+      aria-label="Toggle run view"
+      aria-pressed={Boolean(runDockOpen)}
+    >
+      <Workflow size={17} />
+    </button>
+  );
+
   const modal = (
     <>
       <OpenRouterModal
@@ -1254,7 +1278,7 @@ export default function TopBar({
         {fillToggle}
         {controls}
         {sidebarToggle}
-        {inspectorToggle}
+        {runDockToggle}{inspectorToggle}
         {modal}
       </div>
     );
@@ -1271,7 +1295,7 @@ export default function TopBar({
         {fillToggle}
         <LogoMark size={25} />
       </div>
-      <div className="flex items-center" style={{ gap: 7 }}>{controls}{inspectorToggle}</div>
+      <div className="flex items-center" style={{ gap: 7 }}>{controls}{runDockToggle}{inspectorToggle}</div>
       {modal}
     </header>
   );

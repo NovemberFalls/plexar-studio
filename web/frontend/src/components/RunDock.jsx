@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { embedUrl, originOf, stageLabel } from "../utils/orchRuns";
+import { embedUrl, embedSessionUrl, originOf, stageLabel } from "../utils/orchRuns";
 
 /**
  * The framework's live picture of one run, docked on the right of the sessions
@@ -8,8 +8,13 @@ import { embedUrl, originOf, stageLabel } from "../utils/orchRuns";
  * later run change is a postMessage (the frame re-points itself), never a reload.
  * Messages from the frame are trusted only from base's origin AND this frame's own
  * window, and every field is rendered as text through stageLabel.
+ *
+ * Two modes. With `runId` it shows that run. Without one it FOLLOWS `sessionId`
+ * (the focused pane): the frame shows that session's newest open run and picks up
+ * the next one when it starts, which is what the top bar toggle opens when no run
+ * was picked from the Orchestrators list.
  */
-export default function RunDock({ base, runId, run, onClose }) {
+export default function RunDock({ base, runId, run, sessionId = null, sessionName = null, onClose }) {
   const frameRef = useRef(null);
   const origin = originOf(base);
   const [readyN, setReadyN] = useState(0);
@@ -18,12 +23,16 @@ export default function RunDock({ base, runId, run, onClose }) {
   // Frame URL: fixed at the run shown when `base` last changed, so a run change
   // never alters src (the postMessage below carries it).
   const [ready, setReady] = useState(false);
-  const [frame, setFrame] = useState({ base, run: runId });
+  const [frame, setFrame] = useState({ base, run: runId, session: sessionId });
   if (frame.base !== base) {
-    setFrame({ base, run: runId });
+    setFrame({ base, run: runId, session: sessionId });
     setReady(false);
   }
-  const src = base ? embedUrl(base, frame.run) : null;
+  const hasTarget = Boolean(frame.run || frame.session);
+  const src = !base || !hasTarget ? null
+    : frame.run ? embedUrl(base, frame.run) : embedSessionUrl(base, frame.session);
+  // The frame only exists once there is something to show; adopt the first target.
+  if (!hasTarget && (runId || sessionId)) setFrame({ base, run: runId, session: sessionId });
 
   useEffect(() => {
     const onMessage = (event) => {
@@ -44,17 +53,22 @@ export default function RunDock({ base, runId, run, onClose }) {
   }, [origin]);
 
   useEffect(() => {
-    if (!ready || !origin || !runId) return;
+    if (!ready || !origin) return;
     const win = frameRef.current?.contentWindow;
-    if (win) win.postMessage({ type: "plexar-run", run: runId }, origin);
-  }, [ready, readyN, runId, origin]);
+    if (!win) return;
+    if (runId) win.postMessage({ type: "plexar-run", run: runId }, origin);
+    else if (sessionId) win.postMessage({ type: "plexar-session", session: sessionId }, origin);
+  }, [ready, readyN, runId, sessionId, origin]);
 
   // Keep the last open reading so a run that closes still names its task and stage.
   const [last, setLast] = useState(run);
   if (run && last !== run) setLast(run);
   const shown = run || (last?.run_id === runId ? last : null);
-  const closed = !run;
-  const stage = embedStage && embedStage.run === runId && embedStage.stage ? embedStage.stage : shown?.stage;
+  const following = !runId;
+  const closed = !following && !run;
+  const stage = following
+    ? (embedStage?.stage || null)
+    : (embedStage && embedStage.run === runId && embedStage.stage ? embedStage.stage : shown?.stage);
 
   return (
     <aside
@@ -77,7 +91,9 @@ export default function RunDock({ base, runId, run, onClose }) {
           {src ? "Orchestration run" : (shown?.task || runId)}
         </span>
         <span style={{ fontSize: 10, color: "var(--cc-accent)" }}>
-          {closed ? `Run closed${stage ? ` at ${stageLabel(stage)}` : ""}` : stageLabel(stage)}
+          {following
+            ? (sessionId ? `${sessionName || "This session"}${stage ? ` · ${stageLabel(stage)}` : ""}` : "")
+            : closed ? `Run closed${stage ? ` at ${stageLabel(stage)}` : ""}` : stageLabel(stage)}
         </span>
         <button
           type="button"
@@ -102,7 +118,7 @@ export default function RunDock({ base, runId, run, onClose }) {
         />
       ) : (
         <div className="flex-1 flex items-center justify-center" style={{ fontSize: 12, color: "var(--cc-muted)" }}>
-          Plexar-Framework is not reachable.
+          {base ? "Focus a session to see its orchestration run." : "Plexar-Framework is not reachable."}
         </div>
       )}
     </aside>

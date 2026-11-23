@@ -72,6 +72,11 @@ export function embedUrl(base, runId) {
   return `${String(base || "").replace(/\/+$/, "")}/embed?run=${encodeURIComponent(runId)}`;
 }
 
+/** The embed that follows one session: its newest open run, and later ones as they start. */
+export function embedSessionUrl(base, sessionId) {
+  return `${String(base || "").replace(/\/+$/, "")}/embed?session=${encodeURIComponent(sessionId)}`;
+}
+
 /** Origin of the framework base, or null when it is not a URL. */
 export function originOf(base) {
   try {
