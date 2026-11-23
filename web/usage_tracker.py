@@ -27,6 +27,10 @@ _RANGE_KEYS = ("24h", "7d", "30d", "all")
 
 logger = logging.getLogger("cockpit.usage")
 
+# Appended to a date prefix to form the exclusive upper bound of a ts range: no
+# timestamp starting with that date sorts at or after it.
+_PREFIX_END = chr(0x10FFFF)
+
 # Pricing in USD per 1M tokens. cache_write = 1.25x input, cache_read = 0.1x input.
 PRICING = {
     "claude-fable-5":  {"input": 10.0, "output": 50.0},
@@ -746,13 +750,16 @@ class UsageTracker:
     def daily_summary(self, day: str | None = None) -> dict:
         if day is None:
             day = date.today().isoformat()
-        # Match rows whose ISO timestamp date component equals `day`.
+        # Match rows whose ISO timestamp starts with `day`, as a RANGE so idx_usage_ts
+        # is used. `substr(ts, 1, 10) = ?` selected the same rows but read every row
+        # to do it: measured 2026-11-22 on a 559,423-row store, 213 ms per call, and
+        # the desktop asks every 3 s. That was about a sixth of the sidecar's CPU.
         with self._lock:
             rows = self._conn.execute(
                 "SELECT terminal_id, model, input_tokens, output_tokens, "
                 "cache_creation_tokens, cache_read_tokens, cost_usd "
-                "FROM usage_events WHERE substr(ts, 1, 10) = ?",
-                (day,),
+                "FROM usage_events WHERE ts >= ? AND ts < ?",
+                (day, day + _PREFIX_END),
             ).fetchall()
 
         inp = out = cc = cr = 0

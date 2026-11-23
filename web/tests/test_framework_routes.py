@@ -528,3 +528,28 @@ def test_framework_session_rows_carry_only_id_name_cwd_parent(monkeypatch):
     monkeypatch.setattr(server.pty_manager, "sessions", {"t1": fake})
     assert server._framework_session_rows() == [
         {"id": "t1", "name": "studio", "cwd": "C:/x", "parent_id": None}]
+
+
+def test_old_events_refusal_is_logged_once_without_a_traceback(monkeypatch, caplog):
+    import logging
+
+    def gone(url):
+        raise _http(url, 404)
+
+    monkeypatch.setattr(framework_client, "_get_json", gone)
+    monkeypatch.setattr(framework_client, "_events_refusal_logged", set())
+    log = logging.getLogger("cockpit.framework")
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    log.addHandler(handler)
+    level = log.level
+    log.setLevel(logging.INFO)  # the suite runs this logger at WARNING
+    try:
+        for _ in range(5):
+            assert framework_client.fetch_events(BASE, None)["reason"] == "http 404"
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(level)
+    refused = [r for r in records if "/api/events refused" in r.getMessage()]
+    assert len(refused) == 1 and refused[0].exc_info is None

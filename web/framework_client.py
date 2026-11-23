@@ -56,6 +56,7 @@ _MAX_PAGES = 5
 # 2.1.41 QA). "Not running" is an expected state: log the transition once, with the
 # traceback, and stay quiet until it answers again.
 _unreachable_logged: set[str] = set()
+_events_refusal_logged: set[str] = set()
 
 
 def _log_unreachable(base: str, exc: BaseException) -> None:
@@ -233,7 +234,12 @@ def fetch_events(base: str, since: Optional[str]) -> dict:
             if len(page_events) != _EVENTS_LIMIT or not cursor:
                 break
     except urllib.error.HTTPError as exc:
-        logger.info("framework /api/events refused: %s", exc, exc_info=True)
+        # A framework from the orch era has no /api/events. The desktop still asks
+        # every 10 s for older ones, and this used to write a full traceback each
+        # time (259 of the last 400 log lines on 2026-11-22).
+        if validated not in _events_refusal_logged:
+            _events_refusal_logged.add(validated)
+            logger.info("framework /api/events refused (logged once): %s", exc)
         return {"up": False, "base": validated, "reason": f"http {exc.code}"}
     except urllib.error.URLError as exc:
         _log_unreachable(validated, exc)
