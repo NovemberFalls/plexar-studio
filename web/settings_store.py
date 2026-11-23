@@ -339,7 +339,7 @@ DEFAULT_SETTINGS = {
     "appearance": {
         "theme": None, "accent": None, "glow_enabled": True, "glow_size": 30,
         "token_overrides": {}, "user_palettes": {},
-        "background": {"enabled": False, "dim": 0.55, "blur": 0, "pane_opacity": 0.85},
+        "background": {"enabled": False, "dim": 0.55, "blur": 0, "pane_opacity": 0.85, "speed": 1.0},
     },
     "data": {"retention_days": 90},
     # Spend guardrails. These paths are the contract the Settings UI
@@ -423,6 +423,8 @@ _NUMERIC_BOUNDS = {
     "appearance.background.dim": (0.0, 0.95),
     "appearance.background.blur": (0, 40),
     "appearance.background.pane_opacity": (0.3, 1.0),
+    # Playback rate for an animated background; 0 pauses on the current frame.
+    "appearance.background.speed": (0.0, 4.0),
     # 0 means NO LIMIT (owner ruling 2026-10-06) and is the default; a positive
     # value is an opt-in ceiling. The grid's 8 panes per page is display only.
     "sessions.max_sessions": (0, 1024),

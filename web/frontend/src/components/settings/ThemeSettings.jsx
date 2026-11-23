@@ -42,6 +42,7 @@
 import { useRef, useState } from "react";
 import { Palette, Sparkles } from "lucide-react";
 import { useTheme } from "../../hooks/useTheme.jsx";
+import { useBackgroundInfo } from "../../hooks/backgroundInfo.js";
 
 // ── tokens / shared style fragments ───────────────────────
 const ACCENT_FG = "#0f1216"; // the one permitted literal: accent-button foreground
@@ -58,6 +59,7 @@ const BG_ENABLED_PATH = "appearance.background.enabled";
 const BG_DIM_PATH = "appearance.background.dim";
 const BG_BLUR_PATH = "appearance.background.blur";
 const BG_OPACITY_PATH = "appearance.background.pane_opacity";
+const BG_SPEED_PATH = "appearance.background.speed";
 const BG_BUTTON = {
   height: 26, padding: "0 12px", borderRadius: 999, fontSize: 11, fontWeight: 600,
   fontFamily: "inherit", background: "var(--cc-elev)", border: "1px solid var(--cc-border)",
@@ -383,6 +385,12 @@ export default function ThemeSettings({ get, setField, isDirty }) {
   const bgDim = Number(get(BG_DIM_PATH, 0.55));
   const bgBlur = Number(get(BG_BLUR_PATH, 0));
   const bgOpacity = Number(get(BG_OPACITY_PATH, 0.85));
+  const bgSpeed = Number(get(BG_SPEED_PATH, 1));
+  const bgInfo = useBackgroundInfo();
+  // The slider is honest: it is enabled only where it can change something.
+  const speedReason = typeof ImageDecoder === "undefined" ? "Not supported in this browser"
+    : bgInfo.type && !["image/gif", "image/webp"].includes(bgInfo.type) ? "Applies to animated images"
+      : bgInfo.animated === false ? "This image is not animated" : null;
   const bgDirty = Boolean(isDirty?.("appearance.background"));
   const handleBg = (path, key, value) => {
     setBackgroundConfig?.({ [key]: value });
@@ -704,8 +712,9 @@ export default function ThemeSettings({ get, setField, isDirty }) {
           { label: "Dim", path: BG_DIM_PATH, key: "dim", value: bgDim, min: 0, max: 0.95, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
           { label: "Blur", path: BG_BLUR_PATH, key: "blur", value: bgBlur, min: 0, max: 40, step: 1, fmt: (v) => `${v}px` },
           { label: "Panel opacity", path: BG_OPACITY_PATH, key: "paneOpacity", value: bgOpacity, min: 0.3, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
+          { label: "Speed", path: BG_SPEED_PATH, key: "speed", value: bgSpeed, min: 0, max: 4, step: 0.05, fmt: (v) => (v === 0 ? "Paused" : `${v.toFixed(2)}x`), reason: speedReason },
         ].map((r) => (
-          <div key={r.path} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, opacity: bgEnabled ? 1 : 0.45 }}>
+          <div key={r.path} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, opacity: bgEnabled && !r.reason ? 1 : 0.45 }}>
             <span style={{ ...LABEL, width: 96, flexShrink: 0 }}>{r.label}</span>
             <input
               type="range"
@@ -713,7 +722,7 @@ export default function ThemeSettings({ get, setField, isDirty }) {
               max={r.max}
               step={r.step}
               value={r.value}
-              disabled={!bgEnabled}
+              disabled={!bgEnabled || Boolean(r.reason)}
               onChange={(e) => {
                 const n = Number(e.target.value);
                 if (!Number.isNaN(n)) handleBg(r.path, r.key, n);
@@ -726,6 +735,9 @@ export default function ThemeSettings({ get, setField, isDirty }) {
             <span style={{ fontSize: 12, fontWeight: 700, minWidth: 44, textAlign: "right", color: "var(--cc-fg)" }}>
               {r.fmt(r.value)}
             </span>
+            {r.reason && (
+              <span data-testid={`reason-${r.key}`} style={{ fontSize: 11, color: "var(--cc-muted)" }}>{r.reason}</span>
+            )}
           </div>
         ))}
       </div>

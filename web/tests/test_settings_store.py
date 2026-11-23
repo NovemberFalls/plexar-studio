@@ -395,7 +395,7 @@ def test_removed_voice_and_lane_broker_keys_survive_a_read_and_a_put(isolated_se
 
 def test_background_defaults():
     assert settings_store.DEFAULT_SETTINGS["appearance"]["background"] == {
-        "enabled": False, "dim": 0.55, "blur": 0, "pane_opacity": 0.85,
+        "enabled": False, "dim": 0.55, "blur": 0, "pane_opacity": 0.85, "speed": 1.0,
     }
 
 
@@ -403,6 +403,7 @@ def test_background_defaults():
     ("dim", (-0.1, 0.96), (0, 0.95)),
     ("blur", (-1, 41, 2.5), (0, 40)),
     ("pane_opacity", (0.29, 1.01), (0.3, 1.0)),
+    ("speed", (-0.1, 4.1, "fast"), (0, 4, 0.5)),
 ])
 def test_background_bounds(isolated_settings, leaf, bad, good):
     for v in bad:

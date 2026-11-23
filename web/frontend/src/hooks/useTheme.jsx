@@ -84,7 +84,7 @@ function parseMirrorPayload(raw, sanitize) {
   }
 }
 
-const DEFAULT_BACKGROUND = Object.freeze({ enabled: false, dim: 0.55, blur: 0, paneOpacity: 0.85 });
+const DEFAULT_BACKGROUND = Object.freeze({ enabled: false, dim: 0.55, blur: 0, paneOpacity: 0.85, speed: 1 });
 
 export function ThemeProvider({ children }) {
   const [themeId, setThemeId] = useState(() => getSavedTheme() || DEFAULT_THEME_ID);
@@ -107,7 +107,8 @@ export function ThemeProvider({ children }) {
     setBackgroundConfigState((prev) => {
       const next = { ...prev, ...patch };
       return next.enabled === prev.enabled && next.dim === prev.dim
-        && next.blur === prev.blur && next.paneOpacity === prev.paneOpacity ? prev : next;
+        && next.blur === prev.blur && next.paneOpacity === prev.paneOpacity
+        && next.speed === prev.speed ? prev : next;
     });
   }, []);
   const backgroundActive = Boolean(backgroundConfig.enabled && backgroundImageSet);
