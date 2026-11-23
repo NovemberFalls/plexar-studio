@@ -219,6 +219,18 @@ describe("RemoteSettings — tunnel connector", () => {
     const note = await screen.findByTestId("tunnel-foreign-note");
     expect(note).toHaveAttribute("role", "note");
     expect(screen.queryByTestId("tunnel-error")).toBeNull();
+    expect(note).toHaveTextContent("stop it first or leave this off");
+  });
+
+  it("does not tell a healthy connector to stop because another cloudflared exists", async () => {
+    globalThis.fetch = makeFetchMock({
+      tunnel: { ...TUNNEL_RUNNING, foreign_running: true },
+    });
+    render(<RemoteSettings {...makeSettingsProps()} />);
+
+    const note = await screen.findByTestId("tunnel-foreign-note");
+    expect(note).toHaveTextContent("That is fine if it serves a different tunnel");
+    expect(note).not.toHaveTextContent("Stop it first");
   });
 
   it("shows the log tail only when expanded", async () => {

@@ -1,10 +1,13 @@
 /**
  * RemoteSettings — the Settings ▸ Remote page (Studio Remote / Plexar Mobile pairing).
  *
- * The page is a 1-2-3 flow, in the order a person has to do it: (1) turn remote
- * access on, (2) say how other devices reach this machine, (3) pair a device.
- * Below those sit the paired devices and, as the OTHER direction, the machines
- * this one controls (PeersCard). The Plexar Harness card lives in Keys & secrets.
+ * Two tabs, because the page serves two unrelated jobs. "Let devices in" is a
+ * 1-2-3 flow in the order a person has to do it: (1) turn remote access on,
+ * (2) say how other devices reach this machine, (3) pair a device, then the
+ * paired devices. Once steps 1 and 2 are saved they fold into one status line,
+ * since setup happens once and the device list is what people come back for.
+ * "Control another machine" is the OTHER direction (PeersCard) and needs none
+ * of those steps. The Plexar Harness card lives in Keys & secrets.
  *
  * Remote access is OPT-IN and OFF by default (SPEC §1). This page:
  *   - toggles `remote.enabled` and edits `remote.hostname` through useSettings
@@ -43,6 +46,19 @@ const TUNNEL_STATE_TOKEN = {
 };
 
 const TUNNEL_POLL_MS = 3000;
+
+/** An active device not seen for this long is flagged: it is still a live credential. */
+const STALE_AFTER_DAYS = 30;
+
+// Which tab was open last. A per-viewer convenience, not a setting.
+const TAB_KEY = "plexar-remote-tab";
+function readTab() {
+  try {
+    return localStorage.getItem(TAB_KEY) === "control" ? "control" : "host";
+  } catch {
+    return "host";
+  }
+}
 
 const WINGET_LINE = "winget install --id Cloudflare.cloudflared";
 
@@ -270,54 +286,98 @@ function RevokeConfirm({ device, onCancel, onConfirm, busy, error }) {
   );
 }
 
-function DevicesTable({ devices, onRevokeRequest }) {
-  if (!devices || devices.length === 0) {
+/** Whole days since `iso`, or null when it is missing or unreadable. */
+function daysSince(iso, now) {
+  const t = Date.parse(iso || "");
+  if (Number.isNaN(t)) return null;
+  return Math.floor((now - t) / 86400000);
+}
+
+function DevicesTable({ devices, onRevokeRequest, now }) {
+  const [showRevoked, setShowRevoked] = useState(false);
+  const all = devices || [];
+  if (all.length === 0) {
     return (
       <div style={{ fontSize: 11, color: "var(--cc-muted)", padding: "10px 0" }}>
         No devices paired yet.
       </div>
     );
   }
+  const seen = (d) => Date.parse(d.last_seen || d.created_at || "") || 0;
+  // Most recently seen first: the device in use is the one being looked for.
+  const active = all.filter((d) => !d.revoked_at).sort((a, b) => seen(b) - seen(a));
+  const revoked = all.filter((d) => d.revoked_at);
+  const rows = showRevoked ? [...active, ...revoked] : active;
   return (
-    <table
-      data-testid="devices-table"
-      style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, marginTop: 6 }}
-    >
-      <thead>
-        <tr style={{ textAlign: "left", color: "var(--cc-muted)" }}>
-          <th style={{ padding: "4px 6px", fontWeight: 600 }}>Name</th>
-          <th style={{ padding: "4px 6px", fontWeight: 600 }}>Created</th>
-          <th style={{ padding: "4px 6px", fontWeight: 600 }}>Last seen</th>
-          <th style={{ padding: "4px 6px", fontWeight: 600 }}>Status</th>
-          <th style={{ padding: "4px 6px", fontWeight: 600 }} />
-        </tr>
-      </thead>
-      <tbody>
-        {devices.map((d) => {
-          const revoked = Boolean(d.revoked_at);
-          return (
-            <tr key={d.id} data-testid={`device-row-${d.id}`} style={{ borderTop: "1px solid var(--cc-line)" }}>
-              <td style={{ padding: "6px" }}>{d.name}</td>
-              <td style={{ padding: "6px", color: "var(--cc-dim)" }}>{fmtTime(d.created_at)}</td>
-              <td style={{ padding: "6px", color: "var(--cc-dim)" }}>{fmtTime(d.last_seen)}</td>
-              <td style={{ padding: "6px", color: revoked ? "var(--cc-error)" : "var(--cc-idle)" }}>
-                {revoked ? "Revoked" : "Active"}
-              </td>
-              <td style={{ padding: "6px", textAlign: "right" }}>
-                {!revoked && (
-                  <ActionButton
-                    label="Revoke"
-                    danger
-                    testId={`revoke-${d.id}`}
-                    onClick={() => onRevokeRequest(d)}
-                  />
-                )}
-              </td>
+    <>
+      {active.length === 0 && (
+        <div data-testid="devices-none-active" style={{ fontSize: 11, color: "var(--cc-muted)", padding: "10px 0 0" }}>
+          No device can reach this machine right now.
+        </div>
+      )}
+      {rows.length > 0 && (
+        <table
+          data-testid="devices-table"
+          style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, marginTop: 6 }}
+        >
+          <thead>
+            <tr style={{ textAlign: "left", color: "var(--cc-muted)" }}>
+              <th style={{ padding: "4px 6px", fontWeight: 600 }}>Name</th>
+              <th style={{ padding: "4px 6px", fontWeight: 600 }}>Created</th>
+              <th style={{ padding: "4px 6px", fontWeight: 600 }}>Last seen</th>
+              <th style={{ padding: "4px 6px", fontWeight: 600 }}>Status</th>
+              <th style={{ padding: "4px 6px", fontWeight: 600 }} />
             </tr>
-          );
-        })}
-      </tbody>
-    </table>
+          </thead>
+          <tbody>
+            {rows.map((d) => {
+              const isRevoked = Boolean(d.revoked_at);
+              const idle = isRevoked ? null : daysSince(d.last_seen || d.created_at, now);
+              const stale = idle !== null && idle >= STALE_AFTER_DAYS;
+              return (
+                <tr key={d.id} data-testid={`device-row-${d.id}`} style={{ borderTop: "1px solid var(--cc-line)" }}>
+                  <td style={{ padding: "6px" }}>{d.name}</td>
+                  <td style={{ padding: "6px", color: "var(--cc-dim)" }}>{fmtTime(d.created_at)}</td>
+                  <td style={{ padding: "6px", color: "var(--cc-dim)" }}>{fmtTime(d.last_seen)}</td>
+                  <td
+                    style={{
+                      padding: "6px",
+                      color: isRevoked ? "var(--cc-error)" : stale ? "var(--cc-waiting)" : "var(--cc-idle)",
+                    }}
+                  >
+                    {isRevoked ? "Revoked" : "Active"}
+                    {stale && (
+                      <span data-testid={`device-stale-${d.id}`}>
+                        {" "}· not seen for {idle} days. Still has access; revoke it if it is not in use.
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: "6px", textAlign: "right" }}>
+                    {!isRevoked && (
+                      <ActionButton
+                        label="Revoke"
+                        danger
+                        testId={`revoke-${d.id}`}
+                        onClick={() => onRevokeRequest(d)}
+                      />
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {revoked.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <ActionButton
+            label={showRevoked ? "Hide revoked" : `Show ${revoked.length} revoked`}
+            testId="devices-show-revoked"
+            onClick={() => setShowRevoked((v) => !v)}
+          />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -334,6 +394,18 @@ export default function RemoteSettings({ get, setField }) {
   // it follows what the connector says; choosing writes NO setting.
   const [reach, setReach] = useState(null);
   const [configOpen, setConfigOpen] = useState(false);
+
+  const [tab, setTab] = useState(readTab);
+  const chooseTab = useCallback((next) => {
+    setTab(next);
+    try {
+      localStorage.setItem(TAB_KEY, next);
+    } catch {
+      // Remembering the tab is a convenience; the page works without it.
+    }
+  }, []);
+  // null = follow the saved state: steps 1 and 2 fold away once both are saved.
+  const [setupOpen, setSetupOpen] = useState(null);
 
   const [cfConfig, setCfConfig] = useState(null); // {hostname, config_yml, commands}
   const [cfConfigError, setCfConfigError] = useState(null);
@@ -706,7 +778,10 @@ export default function RemoteSettings({ get, setField }) {
     : !savedAddress
       ? "Set this machine's address in step 2 and save."
       : null;
-
+  const statusLoading = status === null && !statusError;
+  const setupDone = Boolean(status?.enabled) && savedAddress;
+  const showSetup = !statusLoading && (setupOpen ?? !setupDone);
+  const foreignWhileHealthy = tunnelState === "running" && (tunnel?.connections ?? 0) > 0;
 
   const addressField = (
     <div style={{ marginTop: 8 }}>
@@ -733,7 +808,7 @@ export default function RemoteSettings({ get, setField }) {
         }}
       />
       <p style={{ fontSize: 10, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 0" }}>
-        The base URL a device should use, e.g. your tunnel hostname. Save changes after editing it.
+        The web address a phone or another computer uses to reach this machine. Save changes after editing it.
       </p>
     </div>
   );
@@ -785,12 +860,74 @@ export default function RemoteSettings({ get, setField }) {
   );
 
   const REACH_OPTIONS = [
-    { id: "studio-tunnel", label: "Studio runs a Cloudflare Tunnel for me" },
+    { id: "studio-tunnel", label: "I have a Cloudflare Tunnel token (Studio runs the connector)" },
     { id: "own-address", label: "I already have an address for this machine" },
   ];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
+      <div role="tablist" aria-label="Remote" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {[
+          { id: "host", label: "Let devices in" },
+          { id: "control", label: "Control another machine" },
+        ].map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            data-testid={`remote-tab-${t.id}`}
+            onClick={() => chooseTab(t.id)}
+            className="rounded transition-colors hover-bg-elevated"
+            style={{
+              height: 28,
+              padding: "0 14px",
+              fontSize: 12,
+              fontWeight: 700,
+              borderRadius: 8,
+              cursor: "pointer",
+              background: tab === t.id ? tint("var(--cc-accent)", 14) : "var(--cc-elev)",
+              color: tab === t.id ? "var(--cc-accent)" : "var(--cc-dim)",
+              border: `1px solid ${tab === t.id ? tint("var(--cc-accent)", 45) : "var(--cc-border)"}`,
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "host" && (
+        <>
+      {statusLoading && (
+        <div data-testid="remote-loading" style={{ fontSize: 11, color: "var(--cc-muted)" }}>
+          Loading…
+        </div>
+      )}
+
+      {setupDone && (
+        <div style={CARD} data-testid="card-setup-summary">
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-idle)" }}>Remote access is on</span>
+            <span data-testid="setup-summary-address" style={{ fontSize: 12, color: "var(--cc-fg)", overflowWrap: "anywhere" }}>
+              {status.hostname}
+            </span>
+            {reachChoice === "studio-tunnel" && (
+              <span data-testid="setup-summary-tunnel" style={{ fontSize: 11, color: tunnelToken }}>
+                connector {tunnelState}
+              </span>
+            )}
+            <span style={{ flex: 1 }} />
+            <ActionButton
+              label={showSetup ? "Hide setup" : "Change setup"}
+              testId="setup-change"
+              onClick={() => setSetupOpen(!showSetup)}
+            />
+          </div>
+        </div>
+      )}
+
+      {showSetup && (
+        <>
       {/* ── 1 · Remote access toggle ─────────────────────── */}
       <div style={CARD} data-testid="card-remote-toggle">
         <CardHeader icon={RadioTower} token="var(--cc-accent)" name="1 · Turn on remote access" />
@@ -815,9 +952,9 @@ export default function RemoteSettings({ get, setField }) {
           </span>
         </label>
         <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 8px" }}>
-          Off by default. When off, every <code>/remote/v1/*</code> route (pairing included)
-          answers 404. Turning this on and saving lets a paired phone or another computer list
-          sessions, start one, and attach to its live output through an address you control.
+          Off by default, and while it is off nothing outside this computer can reach Studio.
+          Turning this on and saving lets a device you have paired see your sessions, start one,
+          and type into it.
         </p>
 
         {statusError && (
@@ -830,12 +967,14 @@ export default function RemoteSettings({ get, setField }) {
       {/* ── 2 · How devices reach this machine ───────────── */}
       <div style={CARD} data-testid="card-reach">
         <CardHeader icon={Cloud} token="var(--cc-macro)" name="2 · How devices reach this machine" />
-        <div data-testid="reach-status" style={{ fontSize: 11, color: "var(--cc-dim)", padding: "6px 0", overflowWrap: "anywhere" }}>
-          {hostnameDraft ? hostnameDraft : "No address set"}
-        </div>
-        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "0 0 8px" }}>
-          The address is only transport. Pairing is the lock: a device still needs a device token
-          from step 3 to do anything once it arrives.
+        {!hostnameDraft && (
+          <div data-testid="reach-status" style={{ fontSize: 11, color: "var(--cc-waiting)", padding: "6px 0 0" }}>
+            No address set
+          </div>
+        )}
+        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "6px 0 8px" }}>
+          The address only gets a device to this machine. It still has to be paired in step 3
+          before it can do anything.
         </p>
 
         <div role="radiogroup" aria-label="How devices reach this machine" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -880,10 +1019,10 @@ export default function RemoteSettings({ get, setField }) {
             {testUrl}
             <div style={{ marginTop: 12 }} data-testid="tunnel-connector">
         <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 8px" }}>
-          Studio runs <code>cloudflared</code> for you — hidden, and restarted automatically if it
-          dies. Paste the connector token from your Cloudflare dashboard and press Start. The token
-          is stored with your API keys, never in the exportable settings file, and is never shown
-          again.
+          You create the tunnel and its public hostname in your Cloudflare dashboard, then paste
+          its connector token here. Studio starts the <code>cloudflared</code> program installed on
+          this computer, keeps it hidden, and restarts it if it stops. The token is stored with
+          your API keys, never in the exportable settings file, and is never shown again.
         </p>
 
         <div
@@ -1037,9 +1176,10 @@ export default function RemoteSettings({ get, setField }) {
         )}
 
         {tunnel?.foreign_running && (
-          <Callout token="var(--cc-waiting)" testId="tunnel-foreign-note">
-            Another cloudflared is already running outside Studio. Stop it first, or leave this off
-            — two connectors for the same tunnel will fight over the same hostname.
+          <Callout token={foreignWhileHealthy ? "var(--cc-muted)" : "var(--cc-waiting)"} testId="tunnel-foreign-note">
+            {foreignWhileHealthy
+              ? "Another cloudflared is also running on this computer. That is fine if it serves a different tunnel (another app's, for example). Stop one only if both are connectors for this same tunnel."
+              : "Another cloudflared is already running outside Studio. If it is a connector for this same tunnel, stop it first or leave this off: two connectors for one tunnel fight over the hostname. A connector for a different tunnel is fine."}
           </Callout>
         )}
 
@@ -1174,6 +1314,8 @@ export default function RemoteSettings({ get, setField }) {
           </div>
         )}
       </div>
+        </>
+      )}
 
       {/* ── 3 · Pair a device ────────────────────────────── */}
       <div style={CARD} data-testid="card-pairing">
@@ -1247,7 +1389,7 @@ export default function RemoteSettings({ get, setField }) {
               <CopyButton text={pairing.qr_payload} testId="copy-pairing-link" label="Copy pairing link" />
             </div>
             <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "6px 0 0" }}>
-              Paste it into Settings &gt; Remote &gt; Machines this one controls on the other computer.
+              On the other computer, paste it into Settings &gt; Remote &gt; Control another machine.
             </p>
           </div>
         )}
@@ -1256,17 +1398,25 @@ export default function RemoteSettings({ get, setField }) {
       {/* ── Devices ───────────────────────────────────────── */}
       <div style={CARD} data-testid="card-devices">
         <CardHeader icon={ShieldOff} token="var(--cc-waiting)" name="Devices that can reach this machine" />
-        <DevicesTable devices={status?.devices} onRevokeRequest={requestRevoke} />
+        <DevicesTable devices={status?.devices} onRevokeRequest={requestRevoke} now={now} />
       </div>
 
+        </>
+      )}
+
       {/* ── The other direction ───────────────────────────── */}
-      <div data-testid="heading-controls" style={{ marginTop: 8 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--cc-fg)" }}>Machines this one controls</div>
-        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 0" }}>
-          This is the other direction: this computer driving another computer&rsquo;s Studio.
-        </p>
-      </div>
-      <PeersCard />
+      {tab === "control" && (
+        <>
+          <div data-testid="heading-controls">
+            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--cc-fg)" }}>Machines this one controls</div>
+            <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 0" }}>
+              Use another computer&rsquo;s Studio from this one. Nothing on the other tab needs to
+              be turned on here for this to work.
+            </p>
+          </div>
+          <PeersCard />
+        </>
+      )}
 
       {revokeTarget && (
         <RevokeConfirm

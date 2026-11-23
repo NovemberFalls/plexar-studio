@@ -102,8 +102,16 @@ function makeSettingsProps(overrides = {}) {
   };
 }
 
+// Steps 1 and 2 fold into a status line once both are saved; open them again.
+async function openSetup() {
+  await waitFor(() => expect(screen.queryByTestId("remote-loading")).toBeNull());
+  const change = screen.queryByTestId("setup-change");
+  if (change && !screen.queryByTestId("card-reach")) fireEvent.click(change);
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
+  localStorage.clear();
   Object.defineProperty(navigator, "clipboard", {
     value: { writeText: vi.fn(() => Promise.resolve()) },
     configurable: true,
@@ -216,7 +224,8 @@ describe("RemoteSettings — page structure", () => {
   it("orders the cards 1, 2, 3, devices and keeps Harness off the page", async () => {
     globalThis.fetch = makeFetchMock();
     render(<RemoteSettings {...makeSettingsProps()} />);
-    const ids = ["card-remote-toggle", "card-reach", "card-pairing", "card-devices", "heading-controls", "card-peers"];
+    await openSetup();
+    const ids = ["card-setup-summary", "card-remote-toggle", "card-reach", "card-pairing", "card-devices"];
     const els = ids.map((id) => screen.getByTestId(id));
     for (let i = 1; i < els.length; i++) {
       expect(els[i - 1].compareDocumentPosition(els[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -231,15 +240,17 @@ describe("RemoteSettings — page structure", () => {
 });
 
 describe("RemoteSettings — how devices reach this machine", () => {
-  it("shows 'No address set' until one is typed", () => {
+  it("shows 'No address set' until one is typed", async () => {
     globalThis.fetch = makeFetchMock();
     render(<RemoteSettings {...makeSettingsProps({ remote: { enabled: true, hostname: "" } })} />);
+    await openSetup();
     expect(screen.getByTestId("reach-status")).toHaveTextContent("No address set");
   });
 
-  it("offers the LAN choice disabled, with its reason", () => {
+  it("offers the LAN choice disabled, with its reason", async () => {
     globalThis.fetch = makeFetchMock();
     render(<RemoteSettings {...makeSettingsProps()} />);
+    await openSetup();
     expect(screen.getByRole("radiogroup", { name: "How devices reach this machine" })).toBeInTheDocument();
     const lan = screen.getByTestId("reach-lan");
     expect(lan).toHaveAttribute("aria-disabled", "true");
@@ -249,12 +260,13 @@ describe("RemoteSettings — how devices reach this machine", () => {
     );
   });
 
-  it("starts on the tunnel answer when it is enabled; switching to own-address hides the connector and writes no setting", () => {
+  it("starts on the tunnel answer when it is enabled; switching to own-address hides the connector and writes no setting", async () => {
     globalThis.fetch = makeFetchMock();
     const props = makeSettingsProps({
       remote: { enabled: true, hostname: "https://studio.example.com", tunnel: { enabled: true } },
     });
     render(<RemoteSettings {...props} />);
+    await openSetup();
     expect(screen.getByTestId("reach-studio-tunnel")).toBeChecked();
     expect(screen.getByTestId("tunnel-start")).toBeInTheDocument();
     expect(screen.getByTestId("probe-public-url")).toBeInTheDocument();
@@ -273,6 +285,7 @@ describe("RemoteSettings — Cloudflare config example", () => {
   it("renders the cloudflared status line behind the disclosure", async () => {
     globalThis.fetch = makeFetchMock();
     render(<RemoteSettings {...makeSettingsProps()} />);
+    await openSetup();
     expect(screen.queryByTestId("config-example")).toBeNull();
     fireEvent.click(screen.getByTestId("config-example-toggle"));
     await waitFor(() =>
@@ -284,6 +297,7 @@ describe("RemoteSettings — Cloudflare config example", () => {
   it("Generate config shows the yml and the command list with copy buttons", async () => {
     globalThis.fetch = makeFetchMock();
     render(<RemoteSettings {...makeSettingsProps()} />);
+    await openSetup();
     fireEvent.click(screen.getByTestId("config-example-toggle"));
     await waitFor(() => expect(screen.getByTestId("generate-config")).not.toBeDisabled());
 
@@ -302,6 +316,7 @@ describe("RemoteSettings — Cloudflare config example", () => {
     navigator.clipboard.writeText = vi.fn(() => Promise.reject(new Error("nope")));
     globalThis.fetch = makeFetchMock();
     render(<RemoteSettings {...makeSettingsProps()} />);
+    await openSetup();
     fireEvent.click(screen.getByTestId("config-example-toggle"));
     await waitFor(() => expect(screen.getByTestId("generate-config")).not.toBeDisabled());
     fireEvent.click(screen.getByTestId("generate-config"));
@@ -316,6 +331,7 @@ describe("RemoteSettings — Cloudflare config example", () => {
       probeResult: { hostname: "studio.example.com", classification: "unreachable", status: null },
     });
     render(<RemoteSettings {...makeSettingsProps()} />);
+    await openSetup();
     await waitFor(() => expect(screen.getByTestId("probe-public-url")).not.toBeDisabled());
 
     fireEvent.click(screen.getByTestId("probe-public-url"));
@@ -327,6 +343,7 @@ describe("RemoteSettings — Cloudflare config example", () => {
   it("renders an inline error when the probe request itself fails", async () => {
     globalThis.fetch = makeFetchMock({ probeOk: false });
     render(<RemoteSettings {...makeSettingsProps()} />);
+    await openSetup();
     await waitFor(() => expect(screen.getByTestId("probe-public-url")).not.toBeDisabled());
     fireEvent.click(screen.getByTestId("probe-public-url"));
     await waitFor(() => expect(screen.getByTestId("probe-error")).toHaveTextContent("invalid hostname"));
@@ -337,6 +354,7 @@ describe("RemoteSettings — Cloudflare config example", () => {
     render(
       <RemoteSettings {...makeSettingsProps({ remote: { enabled: true, hostname: "" } })} />
     );
+    await openSetup();
     fireEvent.click(screen.getByTestId("config-example-toggle"));
     await waitFor(() => expect(screen.getByTestId("generate-config")).toBeDisabled());
     expect(screen.getByTestId("probe-public-url")).toBeDisabled();
@@ -347,8 +365,85 @@ describe("RemoteSettings — Cloudflare config example", () => {
     globalThis.fetch = makeFetchMock();
     const props = makeSettingsProps();
     render(<RemoteSettings {...props} />);
+    await openSetup();
     await waitFor(() => expect(screen.getByTestId("access-required-toggle")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("access-required-toggle"));
     expect(props.setField).toHaveBeenCalledWith("remote.access_required", true);
+  });
+});
+
+describe("RemoteSettings — tabs and the folded setup", () => {
+  it("keeps the two directions on separate tabs", async () => {
+    globalThis.fetch = makeFetchMock();
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await screen.findByTestId("card-pairing");
+    expect(screen.getByTestId("remote-tab-host")).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTestId("heading-controls")).toBeNull();
+    expect(screen.queryByTestId("card-peers")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("remote-tab-control"));
+    expect(screen.getByTestId("heading-controls")).toBeInTheDocument();
+    expect(screen.getByTestId("card-peers")).toBeInTheDocument();
+    expect(screen.queryByTestId("card-pairing")).toBeNull();
+    expect(screen.queryByTestId("card-devices")).toBeNull();
+  });
+
+  it("folds steps 1 and 2 into a status line once both are saved, and reopens them", async () => {
+    globalThis.fetch = makeFetchMock();
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await screen.findByTestId("card-setup-summary");
+    expect(screen.getByTestId("setup-summary-address")).toHaveTextContent("https://studio.example.com");
+    expect(screen.queryByTestId("card-remote-toggle")).toBeNull();
+    expect(screen.queryByTestId("card-reach")).toBeNull();
+    expect(screen.getByTestId("card-pairing")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("setup-change"));
+    expect(screen.getByTestId("card-remote-toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("card-reach")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("setup-change"));
+    expect(screen.queryByTestId("card-reach")).toBeNull();
+  });
+
+  it("shows the steps, and no status line, while setup is unfinished", async () => {
+    globalThis.fetch = makeFetchMock({ status: STATUS_OFF });
+    render(<RemoteSettings {...makeSettingsProps({ remote: { enabled: false, hostname: "" } })} />);
+    await screen.findByTestId("card-remote-toggle");
+    expect(screen.getByTestId("card-reach")).toBeInTheDocument();
+    expect(screen.queryByTestId("card-setup-summary")).toBeNull();
+  });
+});
+
+describe("RemoteSettings — device list hygiene", () => {
+  const day = 86400000;
+  const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+  const DEVICES = [
+    { id: "dv_old", name: "Old phone", created_at: iso(90 * day), last_seen: iso(60 * day), revoked_at: null },
+    { id: "dv_gone", name: "Gone phone", created_at: iso(90 * day), last_seen: iso(80 * day), revoked_at: iso(70 * day) },
+    { id: "dv_new", name: "New phone", created_at: iso(5 * day), last_seen: iso(1000), revoked_at: null },
+  ];
+
+  it("hides revoked devices until asked, and lists the most recently seen first", async () => {
+    globalThis.fetch = makeFetchMock({ status: { ...STATUS_ON, devices: DEVICES } });
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await screen.findByTestId("devices-table");
+    expect(screen.queryByTestId("device-row-dv_gone")).toBeNull();
+    const fresh = screen.getByTestId("device-row-dv_new");
+    const old = screen.getByTestId("device-row-dv_old");
+    expect(fresh.compareDocumentPosition(old) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const toggle = screen.getByTestId("devices-show-revoked");
+    expect(toggle).toHaveTextContent("Show 1 revoked");
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("device-row-dv_gone")).toBeInTheDocument();
+    expect(screen.queryByTestId("revoke-dv_gone")).toBeNull();
+  });
+
+  it("flags an active device not seen for 30 days, and only that one", async () => {
+    globalThis.fetch = makeFetchMock({ status: { ...STATUS_ON, devices: DEVICES } });
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await screen.findByTestId("devices-table");
+    expect(screen.getByTestId("device-stale-dv_old")).toHaveTextContent("not seen for 60 days");
+    expect(screen.queryByTestId("device-stale-dv_new")).toBeNull();
+    expect(screen.getByTestId("revoke-dv_old")).toBeInTheDocument();
   });
 });
