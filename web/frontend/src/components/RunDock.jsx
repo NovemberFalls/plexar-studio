@@ -97,7 +97,9 @@ export default function RunDock({ base, runId, run, sessionId = null, sessionNam
     e.preventDefault();
     // Capture keeps the moves coming to the handle even while the pointer is
     // over the frame, which would otherwise swallow them.
-    e.currentTarget.setPointerCapture?.(e.pointerId);
+    // It can refuse (no such active pointer); the drag still works while the
+    // pointer stays on the handle, and the frame is switched off below anyway.
+    try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch { /* uncaptured drag */ }
     setDragging(true);
   };
   const onDragMove = (e) => {
@@ -106,7 +108,7 @@ export default function RunDock({ base, runId, run, sessionId = null, sessionNam
   };
   const onDragEnd = (e) => {
     if (!dragging) return;
-    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch { /* was not captured */ }
     setDragging(false);
   };
   const onHandleKey = (e) => {
@@ -145,10 +147,10 @@ export default function RunDock({ base, runId, run, sessionId = null, sessionNam
         onKeyDown={onHandleKey}
         style={{
           position: "absolute",
-          left: -3,
+          left: -4,
           top: 0,
           bottom: 0,
-          width: 7,
+          width: 9,
           zIndex: 2,
           cursor: "col-resize",
           touchAction: "none",
