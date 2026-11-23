@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { embedUrl, embedSessionUrl, originOf, stageLabel } from "../utils/orchRuns";
+import {
+  embedUrl, embedSessionUrl, originOf, stageLabel,
+  clampDockWidth, DOCK_MIN_WIDTH, DOCK_MAX_FRACTION, DOCK_WIDTH_KEY,
+} from "../utils/orchRuns";
 
 /**
  * The framework's live picture of one run, docked on the right of the sessions
@@ -70,17 +73,89 @@ export default function RunDock({ base, runId, run, sessionId = null, sessionNam
     ? (embedStage?.stage || null)
     : (embedStage && embedStage.run === runId && embedStage.stage ? embedStage.stage : shown?.stage);
 
+  // Width: the default 42% until the user drags the left edge, then their pixel
+  // width, remembered. Owner QA, 2.1.62: "I cannot resize it".
+  const dockRef = useRef(null);
+  const [width, setWidth] = useState(() => {
+    try {
+      const stored = Number(localStorage.getItem(DOCK_WIDTH_KEY));
+      return Number.isFinite(stored) && stored >= DOCK_MIN_WIDTH ? stored : null;
+    } catch { return null; }
+  });
+  const [dragging, setDragging] = useState(false);
+  const rowWidth = () => dockRef.current?.parentElement?.getBoundingClientRect().width || 0;
+  const applyWidth = (px) => {
+    const next = clampDockWidth(px, rowWidth());
+    setWidth(next);
+    try { localStorage.setItem(DOCK_WIDTH_KEY, String(next)); } catch { /* unpersisted */ }
+  };
+  const resetWidth = () => {
+    setWidth(null);
+    try { localStorage.removeItem(DOCK_WIDTH_KEY); } catch { /* unpersisted */ }
+  };
+  const onDragStart = (e) => {
+    e.preventDefault();
+    // Capture keeps the moves coming to the handle even while the pointer is
+    // over the frame, which would otherwise swallow them.
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    setDragging(true);
+  };
+  const onDragMove = (e) => {
+    if (!dragging || !dockRef.current) return;
+    applyWidth(dockRef.current.getBoundingClientRect().right - e.clientX);
+  };
+  const onDragEnd = (e) => {
+    if (!dragging) return;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    setDragging(false);
+  };
+  const onHandleKey = (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const current = dockRef.current?.getBoundingClientRect().width || DOCK_MIN_WIDTH;
+    applyWidth(current + (e.key === "ArrowLeft" ? 24 : -24));
+  };
+
   return (
     <aside
+      ref={dockRef}
       data-testid="run-dock"
       className="flex flex-col flex-shrink-0 min-h-0"
       style={{
-        width: "42%",
-        minWidth: 360,
+        position: "relative",
+        width: width === null ? "42%" : width,
+        minWidth: DOCK_MIN_WIDTH,
+        maxWidth: `${DOCK_MAX_FRACTION * 100}%`,
         borderLeft: "1px solid var(--border-color)",
         background: "var(--cc-bg)",
       }}
     >
+      <div
+        data-testid="run-dock-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize run view"
+        tabIndex={0}
+        title="Drag to resize. Double-click to reset."
+        onPointerDown={onDragStart}
+        onPointerMove={onDragMove}
+        onPointerUp={onDragEnd}
+        onPointerCancel={onDragEnd}
+        onDoubleClick={resetWidth}
+        onKeyDown={onHandleKey}
+        style={{
+          position: "absolute",
+          left: -3,
+          top: 0,
+          bottom: 0,
+          width: 7,
+          zIndex: 2,
+          cursor: "col-resize",
+          touchAction: "none",
+          background: dragging ? "var(--cc-accent)" : "transparent",
+          opacity: dragging ? 0.5 : 1,
+        }}
+      />
       <div
         className="flex items-center gap-2 flex-shrink-0"
         style={{ height: 30, padding: "0 8px", borderBottom: "1px solid var(--cc-line)" }}
@@ -114,7 +189,7 @@ export default function RunDock({ base, runId, run, sessionId = null, sessionNam
           sandbox="allow-scripts allow-same-origin"
           onLoad={() => setReady(true)}
           className="flex-1 min-h-0 w-full"
-          style={{ border: "none", background: "var(--cc-bg)" }}
+          style={{ border: "none", background: "var(--cc-bg)", pointerEvents: dragging ? "none" : "auto" }}
         />
       ) : (
         <div className="flex-1 flex items-center justify-center" style={{ fontSize: 12, color: "var(--cc-muted)" }}>

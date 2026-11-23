@@ -85,3 +85,16 @@ export function originOf(base) {
     return null;
   }
 }
+
+/* Run dock width. The floor is the narrowest the framework's embed is laid out for;
+   the ceiling leaves the terminal grid a quarter of the row at least. */
+export const DOCK_MIN_WIDTH = 360;
+export const DOCK_MAX_FRACTION = 0.75;
+export const DOCK_WIDTH_KEY = "cockpit-run-dock-width";
+
+/** A dragged width held between the floor and the ceiling for a row this wide. */
+export function clampDockWidth(px, rowWidth) {
+  const ceiling = rowWidth > 0 ? Math.max(DOCK_MIN_WIDTH, Math.floor(rowWidth * DOCK_MAX_FRACTION)) : Infinity;
+  const wanted = Number.isFinite(px) ? Math.round(px) : DOCK_MIN_WIDTH;
+  return Math.min(ceiling, Math.max(DOCK_MIN_WIDTH, wanted));
+}
