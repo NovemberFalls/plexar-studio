@@ -620,3 +620,16 @@ describe("SpendGuardrails — honesty", () => {
     expect(screen.getByTestId("cap-enabled-real")).toHaveAttribute("role", "switch");
   });
 });
+
+describe("SpendGuardrails — page layout", () => {
+  it("splits the cards into two columns that wrap, in the original reading order", () => {
+    render(<Harness spy={vi.fn()} />);
+    const root = screen.getByTestId("spend-guardrails");
+    expect(root.style.flexWrap).toBe("wrap");
+    expect(root.style.maxWidth).toBe("");
+    const ids = (col) => [...screen.getByTestId(col).children].map((el) => el.getAttribute("data-testid"));
+    expect(ids("spend-column-settings")).toEqual(["card-spend-mode", "card-spend-period", "card-spend-caps"]);
+    expect(ids("spend-column-status")).toEqual(["card-spend-enforce", "card-spend-status", "spend-honesty"]);
+    expect([...root.children].map((el) => el.getAttribute("data-testid"))).toEqual(["spend-column-settings", "spend-column-status"]);
+  });
+});

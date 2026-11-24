@@ -125,6 +125,17 @@ const CARD = {
   padding: 16,
 };
 
+// One column of the page. 520px is the narrowest the caps rows stay on one line;
+// 900px is the old single-column cap, kept so text lines stay readable.
+const COLUMN = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 16,
+  flex: "1 1 520px",
+  maxWidth: 900,
+  minWidth: 0,
+};
+
 const LABEL = {
   fontSize: 10,
   fontWeight: 800,
@@ -746,8 +757,12 @@ export default function SpendGuardrails({ get, setField, isDirty }) {
   return (
     <div
       data-testid="spend-guardrails"
-      style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 900, minWidth: 0 }}
+      style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 16, minWidth: 0 }}
     >
+      {/* Two columns on a wide window: what you set on the left, what it does and
+          where it stands on the right. Each wraps below the other when the page
+          is too narrow for both, which restores the original top-to-bottom order. */}
+      <div data-testid="spend-column-settings" style={COLUMN}>
       {/* ── billing mode ─────────────────────────────── */}
       <div style={CARD} data-testid="card-spend-mode">
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -964,6 +979,9 @@ export default function SpendGuardrails({ get, setField, isDirty }) {
         <FieldError message={errors.percent} testId="percent-error" />
       </div>
 
+      </div>
+
+      <div data-testid="spend-column-status" style={COLUMN}>
       {/* ── where it enforces ────────────────────────── */}
       <div style={CARD} data-testid="card-spend-enforce">
         <SectionHeader
@@ -1141,6 +1159,7 @@ export default function SpendGuardrails({ get, setField, isDirty }) {
         it is not money you were charged, and your real bill is the flat monthly fee plus whatever
         OpenRouter and any direct API keys actually billed you.
       </Callout>
+      </div>
     </div>
   );
 }
