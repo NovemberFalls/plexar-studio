@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import threading
 import time
 import urllib.error
@@ -102,6 +103,36 @@ _WS_REFUSAL_REASON = "refused"
 _CREATE_FIELDS = ("workdir", "harness", "model", "permission_mode", "effort", "bypass", "name")
 
 _LOOPBACK_HOSTS = {"localhost"}
+_LABEL_MAX = 60
+
+
+def local_machine_name() -> str:
+    """This machine's hostname, stripped, at most 64 chars; "" if unavailable. Never raises."""
+    try:
+        name = socket.gethostname()
+    except Exception:  # noqa: BLE001 - a hostname is a nicety, never a failure
+        logger.debug("Could not read this machine's hostname", exc_info=True)
+        return ""
+    return name.strip()[:64] if isinstance(name, str) else ""
+
+
+def _device_name() -> str:
+    """The name the HOST stores for this Studio: this machine, never the peer's label."""
+    host = local_machine_name()
+    return f"{_DEFAULT_DEVICE_NAME} ({host})"[:80] if host else _DEFAULT_DEVICE_NAME
+
+
+_RESIZE_MAX_COLS = 1000
+_RESIZE_MAX_ROWS = 500
+
+
+def _clean_label(raw: Any) -> str | None:
+    """A peer label: 1..60 chars after trimming, or None when refused."""
+    if not isinstance(raw, str):
+        return None
+    # Printable only: a peer supplies this through machine_name too.
+    text = "".join(ch for ch in raw if ch.isprintable()).strip()
+    return text if 0 < len(text) <= _LABEL_MAX else None
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +366,19 @@ class PeerStore:
                          "added_at": peer.added_at, "device_id": peer.device_id})
             self._write_meta(rows)
         return peer
+
+    def rename(self, peer_id: str, label: str) -> bool:
+        """Replace a peer's label. False for an unknown peer."""
+        with self._lock:
+            rows = self._read_meta()
+            found = False
+            for row in rows:
+                if row.get("id") == peer_id:
+                    row["label"] = label
+                    found = True
+            if found:
+                self._write_meta(rows)
+        return found
 
     def remove(self, peer_id: str) -> bool:
         with self._lock:
@@ -640,11 +684,12 @@ async def add_peer(request: Request):
     if not ok:
         return _error(400, "cf_client_id and cf_client_secret must be given together")
     label = body.get("label")
-    label = label.strip() if isinstance(label, str) and label.strip() else urllib.parse.urlsplit(url).hostname or url
+    label = label.strip() if isinstance(label, str) else ""
 
     candidate = Peer(id="", label=label, url=url, added_at="")
+    # The device name is THIS machine's, never built from the label (which names the peer).
     resp = await _call(candidate, "POST", "/pair",
-                       body={"code": code.strip(), "device_name": f"{_DEFAULT_DEVICE_NAME} ({label})"[:80]},
+                       body={"code": code.strip(), "device_name": _device_name()},
                        access=access)
     reason = classify(resp, access is not None)
     if reason is not None:
@@ -657,6 +702,10 @@ async def add_peer(request: Request):
     if resp.status != 200 or not isinstance(token, str) or not token:
         return _error(502, "peer answered the pairing with an unexpected shape", "unexpected")
     device_id = data.get("device_id") if isinstance(data.get("device_id"), str) else None
+    if not label:
+        machine = data.get("machine_name")
+        machine = machine.strip()[:_LABEL_MAX] if isinstance(machine, str) else ""
+        label = machine or urllib.parse.urlsplit(url).hostname or url
     peer = await asyncio.to_thread(_get_store().add, label, url, token, device_id, access)
     logger.info("Paired with peer %s at %s", peer.id, urllib.parse.urlsplit(url).netloc)
     return {"peer": peer.public(access is not None)}
@@ -677,6 +726,24 @@ async def put_peer_access(peer_id: str, request: Request):
     peer = await asyncio.to_thread(store.get, peer_id)
     logger.info("Access service token %s for peer %s", "set" if access else "cleared", peer_id)
     return {"peer": peer.public(access is not None)}
+
+
+@router.put("/api/peers/{peer_id}")
+async def rename_peer(peer_id: str, request: Request):
+    """Rename a peer: body {"label": "<1..60 chars after trim>"}."""
+    body = await _read_json(request)
+    if body is None:
+        return _error(400, "body must be a JSON object")
+    label = _clean_label(body.get("label"))
+    if label is None:
+        return _error(400, f"label must be 1 to {_LABEL_MAX} characters")
+    store = _get_store()
+    if bad_segment(peer_id) or not await asyncio.to_thread(store.rename, peer_id, label):
+        return _error(404, "unknown peer")
+    peer = await asyncio.to_thread(store.get, peer_id)
+    access_set = await asyncio.to_thread(store.access, peer_id) is not None
+    logger.info("Renamed peer %s", peer_id)
+    return {"peer": peer.public(access_set)}
 
 
 @router.delete("/api/peers/{peer_id}")
@@ -707,7 +774,23 @@ async def peer_status(peer_id: str):
     data = resp.json()
     if resp.status != 200 or not isinstance(data, dict):
         return {"reachable": True, "authorized": None, "reason": "unexpected"}
-    return {"reachable": True, "authorized": True, "reason": None}
+    machine = data.get("machine_name")
+    machine = machine.strip()[:_LABEL_MAX] if isinstance(machine, str) else ""
+    relabelled = False
+    if machine and _named_after_this_machine(peer.label, machine):
+        # Paired before the host named itself, the label was built from the wrong
+        # computer. Fix it once; through the store, under its lock, off the loop.
+        relabelled = await asyncio.to_thread(_get_store().rename, peer.id, machine)
+        if relabelled:
+            logger.info("Relabelled peer %s with the name it reports", peer.id)
+    return {"reachable": True, "authorized": True, "reason": None,
+            "machine_name": machine or None, "relabelled": relabelled}
+
+
+def _named_after_this_machine(label: str, machine: str) -> bool:
+    """True when the stored label is THIS machine's hostname and the peer's differs."""
+    here = local_machine_name().casefold()
+    return bool(here) and label.strip().casefold() == here and machine.casefold() != here
 
 
 @router.get("/api/peers/{peer_id}/sessions")
@@ -729,6 +812,18 @@ async def peer_close_session(peer_id: str, session_id: str):
     if bad_segment(session_id):
         return _error(404, "unknown session")
     return await _proxy(peer_id, "DELETE", f"/sessions/{_seg(session_id)}")
+
+
+@router.get("/api/peers/{peer_id}/subagents")
+async def peer_subagents(peer_id: str):
+    return await _proxy(peer_id, "GET", "/subagents")
+
+
+@router.get("/api/peers/{peer_id}/sessions/{session_id}/subagents/{agent_id}")
+async def peer_subagent_report(peer_id: str, session_id: str, agent_id: str):
+    if bad_segment(session_id) or bad_segment(agent_id):
+        return _error(404, "unknown agent")
+    return await _proxy(peer_id, "GET", f"/sessions/{_seg(session_id)}/subagents/{_seg(agent_id)}")
 
 
 @router.get("/api/peers/{peer_id}/workdirs")
@@ -809,8 +904,9 @@ def _seq(value: Any) -> bool:
 def page_frame(raw: Any) -> tuple[str, Any]:
     """Validate one upstream frame. Returns (verdict, payload).
 
-    `send` with the frame to relay, `ended`, `skip` for a known frame the page
-    does not take (resize, pong), or `bad` with a reason that names the shape,
+    `send` with the frame to relay (resize included: every xterm showing a PTY
+    takes the PTY's size), `ended`, `skip` for a known frame the page does not
+    take (pong), or `bad` with a reason that names the shape,
     never the content.
     """
     if not isinstance(raw, str):
@@ -842,7 +938,11 @@ def page_frame(raw: Any) -> tuple[str, Any]:
     if kind == "resize":
         if not _seq(frame.get("cols")) or not _seq(frame.get("rows")):
             return "bad", "resize fields"
-        return "skip", None
+        # The page hands these to xterm: a size no terminal has is dropped here,
+        # not relayed (a hostile peer could otherwise freeze the viewer's page).
+        if not (1 <= frame["cols"] <= _RESIZE_MAX_COLS and 1 <= frame["rows"] <= _RESIZE_MAX_ROWS):
+            return "skip", None
+        return "send", {"type": "resize", "cols": frame["cols"], "rows": frame["rows"]}
     if kind == "pong":
         return "skip", None
     return "bad", "unknown type"
@@ -903,7 +1003,7 @@ async def websocket_peer(websocket: WebSocket, peer_id: str, session_id: str):
                                peer.id, session_id, payload)
                 close_with[:] = [1011, "peer sent an invalid frame"]
                 return
-            # skip: resize (the peer's desktop reports its own size) and pong.
+            # skip: pong.
 
     async def enqueue(item: tuple, size: int) -> bool:
         nonlocal pending_bytes

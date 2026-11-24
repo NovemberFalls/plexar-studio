@@ -397,8 +397,9 @@ def test_sessions_list_carries_only_the_fourteen_fields(rig):
     assert len(remote_gateway.SESSION_FIELDS) == 14
 
 
-def test_hello(rig):
+def test_hello(rig, monkeypatch):
     _backend, store, client = rig
+    monkeypatch.setattr(remote_gateway.socket, "gethostname", lambda: "  HOST-A  ")
     paired = pair(client, store, "Pixel")
     body = client.get("/remote/v1/hello", headers=auth(paired["token"])).json()
     assert body == {
@@ -406,6 +407,7 @@ def test_hello(rig):
         "app_version": "2.1.7",
         "device": {"id": paired["device_id"], "name": "Pixel"},
         "session_count": 1,
+        "machine_name": "HOST-A",
     }
 
 

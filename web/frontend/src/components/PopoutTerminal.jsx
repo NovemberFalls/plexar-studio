@@ -345,6 +345,14 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
               pendingDataRef.current = "";
               xtermRef.current?.write("\x1bc");
             },
+            // The PTY's size, set by this or another pane. Adopt a differing
+            // size without echoing it back (see TerminalPane's follower rule).
+            resize: (cols, rows) => {
+              const t = xtermRef.current;
+              if (!t || (t.cols === cols && t.rows === rows)) return;
+              try { t.resize(cols, rows); } catch { return; }
+              lastSentDimsRef.current = { cols, rows };
+            },
           })) enqueue(evt.data);
           if (!writeRafRef.current) {
             writeRafRef.current = requestAnimationFrame(() => {

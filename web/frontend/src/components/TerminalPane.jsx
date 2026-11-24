@@ -88,6 +88,13 @@ const TerminalPane = forwardRef(function TerminalPane({
   socketPathRef.current = socketPath;
   const resizeObserver = useRef(null);
   const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
+  // One PTY can be shown by several panes (this machine's and a peer's). Every
+  // xterm must carry the PTY's cols/rows, so when the server announces a size
+  // another pane set, this pane FOLLOWS it: layout fits stop until the user acts
+  // on this pane (click, focus, key), which claims the size back.
+  const followerRef = useRef(false);
+  const claimedDimsRef = useRef(null); // the size THIS pane last asked for
+  const [foreignSize, setForeignSize] = useState(false);
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
   // Sticky: once the server has told us this origin is not allowed, reconnecting
@@ -186,6 +193,8 @@ const TerminalPane = forwardRef(function TerminalPane({
     const fit = fitRef.current;
     const term = xtermRef.current;
     if (!isContainerMeasurable(el) || !fit || !term) return;
+    // A follower keeps the foreign size: no layout-driven fit or send.
+    if (followerRef.current) return;
     try {
       fit.fit();
       const next = { cols: term.cols, rows: term.rows };
@@ -201,11 +210,47 @@ const TerminalPane = forwardRef(function TerminalPane({
           rows: next.rows,
         }));
         lastSentDimsRef.current = next;
+        claimedDimsRef.current = next;
       }
     } catch {
       // fit() can throw if terminal is disposed during resize
     }
   }, []);
+
+  // The server reports the PTY's size. Equal to ours (incl. the echo of our own
+  // send): nothing. Different: adopt it without echoing it back. term.resize
+  // does not change the container box, so the ResizeObserver cannot re-fire.
+  const followForeignSize = useCallback((cols, rows) => {
+    const term = xtermRef.current;
+    if (!term) return;
+    if (term.cols === cols && term.rows === rows) return;
+    try {
+      term.resize(cols, rows);
+    } catch {
+      return; // disposed mid-frame
+    }
+    lastSentDimsRef.current = { cols, rows };
+    // The late echo of our own claim, after an older foreign size slipped in
+    // ahead of it: the size is ours again, so this pane is not a follower.
+    const mine = claimedDimsRef.current;
+    if (mine && mine.cols === cols && mine.rows === rows) {
+      followerRef.current = false;
+      setForeignSize(false);
+      return;
+    }
+    followerRef.current = true;
+    setForeignSize(true);
+  }, []);
+
+  // The user acted on this pane: stop following, fit, and send our own size.
+  const claimSize = useCallback(() => {
+    if (!followerRef.current) return;
+    followerRef.current = false;
+    setForeignSize(false);
+    safeFit();
+  }, [safeFit]);
+  const claimSizeRef = useRef(claimSize);
+  claimSizeRef.current = claimSize;
 
   // Ref so connectWs can schedule itself recursively without a stale closure.
   // The ref is assigned immediately after the useCallback declaration below.
@@ -262,6 +307,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         },
         begin: ({ full }) => { if (full) replayHoldRef.current.begin(); },
         end: () => replayHoldRef.current.release(),
+        resize: followForeignSize,
       })) enqueue(evt.data);
       // A held replay is written once, on release, not frame by frame.
       if (replayHoldRef.current.active) return;
@@ -326,7 +372,7 @@ const TerminalPane = forwardRef(function TerminalPane({
     ws.onerror = () => {
       // onclose will handle reconnection
     };
-  }, [safeFit]);
+  }, [safeFit, followForeignSize]);
 
   // Keep ref in sync so the recursive setTimeout always calls the latest version
   connectWsRef.current = connectWs;
@@ -451,6 +497,8 @@ const TerminalPane = forwardRef(function TerminalPane({
       // session lockups caused by sending \x03 to an unresponsive process.
       term.attachCustomKeyEventHandler((ev) => {
         if (ev.type !== "keydown") return true;
+        // Typing claims the PTY size; the key itself proceeds untouched.
+        claimSizeRef.current();
 
         // Ctrl+Shift+F: toggle terminal search
         if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && ev.key === "F") {
@@ -527,6 +575,11 @@ const TerminalPane = forwardRef(function TerminalPane({
       };
       document.addEventListener("visibilitychange", handleVisibilityChange);
 
+      // Clicking or focusing the terminal claims the PTY size for this pane.
+      const handleClaim = () => claimSizeRef.current();
+      termEl.addEventListener("mousedown", handleClaim, { capture: true });
+      termEl.addEventListener("focusin", handleClaim);
+
       // Connect to PTY if there is something to attach to
       if (socketPathRef.current) {
         connectWs(socketPathRef.current);
@@ -537,6 +590,8 @@ const TerminalPane = forwardRef(function TerminalPane({
         historyScroll.dispose();
         termEl.removeEventListener("paste", pasteHandler, { capture: true });
         document.removeEventListener("visibilitychange", handleVisibilityChange);
+        termEl.removeEventListener("mousedown", handleClaim, { capture: true });
+        termEl.removeEventListener("focusin", handleClaim);
         debouncedFit.cancel();
         clearTimeout(reconnectTimer.current);
         cancelAnimationFrame(writeRafRef.current);
@@ -652,6 +707,10 @@ const TerminalPane = forwardRef(function TerminalPane({
       // the dedupe cache so the post-connect safeFit() always sends fresh
       // dims even if they happen to match the old terminal's last-known size.
       lastSentDimsRef.current = null;
+      // A different PTY is a first connection: it claims the size as before.
+      followerRef.current = false;
+      claimedDimsRef.current = null;
+      setForeignSize(false);
       connectWs(socketPath);
     }
   }, [socketPath, connectWs]);
@@ -1256,6 +1315,21 @@ const TerminalPane = forwardRef(function TerminalPane({
         onDragOver={handleDragOver}
       >
         <div ref={termRef} className="w-full h-full" />
+        {foreignSize && (
+          <button
+            type="button"
+            data-testid="pane-foreign-size"
+            onClick={() => { claimSize(); xtermRef.current?.focus(); }}
+            style={{
+              position: "absolute", right: 12, bottom: 8, zIndex: 5,
+              padding: "2px 8px", fontSize: 11, borderRadius: 4, cursor: "pointer",
+              color: "var(--cc-muted)", background: "var(--cc-surface)",
+              border: "1px solid var(--cc-border)", opacity: 0.85,
+            }}
+          >
+            Sized for another screen. Click to fit here.
+          </button>
+        )}
         {codexRef.current && !isPeer && showTranscript && <CodexTranscript key={session.terminalId} terminalId={session.terminalId} statusHost={transcriptStatusHost} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
       </div>
     </div>

@@ -2037,12 +2037,21 @@ class PtyManager:
             return False
         try:
             session.pty.setwinsize(rows, cols)
-            session.cols = cols
-            session.rows = rows
-            return True
         except Exception:
             logger.debug("Resize failed for %s", terminal_id, exc_info=True)
             return False
+        changed = (session.cols, session.rows) != (cols, rows)
+        session.cols = cols
+        session.rows = rows
+        if changed:
+            # The ONE wake for a size change: every replay socket and remote stream
+            # re-checks the dims and sends its own resize frame, with no output
+            # needed. Every caller (the /ws/terminal handler, the resize route, the
+            # Remote v1 resize route) runs on the event loop, so a plain set() is safe.
+            session.history_changed.set()
+            for listener in list(session.remote_listeners):
+                listener.set()
+        return True
 
     def _get_jsonl_path(self, session) -> str | None:
         """Derive the path to Claude Code's JSONL session file.

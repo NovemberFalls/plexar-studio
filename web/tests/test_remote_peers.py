@@ -171,7 +171,8 @@ def test_token_never_in_any_response_or_log(env, caplog):
      {"reachable": True, "authorized": False, "reason": "access_required"}),
     (UpstreamResponse(200, {"Content-Type": "text/html"}, b"<!DOCTYPE html><html>"),
      {"reachable": True, "authorized": False, "reason": "access_required"}),
-    (_json(200, {"protocol": 1}), {"reachable": True, "authorized": True, "reason": None}),
+    (_json(200, {"protocol": 1}), {"reachable": True, "authorized": True, "reason": None,
+                                   "machine_name": None, "relabelled": False}),
 ])
 def test_status_split(env, resp, expected):
     peer = _pair(env)
@@ -321,7 +322,8 @@ def test_ws_frame_round_trip(env):
         assert ws.receive_json() == {"type": "replay_start", "reset": True, "truncated": False}
         assert ws.receive_json() == {"type": "output", "seq": 3, "data": "hello"}
         assert ws.receive_json() == {"type": "replay_end", "seq": 3}
-        # The resize frame is not a page frame; the next one is live output.
+        # The PTY's size is relayed: every xterm showing it takes the PTY's dims.
+        assert ws.receive_json() == {"type": "resize", "cols": 100, "rows": 20}
         assert ws.receive_json() == {"type": "output", "seq": 4, "data": "world"}
         ws.send_text('{"type":"resize","cols":80,"rows":24}')
         ws.send_text("ls\r")
@@ -548,7 +550,7 @@ def test_http_client_ignores_environment_proxies(monkeypatch):
     (json.dumps({"type": "replay_start", "reset": True, "truncated": False, "cols": 80, "rows": 24}), "send"),
     (json.dumps({"type": "replay_end", "seq": 0}), "send"),
     (json.dumps({"type": "ended"}), "ended"),
-    (json.dumps({"type": "resize", "cols": 80, "rows": 24}), "skip"),
+    (json.dumps({"type": "resize", "cols": 80, "rows": 24}), "send"),
     (json.dumps({"type": "pong"}), "skip"),
     (json.dumps({"type": "output", "seq": "1", "data": "x"}), "bad"),
     (json.dumps({"type": "output", "seq": True, "data": "x"}), "bad"),

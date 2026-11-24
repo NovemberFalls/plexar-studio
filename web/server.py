@@ -1740,6 +1740,12 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
         except ValueError:
             cursor = None
         initial = True
+        # The PTY dims this socket last knew. Starts as the session's own dims,
+        # so connecting sends no resize frame; a later change (this page's own
+        # resize, a phone, a peer Studio) sends one, so every xterm showing this
+        # PTY takes the PTY's size. resize_terminal sets history_changed on a
+        # change, so the wake needs no output.
+        last_dims = (session.cols, session.rows)
         while session.active_consumer == my_generation:
             # Cleared BEFORE the read: an append that races the sends below re-sets
             # the event and is picked up on the next iteration. Clearing afterwards
@@ -1760,6 +1766,13 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                 cursor = snapshot["sequence"]
                 if initial or snapshot["reset"]:
                     await websocket.send_json({"type": "replay_end", "seq": cursor})
+                # Only between bursts, never inside replay_start..replay_end, and
+                # at most once per actual change (same shape as the remote stream).
+                current_dims = (session.cols, session.rows)
+                if current_dims != last_dims and session.active_consumer == my_generation:
+                    last_dims = current_dims
+                    await websocket.send_json({"type": "resize", "cols": current_dims[0],
+                                               "rows": current_dims[1]})
             except _WS_SEND_CLOSED_EXC:
                 # The peer is already gone (browser closed the tab, reload,
                 # etc.) -- end this task quietly rather than let uvicorn log
@@ -1948,15 +1961,33 @@ async def list_subagents_route():
     return JSONResponse({"subagents": await asyncio.to_thread(_subagents_snapshot)})
 
 
+async def _subagent_report(terminal_id: str, agent_id: str, require_known: bool = False) -> dict | None:
+    """{"id", "text"} for one subagent, or None for an unknown terminal. Shared by the
+    desktop route and Remote v1. `require_known` also answers None for an agent id
+    that is not alphanumeric (the traversal guard latest_text applies) or whose
+    transcript does not exist; the desktop route keeps its 200-with-null."""
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return None
+    path = await asyncio.to_thread(pty_manager._get_jsonl_path, session)
+    if require_known:
+        if not isinstance(agent_id, str) or not agent_id.isalnum():
+            return None
+        directory = await asyncio.to_thread(subagent_watch.subagents_dir, path)
+        if not directory or not await asyncio.to_thread(
+                os.path.isfile, os.path.join(directory, f"agent-{agent_id}.jsonl")):
+            return None
+    text = await asyncio.to_thread(subagent_watch.latest_text, path, agent_id)
+    return {"id": agent_id, "text": text}
+
+
 @app.get("/api/terminals/{terminal_id}/subagents/{agent_id}")
 async def subagent_report(terminal_id: str, agent_id: str):
     """One subagent's latest text (its report once done). Read-only."""
-    session = pty_manager.get_terminal(terminal_id)
-    if not session:
+    body = await _subagent_report(terminal_id, agent_id)
+    if body is None:
         return JSONResponse({"error": "Terminal not found"}, status_code=404)
-    path = await asyncio.to_thread(pty_manager._get_jsonl_path, session)
-    text = await asyncio.to_thread(subagent_watch.latest_text, path, agent_id)
-    return JSONResponse({"id": agent_id, "text": text})
+    return JSONResponse(body)
 
 
 @app.get("/api/terminals/{terminal_id}/latest-assistant")
@@ -7639,6 +7670,9 @@ remote_gateway.configure(
         create_session=_create_remote_terminal,
         submit=_paste_and_submit,
         resize=pty_manager.resize_terminal,
+        # The desktop's own subagent reads, so a peer Studio sees what the sidebar does.
+        subagents=_subagents_snapshot,
+        subagent_report=lambda tid, aid: _subagent_report(tid, aid, require_known=True),
         # The same framework reads the desktop's own orch routes make.
         orch_runs=lambda: framework_client.fetch_orch_runs(_framework_base_url()),
         orch_events=lambda since: framework_client.fetch_orch_events(_framework_base_url(), since),

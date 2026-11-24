@@ -11,10 +11,22 @@ export function replayQuery(cursor) {
 // `begin`/`end` are optional and only observe the burst; they never touch the
 // cursor. `full` is true when the burst rebuilds the whole view (a fresh pane or
 // a replacement snapshot), false for the short delta of a reconnect.
-export function consumeReplayFrame(raw, cursor, { reset, enqueue, warning, begin, end }) {
+// `resize` is optional: the server announces the PTY's size whenever it changes
+// (including an echo of this pane's own resize). The frame is always handled,
+// even malformed, so it can never be written into the terminal as text.
+export function consumeReplayFrame(raw, cursor, { reset, enqueue, warning, begin, end, resize }) {
   if (typeof raw !== "string" || !raw.startsWith("{")) return false;
   let frame;
   try { frame = JSON.parse(raw); } catch { return false; }
+  if (frame === null || typeof frame !== "object") return false;
+  if (frame.type === "resize") {
+    const { cols, rows } = frame;
+    // Bounded: xterm allocates per cell, so an absurd size must never reach it.
+    if (Number.isSafeInteger(cols) && Number.isSafeInteger(rows) && cols > 0 && rows > 0 && cols <= 1000 && rows <= 500) {
+      resize?.(cols, rows);
+    }
+    return true;
+  }
   if (frame.type === "replay_start") {
     const full = frame.reset === true || cursor.seq === null;
     if (frame.reset === true) { cursor.seq = null; reset(); }

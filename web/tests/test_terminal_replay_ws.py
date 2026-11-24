@@ -140,3 +140,68 @@ def test_a_long_retained_stream_replays_in_a_handful_of_frames(session):
     assert len(frames) < 5, f"500 retained chunks replayed as {len(frames)} frames"
     assert frames[-1]["seq"] == 500
     assert "".join(frame["data"] for frame in frames) == "x\r\n" * 500
+
+
+# -- A1: the PTY's size reaches every replay socket --------------------------
+
+
+def _foreign(session, monkeypatch, action):
+    """Route a keystroke to `action`, run ON the app's loop (where resize_terminal runs)."""
+    monkeypatch.setitem(server.pty_manager.sessions, session.id, session)
+
+    async def run(terminal_id, data):
+        action(data)
+        return True
+
+    monkeypatch.setattr(server.pty_manager, "write_pty_async", run)
+
+
+def test_no_resize_frame_on_connect(session, monkeypatch):
+    def echo(data):
+        session.history.append("ECHO:" + data)
+        session.history_changed.set()
+
+    _foreign(session, monkeypatch, echo)
+    with connect() as socket:
+        _drain_to_replay_end(socket)
+        socket.send_text("k")
+        assert socket.receive_json() == {"type": "output", "seq": 1, "data": "ECHO:k"}
+
+
+def test_a_foreign_resize_sends_one_frame_and_needs_no_output(session, monkeypatch):
+    # A phone or peer Studio resizing: no output is appended, only resize_terminal.
+    _foreign(session, monkeypatch,
+             lambda _d: server.pty_manager.resize_terminal(session.id, 100, 40))
+    with connect() as socket:
+        _drain_to_replay_end(socket)
+        socket.send_text("k")
+        started = time.monotonic()
+        frame = socket.receive_json()
+        elapsed = time.monotonic() - started
+    assert frame == {"type": "resize", "cols": 100, "rows": 40}
+    assert elapsed < 0.25, f"resize waited for the liveness tick ({elapsed:.3f}s)"
+    assert session.history.snapshot(None)["chunks"] == []
+
+
+def test_an_unchanged_size_sends_no_frame(session, monkeypatch):
+    def same_size_then_echo(data):
+        assert server.pty_manager.resize_terminal(session.id, session.cols, session.rows)
+        session.history.append("ECHO:" + data)
+        session.history_changed.set()
+
+    _foreign(session, monkeypatch, same_size_then_echo)
+    with connect() as socket:
+        _drain_to_replay_end(socket)
+        socket.send_text("k")
+        assert socket.receive_json() == {"type": "output", "seq": 1, "data": "ECHO:k"}
+
+
+def test_resize_terminal_wakes_history_and_remote_listeners_only_on_change(session, monkeypatch):
+    monkeypatch.setitem(server.pty_manager.sessions, session.id, session)
+    listener = asyncio.Event()
+    session.remote_listeners.add(listener)
+    session.history_changed = asyncio.Event()
+    assert server.pty_manager.resize_terminal(session.id, session.cols, session.rows)
+    assert not session.history_changed.is_set() and not listener.is_set()
+    assert server.pty_manager.resize_terminal(session.id, 90, 25)
+    assert session.history_changed.is_set() and listener.is_set()

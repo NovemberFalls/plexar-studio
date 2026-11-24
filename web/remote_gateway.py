@@ -170,6 +170,12 @@ class RemoteBackend:
     # is told the feature is unavailable, never a 5xx.
     orch_runs: Callable[[], dict] | None = None
     orch_events: Callable[[int | None], dict] | None = None
+    # Claude's in-process subagents, read-only. `subagents` is BLOCKING (it lists
+    # dirs and reads tails) and is run in a thread; `subagent_report` answers the
+    # desktop's report body or None for an unknown session/agent. Absent means
+    # `{"subagents": {}}` and 404.
+    subagents: Callable[[], dict] | None = None
+    subagent_report: Callable[[str, str], Awaitable[dict | None] | dict | None] | None = None
 
 
 class StreamRegistry:
@@ -927,6 +933,16 @@ def probe_public_url(payload: dict = Body(default={})):
 router = APIRouter(prefix="/remote/v1")
 
 
+def machine_name() -> str:
+    """This machine's hostname, stripped, at most 64 chars; "" if unavailable. Never raises."""
+    try:
+        name = socket.gethostname()
+    except Exception:  # noqa: BLE001 - a hostname is a nicety, never a failure
+        logger.debug("Could not read this machine's hostname", exc_info=True)
+        return ""
+    return name.strip()[:64] if isinstance(name, str) else ""
+
+
 @router.post("/pair")
 async def pair(request: Request):
     """Redeem a pairing code. The ONE route with no bearer token."""
@@ -951,6 +967,7 @@ async def pair(request: Request):
         "token": token,
         "protocol": PROTOCOL_VERSION,
         "app_version": _backend_.app_version(),
+        "machine_name": machine_name(),
     }
 
 
@@ -962,6 +979,7 @@ async def hello(device: Device = Depends(require_device)):
         "app_version": backend.app_version(),
         "device": {"id": device.id, "name": device.name},
         "session_count": len(backend.list_sessions()),
+        "machine_name": machine_name(),
     }
 
 
@@ -1066,6 +1084,29 @@ async def interrupt(terminal_id: str, device: Device = Depends(require_device)):
         return _error(404, "unknown session")
     accepted = await backend.interrupt(terminal_id)
     return {"accepted": bool(accepted)}
+
+
+@router.get("/subagents")
+async def list_subagents(device: Device = Depends(require_device)):
+    """Claude's in-process subagents per session, the shape GET /api/subagents returns."""
+    backend, _store_ = _require_configured()
+    if backend.subagents is None:
+        return {"subagents": {}}
+    return {"subagents": await asyncio.to_thread(backend.subagents)}
+
+
+@router.get("/sessions/{terminal_id}/subagents/{agent_id}")
+async def subagent_report(terminal_id: str, agent_id: str, device: Device = Depends(require_device)):
+    """One subagent's latest text. Read-only; an unknown session or agent is 404."""
+    backend, _store_ = _require_configured()
+    if backend.subagent_report is None or not agent_id.isalnum():
+        return _error(404, "unknown agent")
+    if backend.get_session(terminal_id) is None:
+        return _error(404, "unknown session")
+    body = await _maybe_await(backend.subagent_report(terminal_id, agent_id))
+    if not isinstance(body, dict):
+        return _error(404, "unknown agent")
+    return body
 
 
 RESIZE_COLS = (20, 500)
