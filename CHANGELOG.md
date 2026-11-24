@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Rename a paired machine from the sidebar.** A pencil beside the machine's name edits it in place; Enter saves, Escape cancels. It works while the machine is offline. Settings > Remote still has Rename too.
 
+### Changed
+- **Settings > Reporting & retention uses two columns on a wide window** instead of one narrow column with empty space beside it.
+
 ### Fixed
 - **A wrong machine name from an older pairing corrects itself more often.** A name typed by hand that matches this computer's own name apart from spaces or punctuation is now replaced with the other machine's real name.
 
