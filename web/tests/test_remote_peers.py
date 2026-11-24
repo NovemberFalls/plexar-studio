@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -327,6 +328,11 @@ def test_ws_frame_round_trip(env):
         assert ws.receive_json() == {"type": "output", "seq": 4, "data": "world"}
         ws.send_text('{"type":"resize","cols":80,"rows":24}')
         ws.send_text("ls\r")
+        # End the stream only once both sends were relayed: the bridge is free to
+        # drop input still in flight when the session ends, and CI lost that race.
+        deadline = time.monotonic() + 5
+        while len([c for c in h.calls if "/sessions/s1/" in c["url"]]) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
         upstream.frames.put_nowait(json.dumps({"type": "ended"}))
         # No resize_failed: the next thing the page sees is the end banner.
         assert "[Session ended]" in ws.receive_text()
