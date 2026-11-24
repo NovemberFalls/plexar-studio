@@ -53,6 +53,8 @@ These links always serve the latest release; it is not attached to Studio's GitH
 
 Install the APK (allow installs from your browser when Android asks), then turn on **Settings ▸ Remote** in Studio and scan the pairing code with the app. Remote access is off until you enable it.
 
+The same page connects one computer's Studio to another's, with or without a tunnel. The step-by-step is in the **[Remote access guide](REMOTE.md)**.
+
 ---
 
 ## Prerequisites

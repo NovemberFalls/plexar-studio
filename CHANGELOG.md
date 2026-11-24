@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.68] - 2026-11-23
+
+### Added
+- **Control another machine.** One Studio can pair with a Studio on another computer, then list, start, end and open its sessions in a normal pane. Settings > Remote > Control another machine.
+- **Local-network remote access.** "Only devices on this network" needs no account, domain or tunnel: Studio opens a second port (8421) that offers only the paired-device routes, and only to private-network addresses. The connection is not encrypted, so use it on a network you trust. Another computer can use it today; Plexar Mobile on Android cannot yet.
+- **A background image behind the app**, still or animated, with dim, blur, panel opacity and animation speed. Terminals go see-through over it. Settings > Theme & glow.
+- **Orchestration runs beside the grid.** An orchestrators list and a run view that follows the focused session, toggled from the top bar and resizable. TASKS follows the framework's runs, and a finished run raises a toast naming its session. Plexar Mobile can read runs too.
+- **Standing agent workers.** An agent can see every other session, ask to adopt one (you approve), clear a worker and have that confirmed, refresh itself, and follow worker events.
+- A **[Remote access guide](REMOTE.md)**.
+
+### Changed
+- **Settings > Remote is a 1-2-3 flow** in two tabs: "Let devices in" and "Control another machine". Finished setup folds to one status line. The device list hides revoked devices and flags ones not seen for 30 days.
+- A `/model` switch inside the CLI now updates the model Studio shows for that session.
+- Today's usage loads faster on a large history.
+
+### Fixed
+- **Projects in a folder with a space or a dot in its name** showed no usage, no history and no phone chat. Studio now finds their transcripts.
+- Reloading restores the grid you left, with workers still nested under their session.
+- A pane coming into view shows its history already scrolled to the bottom.
+
+### Removed
+- **Auto and Channel bridges.** The Bridge tab (mailbox bridge) and one-shot manual relay remain.
+- The unused voice backend and leftover lane-broker settings.
+
 ## [2.1.57] - 2026-10-28
 
 ### Fixed
