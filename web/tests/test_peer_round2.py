@@ -248,6 +248,15 @@ def test_status_relabels_a_peer_named_after_this_machine(viewer):
     assert _status(viewer, peer, {"protocol": 1, "machine_name": "DESK-HOST"})["relabelled"] is False
 
 
+def test_status_relabel_ignores_spaces_and_punctuation(viewer, monkeypatch):
+    # A label typed by hand as "Studio Laptop" is still the hostname "Studio-Laptop".
+    monkeypatch.setattr(remote_peers, "local_machine_name", lambda: "Studio-Laptop")
+    peer = _pair(viewer, label="studio laptop")
+    body = _status(viewer, peer, {"protocol": 1, "machine_name": "DESK-HOST"})
+    assert body["relabelled"] is True
+    assert viewer["store"].get(peer["id"]).label == "DESK-HOST"
+
+
 @pytest.mark.parametrize("hello", [
     {"protocol": 1},
     {"protocol": 1, "machine_name": ""},

@@ -788,9 +788,16 @@ async def peer_status(peer_id: str):
 
 
 def _named_after_this_machine(label: str, machine: str) -> bool:
-    """True when the stored label is THIS machine's hostname and the peer's differs."""
-    here = local_machine_name().casefold()
-    return bool(here) and label.strip().casefold() == here and machine.casefold() != here
+    """True when the stored label is THIS machine's hostname and the peer's differs.
+
+    Compared on letters and digits only: a label typed by hand as "Studio Laptop"
+    is still the hostname "Studio-Laptop".
+    """
+    def key(text: str) -> str:
+        return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+    here = key(local_machine_name())
+    return bool(here) and key(label) == here and key(machine) != here
 
 
 @router.get("/api/peers/{peer_id}/sessions")
