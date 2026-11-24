@@ -120,3 +120,17 @@ describe("NewSessionDialog: Machine select", () => {
     expect(onConfirm.mock.calls[0][3]).not.toHaveProperty("machine");
   });
 });
+
+describe("NewSessionDialog: initialMachine", () => {
+  it("opens with that machine selected; an unknown id falls back to this computer", async () => {
+    globalThis.fetch = vi.fn(async () => res(404, {}));
+    const { unmount } = render(<NewSessionDialog onConfirm={vi.fn()} onCancel={vi.fn()} defaultModel="sonnet"
+      machines={[{ id: "p1", label: "Desk PC" }]} initialMachine="p1" />);
+    expect(screen.getByLabelText("Machine")).toHaveTextContent("Desk PC");
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/peers/p1/catalog"), expect.anything()));
+    unmount();
+    render(<NewSessionDialog onConfirm={vi.fn()} onCancel={vi.fn()} defaultModel="sonnet"
+      machines={[{ id: "p1", label: "Desk PC" }]} initialMachine="zz" />);
+    expect(screen.getByLabelText("Machine")).toHaveTextContent("This computer");
+  });
+});

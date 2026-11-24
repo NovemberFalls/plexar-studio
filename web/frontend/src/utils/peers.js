@@ -132,6 +132,7 @@ const seg = (v) => encodeURIComponent(v);
 export const peersApi = {
   list: (o) => call("/api/peers", o),
   add: (body, o) => call("/api/peers", { ...o, method: "POST", body }),
+  rename: (id, label, o) => call(`/api/peers/${seg(id)}`, { ...o, method: "PUT", body: { label } }),
   remove: (id, o) => call(`/api/peers/${seg(id)}`, { ...o, method: "DELETE" }),
   setAccess: (id, body, o) => call(`/api/peers/${seg(id)}/access`, { ...o, method: "PUT", body }),
   status: (id, o) => call(`/api/peers/${seg(id)}/status`, o),
@@ -141,6 +142,9 @@ export const peersApi = {
   workdirs: (id, o) => call(`/api/peers/${seg(id)}/workdirs`, o),
   browse: (id, path, o) => call(`/api/peers/${seg(id)}/browse?path=${encodeURIComponent(path || "")}`, o),
   catalog: (id, o) => call(`/api/peers/${seg(id)}/catalog`, o),
+  subagents: (id, o) => call(`/api/peers/${seg(id)}/subagents`, o),
+  subagentReport: (id, sessionId, agentId, o) =>
+    call(`/api/peers/${seg(id)}/sessions/${seg(sessionId)}/subagents/${seg(agentId)}`, o),
 };
 
 /** Both or neither, after trimming. Returns an error string or "". */
@@ -272,4 +276,17 @@ export function peerChoiceOptions(catalog, harnessId, { harnesses, permissionMod
     defaultModel: current?.default_model || "",
     harnessOffered: hIds.has(harnessId),
   };
+}
+
+/** Keep each peer record's `machineLabel` on the current peer list, so a rename
+ *  or relabel shows on open panes without a reload. Same array back when unchanged. */
+export function followPeerLabels(prev, peers) {
+  const labels = new Map((peers || []).map((p) => [p.id, p.label || p.id]));
+  let changed = false;
+  const next = prev.map((s) => {
+    if (!s.machine || !labels.has(s.machine) || s.machineLabel === labels.get(s.machine)) return s;
+    changed = true;
+    return { ...s, machineLabel: labels.get(s.machine) };
+  });
+  return changed ? next : prev;
 }

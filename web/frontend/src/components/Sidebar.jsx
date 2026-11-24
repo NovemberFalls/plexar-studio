@@ -1,8 +1,8 @@
 import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search, Monitor } from "lucide-react";
 import OrchestratorsList from "./OrchestratorsList";
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { groupWorkers } from "../subsessions.js";
-import { describePeerStatus, peerDragData } from "../utils/peers";
+import { describePeerStatus, peerDragData, peersApi } from "../utils/peers";
 
 /** Open a URL in the system's default browser (Tauri-safe), falling back to a new tab. */
 function openExternal(url) {
@@ -255,7 +255,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
 /** One of Claude Code's IN-PROCESS subagents (Agent tool), read-only. It has no
  *  terminal, so it is never a pane: the row shows what it is doing and a click shows its
  *  latest text (its report once done). Data: GET /api/subagents (subagent_watch.py). */
-function AgentRow({ agent, terminalId }) {
+function AgentRow({ agent, terminalId, loadReport = null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(null);
   const color = agent.status === "running" ? "var(--cc-accent)"
@@ -265,8 +265,14 @@ function AgentRow({ agent, terminalId }) {
     setOpen(next);
     if (next) {
       try {
-        const r = await fetch(`/api/terminals/${terminalId}/subagents/${agent.id}`);
-        const d = r.ok ? await r.json() : null;
+        // A machine's agent loads its report through the peer proxy; the local one is unchanged.
+        let d;
+        if (loadReport) {
+          d = await loadReport(agent);
+        } else {
+          const r = await fetch(`/api/terminals/${terminalId}/subagents/${agent.id}`);
+          d = r.ok ? await r.json() : null;
+        }
         setText(d?.text || "(no text yet)");
       } catch {
         setText("(could not read this agent)");
@@ -467,70 +473,166 @@ function LocationNode({ node, depth = 0, sessionsByDir, workersOf = {}, agentsOf
 }
 
 /** One session on another machine. Module-scope like SessionItem; a click or a
- *  drag places it in the grid exactly like a local row. */
-function PeerSessionItem({ peerId, remote, isActive, onSelect }) {
+ *  drag places it in the grid exactly like a local row. The End control sits
+ *  beside the row (a button cannot nest in a button): the first click asks, the
+ *  second ends; leaving the row, losing focus or Escape cancels. */
+function PeerSessionItem({ peerId, remote, isActive, onSelect, onEnd }) {
+  const [confirming, setConfirming] = useState(false);
+  // The confirm appears where the first click landed, so a double-click must
+  // not count as both: it only acts a moment after it was shown.
+  const armedAt = useRef(0);
   const state = remote.activity_state || (remote.alive === false ? "error" : "idle");
   const color = getStateColor(state);
   return (
-    <button
-      data-testid="peer-session-row"
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", peerDragData(peerId, remote.id));
-      }}
-      onClick={() => onSelect(peerId, remote)}
-      className={`flex items-center gap-1.5 w-full text-left ${!isActive ? "hover-bg-surface" : ""}`}
-      title={remote.working_dir || remote.name}
-      style={{
-        height: "24px",
-        paddingLeft: "6px",
-        borderRadius: "6px",
-        backgroundColor: isActive ? "color-mix(in srgb, var(--cc-accent) 10%, transparent)" : "transparent",
-        borderLeft: isActive ? "2px solid var(--cc-accent)" : "2px solid transparent",
-      }}
+    <div
+      className="group flex items-center"
+      onMouseLeave={() => setConfirming(false)}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setConfirming(false); }}
+      onKeyDown={(e) => { if (e.key === "Escape" && confirming) { e.stopPropagation(); setConfirming(false); } }}
     >
-      <span
-        data-glowdot
-        style={{
-          width: "6px", height: "6px", borderRadius: "999px", backgroundColor: color, boxShadow: `0 0 6px ${color}`,
-          flexShrink: 0, animation: isPulseState(state) ? "cc-pulse 1.5s infinite" : "none",
+      <button
+        data-testid="peer-session-row"
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", peerDragData(peerId, remote.id));
         }}
-      />
-      <span className="text-xs truncate flex-1" style={{ color: isActive ? "var(--cc-fg)" : "var(--cc-dim)", fontWeight: isActive ? 700 : 400 }}>
-        {remote.name || remote.id}
-      </span>
-      {remote.working_dir && (
-        <span className="text-[9px] truncate flex-shrink-0 mr-1" style={{ color: "var(--cc-muted)", maxWidth: "40%" }}>
-          {shortPath(remote.working_dir)}
+        onClick={() => onSelect(peerId, remote)}
+        className={`flex items-center gap-1.5 flex-1 min-w-0 text-left ${!isActive ? "hover-bg-surface" : ""}`}
+        title={remote.working_dir || remote.name}
+        style={{
+          height: "24px",
+          paddingLeft: "6px",
+          borderRadius: "6px",
+          backgroundColor: isActive ? "color-mix(in srgb, var(--cc-accent) 10%, transparent)" : "transparent",
+          borderLeft: isActive ? "2px solid var(--cc-accent)" : "2px solid transparent",
+        }}
+      >
+        <span
+          data-glowdot
+          style={{
+            width: "6px", height: "6px", borderRadius: "999px", backgroundColor: color, boxShadow: `0 0 6px ${color}`,
+            flexShrink: 0, animation: isPulseState(state) ? "cc-pulse 1.5s infinite" : "none",
+          }}
+        />
+        <span className="text-xs truncate flex-1" style={{ color: isActive ? "var(--cc-fg)" : "var(--cc-dim)", fontWeight: isActive ? 700 : 400 }}>
+          {remote.name || remote.id}
         </span>
+        {remote.working_dir && (
+          <span className="text-[9px] truncate flex-shrink-0 mr-1" style={{ color: "var(--cc-muted)", maxWidth: "40%" }}>
+            {shortPath(remote.working_dir)}
+          </span>
+        )}
+      </button>
+      {onEnd && (confirming ? (
+        <button
+          data-testid="peer-session-end-confirm"
+          autoFocus
+          onClick={(e) => {
+            e.stopPropagation();
+            if (Date.now() - armedAt.current < 500) return;
+            setConfirming(false);
+            onEnd(peerId, remote);
+          }}
+          className="text-[10px] px-1.5 rounded flex-shrink-0 mr-1 hover-color-red"
+          style={{ color: "var(--cc-error)", border: "1px solid var(--cc-border)", height: "18px" }}
+          title="End this session on the other machine"
+        >
+          End?
+        </button>
+      ) : (
+        <button
+          data-testid="peer-session-end"
+          onClick={(e) => { e.stopPropagation(); armedAt.current = Date.now(); setConfirming(true); }}
+          className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 rounded transition-all flex-shrink-0 mr-1 hover-color-red"
+          style={{ color: "var(--cc-muted)" }}
+          title="End session on the other machine"
+          aria-label="End session on the other machine"
+        >
+          <X size={12} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A peer session row with its nested workers and its read-only Claude agents. */
+function PeerSessionBranch({ peerId, remote, workers, agents, activeKeys, onSelect, onEnd }) {
+  const loadReport = (sessionId) => async (a) => {
+    const r = await peersApi.subagentReport(peerId, sessionId, a.id);
+    return r.ok ? r.data : null;
+  };
+  const nested = (r) => {
+    const list = agents?.[r.id] || [];
+    return list.length > 0 && (
+      <div style={{ marginLeft: "8px", paddingLeft: "6px", borderLeft: "1px solid var(--cc-border)" }}>
+        {list.map((a) => <AgentRow key={a.id} agent={a} loadReport={loadReport(r.id)} />)}
+      </div>
+    );
+  };
+  return (
+    <div>
+      <PeerSessionItem peerId={peerId} remote={remote} isActive={activeKeys.has(`${peerId}/${remote.id}`)} onSelect={onSelect} onEnd={onEnd} />
+      {nested(remote)}
+      {workers.length > 0 && (
+        <div data-testid="peer-worker-list" style={{ marginLeft: "8px", paddingLeft: "6px", borderLeft: "1px solid var(--cc-border)", display: "flex", flexDirection: "column", gap: "1px" }}>
+          {workers.map((w) => (
+            <div key={w.id}>
+              <PeerSessionItem peerId={peerId} remote={w} isActive={activeKeys.has(`${peerId}/${w.id}`)} onSelect={onSelect} onEnd={onEnd} />
+              {nested(w)}
+            </div>
+          ))}
+        </div>
       )}
-    </button>
+    </div>
   );
 }
 
 /** A paired machine's group. An error renders its reason and remedy, never an
  *  empty list that would read as "no sessions there". */
-function PeerGroup({ peer, activeKeys, filter, onSelect }) {
+function PeerGroup({ peer, activeKeys, filter, onSelect, onNewSession, onEnd }) {
   const [expanded, setExpanded] = useState(true);
   const d = describePeerStatus(peer.status);
   const failed = peer.status && !d.ok;
-  const sessions = (peer.sessions || []).filter((r) => r.alive !== false && !r.parent_id
+  const visible = (peer.sessions || []).filter((r) => r.alive !== false
     && (!filter || (r.name || "").toLowerCase().includes(filter) || (r.working_dir || "").toLowerCase().includes(filter)));
+  // Workers nest under their parent; one whose parent is not listed (filtered out,
+  // or gone) stays top-level so it never disappears.
+  const present = new Set(visible.map((r) => r.id));
+  const workersOf = {};
+  const sessions = [];
+  for (const r of visible) {
+    if (r.parent_id && present.has(r.parent_id)) (workersOf[r.parent_id] ||= []).push(r);
+    else sessions.push(r);
+  }
   return (
     <div data-testid={`peer-group-${peer.id}`}>
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1.5 w-full text-left rounded-md hover-bg-surface"
-        style={{ height: "23px", paddingLeft: "6px", color: "var(--cc-dim)" }}
-        aria-expanded={expanded}
-        title={peer.url || peer.label}
-      >
-        {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-        <Monitor size={12} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
-        <span className="text-xs truncate flex-1" style={{ color: "var(--cc-fg)", fontWeight: 700 }}>{peer.label || peer.id}</span>
-        <span className="text-[9px] flex-shrink-0 mr-1" style={{ color: d.token }}>{failed ? d.label : sessions.length || ""}</span>
-      </button>
+      <div className="flex items-center">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-1.5 flex-1 min-w-0 text-left rounded-md hover-bg-surface"
+          style={{ height: "23px", paddingLeft: "6px", color: "var(--cc-dim)" }}
+          aria-expanded={expanded}
+          title={peer.url || peer.label}
+        >
+          {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+          <Monitor size={12} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
+          <span className="text-xs truncate flex-1" style={{ color: "var(--cc-fg)", fontWeight: 700 }}>{peer.label || peer.id}</span>
+          <span className="text-[9px] flex-shrink-0 mr-1" style={{ color: d.token }}>{failed ? d.label : visible.length || ""}</span>
+        </button>
+        {onNewSession && d.ok && (
+          <button
+            data-testid={`peer-new-session-${peer.id}`}
+            onClick={() => onNewSession(peer.id)}
+            className="p-1 rounded flex-shrink-0 mr-1 hover-bg-surface"
+            style={{ color: "var(--cc-muted)" }}
+            title={`New session on ${peer.label || peer.id}`}
+            aria-label={`New session on ${peer.label || peer.id}`}
+          >
+            <Plus size={12} />
+          </button>
+        )}
+      </div>
       {expanded && (
         <div style={{ paddingLeft: "20px", display: "flex", flexDirection: "column", gap: "1px" }}>
           {failed ? (
@@ -543,7 +645,7 @@ function PeerGroup({ peer, activeKeys, filter, onSelect }) {
             <p className="text-[10px]" style={{ color: "var(--cc-muted)", padding: "2px 6px" }}>No sessions on this machine</p>
           ) : (
             sessions.map((r) => (
-              <PeerSessionItem key={r.id} peerId={peer.id} remote={r} isActive={activeKeys.has(`${peer.id}/${r.id}`)} onSelect={onSelect} />
+              <PeerSessionBranch key={r.id} peerId={peer.id} remote={r} workers={workersOf[r.id] || []} agents={peer.subagents} activeKeys={activeKeys} onSelect={onSelect} onEnd={onEnd} />
             ))
           )}
         </div>
@@ -584,6 +686,10 @@ export default function Sidebar({
   peers = [],
   // (peerId, remoteSession) => void -- place that machine's session in the grid.
   onSelectPeerSession,
+  // (peerId) => void -- open the New session dialog on that machine.
+  onNewPeerSession,
+  // (peerId, remoteSession) => void -- end that session on its machine.
+  onEndPeerSession,
   // Open orchestration runs: rows from utils/orchRuns.orchestratorRows, the run the
   // dock shows, and (run, session|null) => void.
   orchRows = [],
@@ -844,7 +950,7 @@ export default function Sidebar({
             </div>
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {peers.map((p) => (
-                <PeerGroup key={p.id} peer={p} activeKeys={activePeerKeys} filter={sessionFilter.trim().toLowerCase()} onSelect={onSelectPeerSession || (() => {})} />
+                <PeerGroup key={p.id} peer={p} activeKeys={activePeerKeys} filter={sessionFilter.trim().toLowerCase()} onSelect={onSelectPeerSession || (() => {})} onNewSession={onNewPeerSession} onEnd={onEndPeerSession} />
               ))}
             </div>
           </>

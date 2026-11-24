@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   describePeerStatus, PEER_REASONS, sessionSocketPath, peerDragData, parsePeerDragData,
   accessPairError, peerCreateBody, reconcilePeerSessions, peerChoiceOptions, peersApi,
-  dropUnpairedPeerSessions, PEER_ADOPT_GRACE_MS,
+  dropUnpairedPeerSessions, PEER_ADOPT_GRACE_MS, followPeerLabels,
 } from "../utils/peers";
 
 describe("describePeerStatus", () => {
@@ -117,5 +117,33 @@ describe("peersApi", () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
     await peersApi.endSession("a/b", "c d", { fetchImpl });
     expect(fetchImpl).toHaveBeenCalledWith("/api/peers/a%2Fb/sessions/c%20d", expect.objectContaining({ method: "DELETE" }));
+  });
+});
+
+describe("peersApi round 2", () => {
+  const ok = () => vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+  it("rename PUTs the label; subagent routes quote every segment", async () => {
+    const f = ok();
+    await peersApi.rename("a/b", "Office", { fetchImpl: f });
+    expect(f).toHaveBeenCalledWith("/api/peers/a%2Fb", expect.objectContaining({ method: "PUT", body: JSON.stringify({ label: "Office" }) }));
+    await peersApi.subagents("p1", { fetchImpl: f });
+    expect(f).toHaveBeenCalledWith("/api/peers/p1/subagents", expect.anything());
+    await peersApi.subagentReport("p1", "s 1", "a/1", { fetchImpl: f });
+    expect(f).toHaveBeenCalledWith("/api/peers/p1/sessions/s%201/subagents/a%2F1", expect.anything());
+  });
+});
+
+describe("followPeerLabels", () => {
+  const rec = (id, machine, machineLabel) => ({ id, machine, machineLabel });
+  it("moves a record's machineLabel onto the current peer label", () => {
+    const prev = [rec(1, "p1", "Old"), rec(2, null, undefined), rec(3, "gone", "Keep")];
+    const next = followPeerLabels(prev, [{ id: "p1", label: "New" }]);
+    expect(next[0].machineLabel).toBe("New");
+    expect(next[1]).toBe(prev[1]);
+    expect(next[2]).toBe(prev[2]);
+  });
+  it("returns the same array when nothing changed", () => {
+    const prev = [rec(1, "p1", "Same")];
+    expect(followPeerLabels(prev, [{ id: "p1", label: "Same" }])).toBe(prev);
   });
 });

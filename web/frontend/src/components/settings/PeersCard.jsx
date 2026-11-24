@@ -121,7 +121,45 @@ function AccessForm({ peer, onDone }) {
   );
 }
 
+function RenameForm({ peer, onDone }) {
+  const [value, setValue] = useState(peer.label || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const save = async (e) => {
+    if (e) e.preventDefault();
+    setBusy(true);
+    setError("");
+    const r = await peersApi.rename(peer.id, value.trim());
+    setBusy(false);
+    if (!r.ok) { setError(r.error); return; }
+    await refreshPeers();
+    onDone();
+  };
+
+  return (
+    <form onSubmit={save} data-testid={`peer-rename-form-${peer.id}`} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          style={{ ...INPUT, flex: 1 }}
+          aria-label="Machine name"
+          data-testid={`peer-rename-input-${peer.id}`}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Escape") onDone(); }}
+          maxLength={60}
+          autoFocus
+        />
+        <Button type="submit" label="Save" accent disabled={busy} testId={`peer-rename-save-${peer.id}`} />
+        <Button label="Cancel" onClick={onDone} disabled={busy} />
+      </div>
+      <InlineError text={error} testId={`peer-rename-error-${peer.id}`} />
+    </form>
+  );
+}
+
 function PeerRow({ peer, live }) {
+  const [renameOpen, setRenameOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -146,11 +184,13 @@ function PeerRow({ peer, live }) {
           {peer.access_token_set ? "Access token set" : "No Access token"}
         </span>
         <span style={{ flex: 1 }} />
+        <Button label="Rename" onClick={() => setRenameOpen((v) => !v)} testId={`peer-rename-${peer.id}`} />
         <Button label="Check" onClick={() => checkPeerStatus(peer.id)} testId={`peer-check-${peer.id}`} />
         <Button label={peer.access_token_set ? "Change Access token" : "Set Access token"} onClick={() => setAccessOpen((v) => !v)} testId={`peer-access-${peer.id}`} />
         <Button label="Remove" danger onClick={() => setConfirmRemove(true)} testId={`peer-remove-${peer.id}`} />
       </div>
       <PeerStatusLine status={live?.status} />
+      {renameOpen && <RenameForm peer={peer} onDone={() => setRenameOpen(false)} />}
       {accessOpen && <AccessForm peer={peer} onDone={() => setAccessOpen(false)} />}
       {confirmRemove && (
         <div role="group" aria-label="Confirm remove" data-testid="peer-remove-confirm" style={{ marginTop: 8, padding: "8px 10px", borderRadius: 9, background: tint("var(--cc-error)", 8), border: `1px solid ${tint("var(--cc-error)", 35)}` }}>
@@ -244,7 +284,12 @@ function AddPeerForm() {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <input style={{ ...INPUT, flex: 2 }} aria-label="Machine address" placeholder="https://studio.example.com" value={url} onChange={(e) => setUrl(e.target.value)} />
           <input style={{ ...INPUT, flex: 1 }} aria-label="Pairing code" placeholder="Pairing code" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" />
-          <input style={{ ...INPUT, flex: 1 }} aria-label="Label" placeholder="Label (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
+          <input style={{ ...INPUT, flex: 1 }} aria-label="Name for that machine" placeholder="Name for that machine (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
+        </div>
+      )}
+      {showFields && (
+        <div data-testid="peer-label-hint" style={{ fontSize: 10, color: "var(--cc-muted)" }}>
+          Left blank, the other machine's own name is used.
         </div>
       )}
       {showAccess && (

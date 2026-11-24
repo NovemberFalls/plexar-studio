@@ -51,6 +51,8 @@ export async function checkPeerStatus(id) {
   const r = await peersApi.status(id);
   const status = r.ok ? r.data : { reachable: false, authorized: null, reason: r.reason || "unexpected" };
   setLive(id, { status });
+  // The host's own name replaced a label the user gave the wrong computer.
+  if (r.ok && r.data?.relabelled === true) refreshPeers();
   return status;
 }
 
@@ -92,7 +94,16 @@ export function usePeersPoller(enabled) {
         if (cancelled) return;
         if (r.ok) {
           const sessions = Array.isArray(r.data?.sessions) ? r.data.sessions : [];
-          setLive(id, { sessions, error: null, status: { reachable: true, authorized: true, reason: null } });
+          // Claude's in-process agents; an older machine answers 404, which is just "none".
+          let subagents = {};
+          try {
+            const a = await peersApi.subagents(id);
+            if (a.ok && a.data?.subagents && typeof a.data.subagents === "object") subagents = a.data.subagents;
+          } catch {
+            subagents = {};
+          }
+          if (cancelled) return;
+          setLive(id, { sessions, subagents, error: null, status: { reachable: true, authorized: true, reason: null } });
           timers.push(setTimeout(tick, PEER_POLL_MS));
         } else if (r.reason || r.status === 0) {
           // Stop polling the list; the reason stands until /status says otherwise.

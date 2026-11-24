@@ -101,7 +101,7 @@ describe("PeersCard", () => {
     fireEvent.click(screen.getByTestId("peer-manual-toggle"));
     expect(screen.getByLabelText("Machine address")).toBeInTheDocument();
     expect(screen.getByLabelText("Pairing code")).toBeInTheDocument();
-    expect(screen.getByLabelText("Label")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name for that machine")).toBeInTheDocument();
   });
 
   it("an unparseable paste shows the parse error inline", async () => {
@@ -134,5 +134,39 @@ describe("PeersCard", () => {
     await act(async () => { fireEvent.click(screen.getByTestId("peer-access-clear")); });
     const call = globalThis.fetch.mock.calls.find(([u, o]) => u === "/api/peers/p1/access" && o?.method === "PUT");
     expect(JSON.parse(call[1].body)).toEqual({ cf_client_id: null, cf_client_secret: null });
+  });
+});
+
+describe("PeersCard: names", () => {
+  it("the label field says the other machine's own name is used when blank", async () => {
+    routes["GET /api/peers"] = res(200, { peers: [] });
+    render(<PeersCard />);
+    await screen.findByText("No machines paired yet.");
+    fireEvent.click(screen.getByTestId("peer-manual-toggle"));
+    expect(screen.getByPlaceholderText("Name for that machine (optional)")).toBeInTheDocument();
+    expect(screen.getByTestId("peer-label-hint")).toHaveTextContent(/own name is used/);
+  });
+
+  it("renames inline, refreshes the list, and keeps the field open with the server error", async () => {
+    let peers = [{ ...PEER }];
+    routes["GET /api/peers"] = () => res(200, { peers });
+    routes["GET /api/peers/p1/status"] = res(200, { reachable: true, authorized: true, reason: null });
+    let answer = res(400, { error: "label too long" });
+    let sent = null;
+    routes["PUT /api/peers/p1"] = (opts) => { sent = JSON.parse(opts.body); return answer; };
+    render(<PeersCard />);
+    await screen.findByTestId("peer-row-p1");
+    expect(screen.queryByTestId("peer-rename-input-p1")).toBeNull();
+    fireEvent.click(screen.getByTestId("peer-rename-p1"));
+    fireEvent.change(screen.getByTestId("peer-rename-input-p1"), { target: { value: "  Office  " } });
+    fireEvent.click(screen.getByTestId("peer-rename-save-p1"));
+    expect(await screen.findByText("label too long")).toBeInTheDocument();
+    expect(screen.getByTestId("peer-rename-input-p1")).toBeInTheDocument();
+    expect(sent).toEqual({ label: "Office" });
+    peers = [{ ...PEER, label: "Office" }];
+    answer = res(200, { peer: peers[0] });
+    fireEvent.click(screen.getByTestId("peer-rename-save-p1"));
+    await waitFor(() => expect(screen.queryByTestId("peer-rename-input-p1")).toBeNull());
+    expect(await screen.findByText("Office")).toBeInTheDocument();
   });
 });

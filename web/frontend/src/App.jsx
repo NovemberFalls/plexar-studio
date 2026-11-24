@@ -56,7 +56,7 @@ import AgentApprovalDialog from "./components/AgentApprovalDialog";
 import usePeers, { usePeersPoller } from "./hooks/usePeers";
 import {
   peersApi, peerCreateBody, peerSessionRecord, reconcilePeerSessions,
-  dropUnpairedPeerSessions, parsePeerDragData, describePeerStatus,
+  dropUnpairedPeerSessions, followPeerLabels, parsePeerDragData, describePeerStatus,
 } from "./utils/peers";
 
 const LOCATIONS_KEY = "cockpit-locations";
@@ -447,6 +447,7 @@ export default function App() {
   const [savedLocations, setSavedLocations] = useState(loadSavedLocations);
   const [recentLocations, setRecentLocations] = useState(() => lsLoad(RECENTS_KEY));
   const [showNewDialog, setShowNewDialog] = useState(false);
+  const [newDialogMachine, setNewDialogMachine] = useState("");
   const [gitStatuses, setGitStatuses] = useState({});
   const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
   const [mailboxes, setMailboxes] = useState([]); // array of V4 mailbox-bridge dicts from /api/bridge/mb
@@ -1500,11 +1501,26 @@ export default function App() {
     selectSession(adoptPeerSession(peerId, remote));
   }, [adoptPeerSession, selectSession]);
 
+  // End one session on a paired machine from the sidebar. A session with a local
+  // record goes through removeSession (its peer branch ends it and drops the pane);
+  // one never opened here is ended directly. A 404 counts as already ended.
+  const endPeerSession = useCallback(async (peerId, remote) => {
+    const rec = sessionsRef.current.find((s) => s.machine === peerId && s.remoteId === remote.id);
+    if (rec) { await removeSession(rec.id); return; }
+    const r = await peersApi.endSession(peerId, remote.id);
+    if (!r.ok && r.status !== 404) {
+      const peer = peersRef.current.find((p) => p.id === peerId);
+      toast(`Could not end "${remote.name || remote.id}" on ${peer?.label || peerId}: ${r.error}`, "error");
+    }
+  }, [removeSession, toast]);
+
   // Each successful peer poll updates that machine's records; an unpaired
   // machine's records go. An unreachable peer keeps its panes.
   useEffect(() => {
     setSessions((prev) => {
       let next = peersLoaded ? dropUnpairedPeerSessions(prev, peers.map((p) => p.id)) : prev;
+      // A rename or relabel shows on open panes and the sidebar without a reload.
+      if (peersLoaded) next = followPeerLabels(next, peers);
       for (const [id, l] of Object.entries(peerLive)) {
         if (Array.isArray(l.sessions) && l.status && !l.status.reason) next = reconcilePeerSessions(next, id, l.sessions);
       }
@@ -2296,6 +2312,7 @@ export default function App() {
     ...p,
     status: peerLive[p.id]?.status,
     sessions: peerLive[p.id]?.sessions ?? null,
+    subagents: peerLive[p.id]?.subagents || {},
     error: peerLive[p.id]?.error || null,
   })), [peers, peerLive]);
 
@@ -3112,6 +3129,8 @@ export default function App() {
                   onDeleteWorkspace={deleteWorkspace}
                   peers={sidebarPeers}
                   onSelectPeerSession={openPeerSession}
+                  onNewPeerSession={(peerId) => { setNewDialogMachine(peerId); setShowNewDialog(true); }}
+                  onEndPeerSession={endPeerSession}
                   orchRows={orchRows}
                   selectedRunId={dockRunId}
                   onPickRun={pickRun}
@@ -3458,14 +3477,16 @@ export default function App() {
             defaultEffort={effort}
             defaultHarness={harness}
             machines={peers}
+            initialMachine={newDialogMachine}
             onConfirm={(name, workdir, bypassPermissions, overrides) => {
               setShowNewDialog(false);
+              setNewDialogMachine("");
               // The dialog's Model/Permission/Effort/Harness selects used to be
               // decorative. They are wired now, so the dialog's choice — not the
               // TopBar's — is what this session spawns on.
               createSession(name, workdir, overrides?.model, { bypassPermissions, ...overrides });
             }}
-            onCancel={() => setShowNewDialog(false)}
+            onCancel={() => { setShowNewDialog(false); setNewDialogMachine(""); }}
           />
         )}
 

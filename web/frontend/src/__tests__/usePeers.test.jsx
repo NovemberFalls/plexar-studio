@@ -59,3 +59,46 @@ describe("usePeersPoller", () => {
     expect(calls("/api/peers/p1/status")).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("usePeersPoller: subagents and relabel", () => {
+  it("stores subagents with the sessions; a 404 from an older machine is just none", async () => {
+    render(<Probe />);
+    await flush();
+    await flush();
+    expect(seen.snap.live.p1.subagents).toEqual({});
+    expect(seen.snap.live.p1.error).toBeNull();
+    const base = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, o) => (url === "/api/peers/p1/subagents"
+      ? res(200, { subagents: { s1: [{ id: "a1", description: "d", status: "running" }] } })
+      : base(url, o)));
+    await act(async () => { vi.advanceTimersByTime(PEER_POLL_MS); });
+    await flush();
+    expect(seen.snap.live.p1.subagents.s1[0].id).toBe("a1");
+    // A failing agents call never stops the sessions poll.
+    globalThis.fetch = vi.fn(async (url, o) => {
+      if (url === "/api/peers/p1/subagents") throw new Error("boom");
+      return base(url, o);
+    });
+    await act(async () => { vi.advanceTimersByTime(PEER_POLL_MS); });
+    await flush();
+    expect(seen.snap.live.p1.subagents).toEqual({});
+    await act(async () => { vi.advanceTimersByTime(PEER_POLL_MS); });
+    await flush();
+    expect(calls("/api/peers/p1/sessions")).toBeGreaterThanOrEqual(2);
+  });
+
+  it("re-reads the peer list when /status reports it relabelled the peer", async () => {
+    let listCalls = 0;
+    const base = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, o) => {
+      if (url === "/api/peers") { listCalls += 1; return res(200, { peers: [{ id: "p1", label: listCalls > 1 ? "Desktop" : "Laptop" }] }); }
+      if (url === "/api/peers/p1/status") return res(200, { reachable: true, authorized: true, reason: null, relabelled: true });
+      return base(url, o);
+    });
+    render(<Probe />);
+    await flush();
+    await flush();
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(seen.snap.peers[0].label).toBe("Desktop");
+  });
+});

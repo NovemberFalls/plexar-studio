@@ -365,10 +365,15 @@ export default function NewSessionDialog({
   defaultHarness,
   // Paired machines: [{ id, label }]. Empty hides the Machine select.
   machines = [],
+  // Peer id to open the Machine select on (the sidebar's "+" on a machine group).
+  // Absent, or not a paired machine, means "This computer".
+  initialMachine = "",
   onConfirm,
   onCancel,
 }) {
-  const [machineSel, setMachineSel] = useState("");
+  const [machineSel, setMachineSel] = useState(
+    initialMachine && machines.some((m) => m.id === initialMachine) ? initialMachine : "",
+  );
   const machine = machines.find((m) => m.id === machineSel) || null;
   // { state: "idle"|"loading"|"ready"|"error", catalog, workdirs, roots, error }
   const [peerInfo, setPeerInfo] = useState({ state: "idle" });
