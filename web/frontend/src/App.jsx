@@ -53,7 +53,7 @@ import {
 } from "./utils/paneLayout";
 import FamilyPullDialog from "./components/FamilyPullDialog";
 import AgentApprovalDialog from "./components/AgentApprovalDialog";
-import usePeers, { usePeersPoller } from "./hooks/usePeers";
+import usePeers, { usePeersPoller, refreshPeers } from "./hooks/usePeers";
 import {
   peersApi, peerCreateBody, peerSessionRecord, reconcilePeerSessions,
   dropUnpairedPeerSessions, followPeerLabels, parsePeerDragData, describePeerStatus,
@@ -3131,6 +3131,12 @@ export default function App() {
                   onSelectPeerSession={openPeerSession}
                   onNewPeerSession={(peerId) => { setNewDialogMachine(peerId); setShowNewDialog(true); }}
                   onEndPeerSession={endPeerSession}
+                  onRenamePeer={async (peerId, label) => {
+                    const r = await peersApi.rename(peerId, label);
+                    if (!r.ok) return r.error || "Could not rename";
+                    await refreshPeers();
+                    return null;
+                  }}
                   orchRows={orchRows}
                   selectedRunId={dockRunId}
                   onPickRun={pickRun}

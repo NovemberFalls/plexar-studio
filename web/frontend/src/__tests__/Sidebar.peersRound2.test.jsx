@@ -121,3 +121,34 @@ describe("peer subagents", () => {
     await waitFor(() => expect(screen.getByText("(no text yet)")).toBeInTheDocument());
   });
 });
+
+describe("peer group: rename from the sidebar", () => {
+  it("saves on Enter, keeps a refused name open with the reason, Escape cancels", async () => {
+    const onRenamePeer = vi.fn(async (_id, label) => (label === "bad" ? "label must be 1 to 60 characters" : null));
+    render(<Sidebar {...base} peers={[peer([])]} onRenamePeer={onRenamePeer} />);
+    fireEvent.click(screen.getByTestId("peer-rename-start-p1"));
+    const input = screen.getByTestId("peer-rename-inline-p1");
+    expect(input).toHaveValue("Desk PC");
+    fireEvent.change(input, { target: { value: "bad" } });
+    fireEvent.submit(input.closest("form"));
+    await waitFor(() => expect(screen.getByTestId("peer-rename-inline-error-p1")).toHaveTextContent("1 to 60"));
+    fireEvent.change(screen.getByTestId("peer-rename-inline-p1"), { target: { value: "  Desktop  " } });
+    fireEvent.submit(screen.getByTestId("peer-rename-inline-p1").closest("form"));
+    await waitFor(() => expect(screen.queryByTestId("peer-rename-inline-p1")).toBeNull());
+    expect(onRenamePeer).toHaveBeenLastCalledWith("p1", "Desktop");
+
+    fireEvent.click(screen.getByTestId("peer-rename-start-p1"));
+    fireEvent.keyDown(screen.getByTestId("peer-rename-inline-p1"), { key: "Escape" });
+    expect(screen.queryByTestId("peer-rename-inline-p1")).toBeNull();
+    expect(onRenamePeer).toHaveBeenCalledTimes(2);
+  });
+
+  it("is offered for a machine that is unreachable, and absent without a handler", () => {
+    const failed = { id: "p2", label: "Down", status: { reachable: false, authorized: null, reason: "unreachable" }, sessions: null };
+    const { unmount } = render(<Sidebar {...base} peers={[failed]} onRenamePeer={vi.fn()} />);
+    expect(screen.getByTestId("peer-rename-start-p2")).toBeInTheDocument();
+    unmount();
+    render(<Sidebar {...base} peers={[failed]} />);
+    expect(screen.queryByTestId("peer-rename-start-p2")).toBeNull();
+  });
+});

@@ -1,4 +1,4 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search, Monitor } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search, Monitor, Pencil } from "lucide-react";
 import OrchestratorsList from "./OrchestratorsList";
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { groupWorkers } from "../subsessions.js";
@@ -590,8 +590,24 @@ function PeerSessionBranch({ peerId, remote, workers, agents, activeKeys, onSele
 
 /** A paired machine's group. An error renders its reason and remedy, never an
  *  empty list that would read as "no sessions there". */
-function PeerGroup({ peer, activeKeys, filter, onSelect, onNewSession, onEnd }) {
+function PeerGroup({ peer, activeKeys, filter, onSelect, onNewSession, onEnd, onRename }) {
   const [expanded, setExpanded] = useState(true);
+  // Inline rename: null = not editing. Enter saves, Escape or leaving cancels;
+  // a refused name stays open with the reason shown.
+  const [draft, setDraft] = useState(null);
+  const [renameError, setRenameError] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const saveRename = async (e) => {
+    e.preventDefault();
+    const name = (draft || "").trim();
+    if (!name || name === peer.label) { setDraft(null); setRenameError(""); return; }
+    setRenaming(true);
+    const error = await onRename(peer.id, name);
+    setRenaming(false);
+    if (error) { setRenameError(error); return; }
+    setDraft(null);
+    setRenameError("");
+  };
   const d = describePeerStatus(peer.status);
   const failed = peer.status && !d.ok;
   const visible = (peer.sessions || []).filter((r) => r.alive !== false
@@ -607,7 +623,27 @@ function PeerGroup({ peer, activeKeys, filter, onSelect, onNewSession, onEnd }) 
   }
   return (
     <div data-testid={`peer-group-${peer.id}`}>
-      <div className="flex items-center">
+      {draft !== null && (
+        <form onSubmit={saveRename} style={{ padding: "1px 6px" }}>
+          <input
+            data-testid={`peer-rename-inline-${peer.id}`}
+            autoFocus
+            value={draft}
+            maxLength={60}
+            disabled={renaming}
+            aria-label={`Name for ${peer.label || peer.id}`}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") { setDraft(null); setRenameError(""); } }}
+            onBlur={() => { if (!renaming && !renameError) setDraft(null); }}
+            className="text-xs w-full rounded"
+            style={{ height: "21px", padding: "0 5px", background: "var(--cc-surface)", color: "var(--cc-fg)", border: "1px solid var(--cc-accent)", outline: "none" }}
+          />
+          {renameError && (
+            <p role="alert" data-testid={`peer-rename-inline-error-${peer.id}`} className="text-[10px]" style={{ color: "var(--cc-error)", padding: "2px 0" }}>{renameError}</p>
+          )}
+        </form>
+      )}
+      <div className="flex items-center" style={draft !== null ? { display: "none" } : undefined}>
         <button
           onClick={() => setExpanded(!expanded)}
           className="flex items-center gap-1.5 flex-1 min-w-0 text-left rounded-md hover-bg-surface"
@@ -620,6 +656,18 @@ function PeerGroup({ peer, activeKeys, filter, onSelect, onNewSession, onEnd }) 
           <span className="text-xs truncate flex-1" style={{ color: "var(--cc-fg)", fontWeight: 700 }}>{peer.label || peer.id}</span>
           <span className="text-[9px] flex-shrink-0 mr-1" style={{ color: d.token }}>{failed ? d.label : visible.length || ""}</span>
         </button>
+        {onRename && (
+          <button
+            data-testid={`peer-rename-start-${peer.id}`}
+            onClick={() => { setRenameError(""); setDraft(peer.label || ""); }}
+            className="p-1 rounded flex-shrink-0 hover-bg-surface"
+            style={{ color: "var(--cc-muted)" }}
+            title={`Rename ${peer.label || peer.id}`}
+            aria-label={`Rename ${peer.label || peer.id}`}
+          >
+            <Pencil size={11} />
+          </button>
+        )}
         {onNewSession && d.ok && (
           <button
             data-testid={`peer-new-session-${peer.id}`}
@@ -690,6 +738,8 @@ export default function Sidebar({
   onNewPeerSession,
   // (peerId, remoteSession) => void -- end that session on its machine.
   onEndPeerSession,
+  // (peerId, label) => Promise<string|null>: an error message, or null when saved.
+  onRenamePeer,
   // Open orchestration runs: rows from utils/orchRuns.orchestratorRows, the run the
   // dock shows, and (run, session|null) => void.
   orchRows = [],
@@ -950,7 +1000,7 @@ export default function Sidebar({
             </div>
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {peers.map((p) => (
-                <PeerGroup key={p.id} peer={p} activeKeys={activePeerKeys} filter={sessionFilter.trim().toLowerCase()} onSelect={onSelectPeerSession || (() => {})} onNewSession={onNewPeerSession} onEnd={onEndPeerSession} />
+                <PeerGroup key={p.id} peer={p} activeKeys={activePeerKeys} filter={sessionFilter.trim().toLowerCase()} onSelect={onSelectPeerSession || (() => {})} onNewSession={onNewPeerSession} onEnd={onEndPeerSession} onRename={onRenamePeer} />
               ))}
             </div>
           </>
