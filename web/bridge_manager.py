@@ -60,7 +60,7 @@ _IDLE_POLL_INTERVAL = 0.5
 
 # Timeout for the V1 one-shot manual relay idle gate.  V1 is user-triggered
 # and returns an HTTP response, so we keep this moderate (60s) rather than
-# a long wait.  A normal 15–30s Claude turn should always clear within this window without the user seeing a spurious "busy" error.
+# a long wait.  A normal 15–30s Claude turn should always clear within this window without the user seeing a spurious "busy" error.  # noqa: E501
 _MANUAL_WAIT_MAX = 60.0
 
 # Bridge typing-quiet window — bridge injection waits this long after the

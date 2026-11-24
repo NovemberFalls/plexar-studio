@@ -326,7 +326,7 @@ def test_status_offers_an_address_only_while_something_listens(monkeypatch):
     monkeypatch.setattr(remote_gateway, "_backend", _backend({
         "remote": {"enabled": True, "lan": {"enabled": True, "port": 8421}},
     }))
-    monkeypatch.setattr(remote_lan.listener, "status", lambda: {"running": False, "port": None, "error": "Port 8421 is not available"})
+    monkeypatch.setattr(remote_lan.listener, "status", lambda: {"running": False, "port": None, "error": "Port 8421 is not available"})  # noqa: E501
     assert remote_gateway._lan_status() == {
         "enabled": True, "port": 8421, "running": False, "url": "", "error": "Port 8421 is not available",
     }

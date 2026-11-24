@@ -16,7 +16,7 @@ from tests.test_remote_gateway import BASE, auth, pair, rig as _rig  # noqa: E40
 
 
 @pytest.fixture
-def rig(_rig, tmp_path, monkeypatch):
+def rig(_rig, tmp_path, monkeypatch):  # noqa: F811
     backend, store, _client = _rig
     home = tmp_path / "home"
     (home / ".claude" / "commands" / "sub").mkdir(parents=True)
