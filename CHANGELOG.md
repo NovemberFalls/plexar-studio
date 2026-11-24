@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-11-23
+
+### Fixed
+- **A session open on two computers no longer garbles.** Both panes used to size the one terminal to their own window, so text wrapped and overlapped in the other. The pane you are using now sets the size; the other shows the terminal at that size with a "Sized for another screen. Click to fit here." chip, and takes the size back when you click or type in it. Both computers need this version.
+- **Paired machines carry the right name.** Each computer now reports its own name, so the machine you control is labelled with its name and appears in the other's device list under yours. Settings > Remote can rename a machine.
+
+### Added
+- **Start and end sessions on another machine from the sidebar**: a "+" on the machine and an End button on each of its sessions.
+- **Another machine's agents in the sidebar**: its worker sessions nest under their session, and Claude's own agents are listed read-only.
+
 ## [2.2.0] - 2026-11-23
 
 ### Added

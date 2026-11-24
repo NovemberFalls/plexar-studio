@@ -101,8 +101,18 @@ On the computer you are sitting at:
 4. If the other machine sits behind Cloudflare Access, also enter an Access service token
    (client id and secret). Without one the machine is listed as needing Access.
 
-The machine then appears in your sidebar. You can see its sessions, start and end them, and
-open one in a pane like a local session.
+The machine then appears in your sidebar under **Other machines**, named after that computer
+(rename it in Settings if you like).
+
+- Click a session to open it in a pane like a local one.
+- **+** beside the machine starts a new session there. **End** on a session asks once, then ends it.
+- Worker sessions nest under the session that started them, and Claude's own agents are listed
+  under their session (read-only).
+
+**One terminal, one size.** A session open on both computers is one terminal, so it can only
+have one size. The pane you are using sets it. On the other computer the same session shows
+at that size with a small **Sized for another screen. Click to fit here.** chip; click or
+type there to take the size back. Both computers need version 2.2.1 or later for this.
 
 ## What a paired device can do
 

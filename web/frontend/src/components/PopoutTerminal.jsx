@@ -42,6 +42,11 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
   const codexRef = useRef(false);
   codexRef.current = harness === "codex" || getModelHarness(model) === "codex";
   const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
+  // The follower rule, as in TerminalPane: a size another pane set is kept
+  // (no layout fits) until the user acts on this window.
+  const followerRef = useRef(false);
+  const claimedDimsRef = useRef(null); // the size THIS window last asked for
+  const [foreignSize, setForeignSize] = useState(false);
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
   // Sticky refusal — see TerminalPane.
@@ -68,6 +73,7 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
     const fit = fitRef.current;
     const t = xtermRef.current;
     if (!isContainerMeasurable(el) || !fit || !t) return;
+    if (followerRef.current) return;
     try {
       fit.fit();
       const next = { cols: t.cols, rows: t.rows };
@@ -75,11 +81,22 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
       if (ws?.readyState === WebSocket.OPEN && dimsChanged(lastSentDimsRef.current, next)) {
         ws.send(JSON.stringify({ type: "resize", cols: next.cols, rows: next.rows }));
         lastSentDimsRef.current = next;
+        claimedDimsRef.current = next;
       }
     } catch {
       // fit() can throw if terminal is disposed during resize
     }
   }, []);
+
+  // The user acted on this window: stop following, fit, and send our own size.
+  const claimSize = useCallback(() => {
+    if (!followerRef.current) return;
+    followerRef.current = false;
+    setForeignSize(false);
+    safeFit();
+  }, [safeFit]);
+  const claimSizeRef = useRef(claimSize);
+  claimSizeRef.current = claimSize;
 
   // Zoom sync: PopoutTerminal is a separate window/document — App.jsx's
   // `terminalZoom` React state does not reach it. Read the persisted value on
@@ -240,6 +257,8 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
       //   Alt+V: intercept Claude Code's native image-paste shortcut.
       term.attachCustomKeyEventHandler((ev) => {
         if (ev.type !== "keydown") return true;
+        // Typing claims the PTY size; the key itself proceeds untouched.
+        claimSizeRef.current();
 
         // Ctrl+C: copy if selection exists, otherwise let terminal send \x03
         if ((ev.ctrlKey || ev.metaKey) && ev.key === "c" && !ev.shiftKey) {
@@ -295,6 +314,10 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
         if (!document.hidden) safeFit();
       };
       document.addEventListener("visibilitychange", handleVisibilityChange);
+      // Clicking or focusing the terminal claims the PTY size for this window.
+      const handleClaim = () => claimSizeRef.current();
+      termEl.addEventListener("mousedown", handleClaim, { capture: true });
+      termEl.addEventListener("focusin", handleClaim);
 
       // Terminal input -> WebSocket
       term.onData((data) => {
@@ -352,6 +375,11 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
               if (!t || (t.cols === cols && t.rows === rows)) return;
               try { t.resize(cols, rows); } catch { return; }
               lastSentDimsRef.current = { cols, rows };
+              // The late echo of our own claim is not a foreign size.
+              const mine = claimedDimsRef.current;
+              const ours = !!mine && mine.cols === cols && mine.rows === rows;
+              followerRef.current = !ours;
+              setForeignSize(!ours);
             },
           })) enqueue(evt.data);
           if (!writeRafRef.current) {
@@ -403,6 +431,8 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
         historyScroll.dispose();
         termEl.removeEventListener("paste", pasteHandler, { capture: true });
         document.removeEventListener("visibilitychange", handleVisibilityChange);
+        termEl.removeEventListener("mousedown", handleClaim, { capture: true });
+        termEl.removeEventListener("focusin", handleClaim);
         debouncedFit.cancel();
         clearTimeout(reconnectTimer.current);
         cancelAnimationFrame(writeRafRef.current);
@@ -520,6 +550,21 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
         }}
       >
         <div ref={termRef} style={{ width: "100%", height: "100%" }} />
+        {foreignSize && (
+          <button
+            type="button"
+            data-testid="pane-foreign-size"
+            onClick={() => { claimSize(); xtermRef.current?.focus(); }}
+            style={{
+              position: "absolute", right: 12, bottom: 8, zIndex: 5,
+              padding: "2px 8px", fontSize: 11, borderRadius: 4, cursor: "pointer",
+              color: "var(--cc-muted)", background: "var(--cc-surface)",
+              border: "1px solid var(--cc-border)", opacity: 0.85,
+            }}
+          >
+            Sized for another screen. Click to fit here.
+          </button>
+        )}
         {codexRef.current && showTranscript && <CodexTranscript key={terminalId} terminalId={terminalId} statusHost={transcriptStatusHost} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
       </div>
     </div>

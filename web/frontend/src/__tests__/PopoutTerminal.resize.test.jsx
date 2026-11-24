@@ -309,4 +309,33 @@ describe("PopoutTerminal — resize dedupe (parity with TerminalPane)", () => {
     ]);
     vi.useRealTimers();
   });
+  it("follows a size another screen set until the user clicks the chip", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await renderPopout();
+    await act(async () => {
+      capturedResizeCallback();
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    wsSendSpy.mockClear();
+
+    await act(async () => {
+      wsInstance.onmessage?.({ data: '{"type":"resize","cols":100,"rows":30}' });
+    });
+    expect(mockTerm.resize).toHaveBeenCalledWith(100, 30);
+    expect(mockTerm.write).not.toHaveBeenCalledWith(expect.stringContaining("resize"));
+    const chip = document.querySelector('[data-testid="pane-foreign-size"]');
+    expect(chip).not.toBeNull();
+
+    // A layout change while following keeps the foreign size.
+    await act(async () => {
+      capturedResizeCallback();
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(sentResizes()).toHaveLength(0);
+
+    await act(async () => { chip.click(); });
+    expect(sentResizes()).toEqual([{ type: "resize", cols: 136, rows: 26 }]);
+    expect(document.querySelector('[data-testid="pane-foreign-size"]')).toBeNull();
+    vi.useRealTimers();
+  });
 });
